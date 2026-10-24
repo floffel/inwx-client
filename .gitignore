@@ -2,4 +2,5 @@
 Cargo.lock
 /fuzz/target
 /fuzz/Cargo.lock
+/fuzz/artifacts
 lcov.info
