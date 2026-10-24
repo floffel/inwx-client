@@ -1,0 +1,1 @@
+{"code":1000,"msg":"Command completed successfully","resData":{"record":[{"id":"1","name":"www","type":"A","content":"203.0.113.7","ttl":3600,"prio":0}]},"svTRID":"20260101-1","runtime":0.05}
