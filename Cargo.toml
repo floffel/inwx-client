@@ -1,0 +1,40 @@
+[package]
+name = "inwx-client"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "Apache-2.0 OR MIT"
+description = "Typed client for the INWX DomRobot JSON-RPC API: domains, DNS records, contacts and prices"
+repository = "https://github.com/floffel/inwx-client"
+documentation = "https://docs.rs/inwx-client"
+keywords = ["inwx", "domrobot", "dns", "domain", "api-client"]
+categories = ["api-bindings", "web-programming"]
+readme = "README.md"
+exclude = [".github/**", "deny.toml", "fuzz/**"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = ["http"]
+http = ["dep:reqwest", "dep:tokio"]
+
+[dependencies]
+idna = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+tokio = { version = "1", default-features = false, features = ["time"], optional = true }
+
+[dev-dependencies]
+proptest = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
