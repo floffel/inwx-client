@@ -420,6 +420,7 @@ async fn a_transport_that_always_fails_is_tried_exactly_three_times() {
             &self,
             _request: inwx_client::transport::Request<'_>,
         ) -> inwx_client::Result<Response> {
+            std::future::ready(()).await;
             Err(Error::transport("down"))
         }
     }

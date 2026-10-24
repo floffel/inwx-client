@@ -106,7 +106,7 @@ impl PriceList {
     ///
     /// ```
     /// use inwx_client::PriceList;
-    /// assert!(PriceList::default().is_empty());
+    /// assert_eq!(PriceList::default().len(), 0);
     /// ```
     #[must_use]
     pub fn is_empty(&self) -> bool {

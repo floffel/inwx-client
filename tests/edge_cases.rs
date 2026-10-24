@@ -294,7 +294,7 @@ fn rpc_parsing_survives_arbitrary_bodies() {
 #[test]
 fn a_request_with_non_object_params_is_sent_with_empty_params() {
     let request = RpcRequest::new("account.logout", &json!([1, 2, 3]));
-    assert!(request.params.is_empty());
+    assert_eq!(request.params.len(), 0);
 }
 
 #[test]

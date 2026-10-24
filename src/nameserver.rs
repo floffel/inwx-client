@@ -341,7 +341,7 @@ mod tests {
     fn zone_info_tolerates_missing_metadata() {
         let zone: ZoneInfo = serde_json::from_str(r#"{"domain":"x.de"}"#).unwrap();
         assert!(!zone.is_master());
-        assert!(zone.records.is_empty());
+        assert_eq!(zone.records.len(), 0);
     }
 
     #[test]

@@ -197,12 +197,12 @@ async fn list_records_tolerates_a_missing_or_malformed_record_list() {
     let transport = MockTransport::new();
     transport.ok(json!({ "domain": "example.com" }));
     let client = client(transport.clone());
-    assert!(client.list_records(&domain()).await.unwrap().is_empty());
+    assert_eq!(client.list_records(&domain()).await.unwrap().len(), 0);
 
     let transport = MockTransport::new();
     transport.ok(json!({ "record": { "not": "an array" } }));
     let client = common::client(transport);
-    assert!(client.list_records(&domain()).await.unwrap().is_empty());
+    assert_eq!(client.list_records(&domain()).await.unwrap().len(), 0);
 }
 
 #[tokio::test]

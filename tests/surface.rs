@@ -428,7 +428,7 @@ fn rpc_response_accessors() {
     assert_eq!(response.msg, "ok");
     assert_eq!(response.sv_trid.as_deref(), Some("abc"));
     assert_eq!(response.runtime, Some(0.5));
-    assert!(response.details.is_empty());
+    assert_eq!(response.details.len(), 0);
     assert!(response.reason_code.is_none());
     assert!(response.reason.is_none());
     assert_eq!(response.error_message(), "ok");
@@ -489,6 +489,7 @@ fn client_configuration_round_trips() {
     struct Never;
     impl Transport for Never {
         async fn execute(&self, _request: TRequest<'_>) -> inwx_client::Result<TResponse> {
+            std::future::ready(()).await;
             unreachable!("configuration only")
         }
     }
@@ -536,12 +537,12 @@ fn response_payload_types_are_constructible_and_comparable() {
     assert_eq!(check.clone(), check);
 
     let page = DomainListPage::default();
-    assert!(page.is_empty());
+    assert_eq!(page.len(), 0);
     assert_eq!(page.len(), 0);
     assert!(!page.has_more());
 
     let zones = ZoneListPage::default();
-    assert!(zones.zones.is_empty());
+    assert_eq!(zones.zones.len(), 0);
     assert!(zones.count.is_none());
 
     let zone = ZoneInfo::default();
@@ -560,10 +561,10 @@ fn response_payload_types_are_constructible_and_comparable() {
 
     let nameserver = NameserverCheck::default();
     assert!(!nameserver.is_ok());
-    assert!(nameserver.message.is_empty());
+    assert_eq!(nameserver.message.len(), 0);
 
     let info = DomainInfo::default();
-    assert!(info.domain.is_empty());
+    assert_eq!(info.domain.len(), 0);
     assert!(info.registrant_handle().is_none());
 
     let record = DnsRecord {
@@ -580,9 +581,9 @@ fn response_payload_types_are_constructible_and_comparable() {
     assert_eq!(record.priority(), 0);
 
     let price = TldPrice::default();
-    assert!(price.tld.is_empty());
+    assert_eq!(price.tld.len(), 0);
     let list = PriceList::default();
-    assert!(list.is_empty());
+    assert_eq!(list.len(), 0);
     assert!(list.find("de").is_none());
 
     let quote = DomainPriceQuote::default();

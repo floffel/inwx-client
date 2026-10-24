@@ -225,7 +225,7 @@ impl DomainListPage {
     ///
     /// ```
     /// use inwx_client::DomainListPage;
-    /// assert!(DomainListPage::default().is_empty());
+    /// assert_eq!(DomainListPage::default().len(), 0);
     /// ```
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -1323,7 +1323,7 @@ mod tests {
     fn domain_info_survives_sparse_payloads() {
         let info: DomainInfo = serde_json::from_str(r"{}").unwrap();
         assert!(info.ro_id.is_none());
-        assert!(info.nameservers.is_empty());
+        assert_eq!(info.nameservers.len(), 0);
         assert!(!info.is_delegated());
     }
 

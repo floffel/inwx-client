@@ -555,7 +555,7 @@ async fn an_empty_tld_list_asks_for_everything() {
     transport.ok(json!({"price": []}));
 
     let client = client(transport.clone());
-    assert!(client.tld_prices(&["", "."]).await.unwrap().is_empty());
+    assert_eq!(client.tld_prices(&["", "."]).await.unwrap().len(), 0);
     assert_eq!(transport.only_call().params, json!({}));
 }
 

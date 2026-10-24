@@ -839,6 +839,6 @@ mod tests {
         let odd: Sample = serde_json::from_str(r#"{"id":{},"flag":[],"names":{}}"#).unwrap();
         assert!(odd.id.is_none());
         assert!(odd.flag.is_none());
-        assert!(odd.names.is_empty());
+        assert_eq!(odd.names.len(), 0);
     }
 }
