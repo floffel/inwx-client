@@ -109,31 +109,23 @@ Every method below is implemented against the published INWX API documentation
   gone). A container without `ca-certificates` needs one installed, or a
   `Transport` of its own.
 
-## Deliberately out of scope
+## Known gaps (tracked as issues)
 
-These are documented INWX surfaces this crate does not model. Each is reachable
-through `InwxClient::call`, which keeps sessions, retries and error handling:
+Everything the INWX API documents is in scope. What is not implemented yet is tracked as an issue
+and worked down in order - the list below is the backlog, not a boundary:
 
-* **Registering and updating zones** (`nameserver.create`, `nameserver.update`,
-  `nameserver.clone`, `nameserver.export*`) — slave/secondary zones and URL
-  forwarding are a different workflow from record CRUD, and the parameters are
-  mostly mutually exclusive.
-* **Domain transfer, trade, push, restore, transfer cancel/out** — moves money
-  and ownership; a wrong call is not recoverable by retrying.
-* **Certificates, hosting, DynDNS, DNSSEC, tags, nameserver sets, accounting,
-  invoices, documents, PDFs, messages, applications, sub-accounts** — adjacent
-  products, each with its own object model.
-* **`domain.log`, `domain.stats`, `domain.getRules`, `domain.getTldGroups`,
-  `domain.getPromos`, `domain.getalldomainprices`, `domain.priceChanges`,
-  `contact.log`, `contact.sendcontactverification`, `nameserver.export*`** —
-  reporting and TLD metadata; `domain.getPrices` and `domain.getdomainprice`
-  cover the price questions this crate was written for.
-* **API-key authentication** — the public API documentation only describes
-  `account.login` with username and password, even though INWX markets API keys
-  elsewhere. Not implemented rather than guessed at (see *Unverified*).
-* **Automatic pagination** — `list_domains`, `list_contacts` and `list_zones_page`
-  take a page and return `count`, so the caller decides when to stop.
+- zone lifecycle (`nameserver.create` / `nameserver.update` / `nameserver.delete`) - [#11](https://github.com/floffel/inwx-client/issues/11)
+- domain transfer, trade, push, restore - [#12](https://github.com/floffel/inwx-client/issues/12)
+- certificates, hosting, DynDNS, DNSSEC, tags, nameserver sets, accounting - [#13](https://github.com/floffel/inwx-client/issues/13)
+- `domain.log`, `domain.stats`, `domain.getRules`, `domain.getTldGroups` - [#14](https://github.com/floffel/inwx-client/issues/14)
+- automatic pagination for the list endpoints - [#15](https://github.com/floffel/inwx-client/issues/15)
 
+Two items are genuinely outside the crate, and here is why rather than a label:
+
+- **API-key authentication** is marketed by INWX but not described in the public API documentation; we
+  will not guess a scheme. Revisit when the docs cover it.
+- **Live-endpoint verification** is not possible here (no credentials in CI); every test is offline
+  against recorded fixtures, and the README says so per endpoint.
 ## Unverified
 
 The API documentation was read, but **no call was made against a live endpoint**
