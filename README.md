@@ -102,7 +102,12 @@ Every method below is implemented against the published INWX API documentation
 * `http` (default) — `reqwest` with rustls and `tokio/time`, providing
   `ReqwestTransport`. Without it the crate is request building plus response
   parsing only: no TLS stack, no runtime, and `cargo build --no-default-features`
-  is enough to consume the types.
+  is enough to consume the types. The `reqwest` build is
+  `default-features = false, features = ["json", "rustls"]`: since `reqwest`
+  0.13 that means the rustls provider plus `rustls-platform-verifier`, so roots
+  come from the platform trust store (the bundled `webpki-roots` feature is
+  gone). A container without `ca-certificates` needs one installed, or a
+  `Transport` of its own.
 
 ## Deliberately out of scope
 
