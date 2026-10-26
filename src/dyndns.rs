@@ -34,9 +34,11 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
+use zeroize::Zeroizing;
 
 use crate::client::InwxClient;
 use crate::error::{Error, Result};
+use crate::password::Password;
 use crate::record::RecordId;
 use crate::transport::Transport;
 use crate::types::{de, validate_username, Hostname};
@@ -220,6 +222,9 @@ impl DynDnsCheck {
 
 /// A `dyndns.create` request.
 ///
+/// The password is zeroized on drop, compared in constant time and cannot be
+/// cloned.
+///
 /// ```
 /// use inwx_client::{DynDnsAccount, Hostname};
 ///
@@ -231,10 +236,10 @@ impl DynDnsCheck {
 /// assert_eq!(request.params()["hostname"][0], "home.example.net");
 /// # Ok::<(), inwx_client::Error>(())
 /// ```
-#[derive(Clone, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct DynDnsAccount {
     username: String,
-    password: String,
+    password: Password,
     hostnames: Vec<Hostname>,
     testing: bool,
 }
@@ -263,20 +268,9 @@ impl DynDnsAccount {
         password: impl Into<String>,
         hostnames: &[Hostname],
     ) -> Result<Self> {
+        let password = Zeroizing::new(password.into());
         validate_username("dyndns.username", username)?;
-        let password = password.into();
-        if password.is_empty() || password.chars().count() > 64 {
-            return Err(Error::validation(
-                "dyndns.password",
-                "must be 1 to 64 characters",
-            ));
-        }
-        if password.chars().any(char::is_control) {
-            return Err(Error::validation(
-                "dyndns.password",
-                "must not contain control characters",
-            ));
-        }
+        let password = Password::from_zeroizing("dyndns.password", password, Some(64))?;
         if hostnames.is_empty() {
             return Err(Error::validation(
                 "dyndns.hostname",
@@ -340,7 +334,7 @@ impl DynDnsAccount {
     pub fn params(&self) -> Value {
         json!({
             "username": self.username,
-            "password": self.password,
+            "password": self.password.expose(),
             "hostname": self.hostnames.iter().map(Hostname::as_str).collect::<Vec<_>>(),
             "testing": self.testing,
         })
@@ -471,17 +465,12 @@ impl<T: Transport> InwxClient<T> {
         username: &str,
         password: impl Into<String>,
     ) -> Result<()> {
+        let password = Zeroizing::new(password.into());
         validate_username("dyndns.username", username)?;
-        let password = password.into();
-        if password.is_empty() || password.chars().count() > 64 {
-            return Err(Error::validation(
-                "dyndns.password",
-                "must be 1 to 64 characters",
-            ));
-        }
+        let password = Password::from_zeroizing("dyndns.password", password, Some(64))?;
         self.call(
             "dyndns.changepassword",
-            json!({ "username": username.trim(), "password": password }),
+            json!({ "username": username.trim(), "password": password.expose() }),
         )
         .await?;
         Ok(())
@@ -781,6 +770,21 @@ mod tests {
         let rendered = format!("{account:?}");
         assert!(rendered.contains("tenant-42"));
         assert!(!rendered.contains("hunter2"));
+    }
+
+    #[test]
+    fn accounts_compare_by_username_password_and_hostnames() {
+        let account =
+            DynDnsAccount::create("tenant-42", "hunter2", &[host("a.example.net")]).unwrap();
+        let same = DynDnsAccount::create("tenant-42", "hunter2", &[host("a.example.net")]).unwrap();
+        let other_password =
+            DynDnsAccount::create("tenant-42", "hunter3", &[host("a.example.net")]).unwrap();
+        let other_host =
+            DynDnsAccount::create("tenant-42", "hunter2", &[host("b.example.net")]).unwrap();
+
+        assert_eq!(account, same);
+        assert_ne!(account, other_password);
+        assert_ne!(account, other_host);
     }
 
     #[test]

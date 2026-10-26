@@ -10,10 +10,12 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
+use crate::password::Password;
 use crate::rpc::{RpcRequest, RpcResponse};
 use crate::transport::{Request, Response, Transport};
 use crate::types::de;
@@ -86,7 +88,9 @@ impl std::str::FromStr for Language {
 ///
 /// Both fields are checked at construction: an empty username or password would
 /// make every call fail with a confusing API error, and a control character
-/// would let a value escape its JSON string into a header.
+/// would let a value escape its JSON string into a header. The password is
+/// zeroized when the credentials are dropped, compared in constant time, and
+/// cannot be cloned.
 ///
 /// ```
 /// use inwx_client::Credentials;
@@ -97,10 +101,20 @@ impl std::str::FromStr for Language {
 /// assert!(Credentials::new("florian", "with\nnewline").is_err());
 /// # Ok::<(), inwx_client::Error>(())
 /// ```
-#[derive(Clone, PartialEq, Eq)]
+///
+/// Cloning is deliberately not implemented, because a copy of the password
+/// would live outside the zeroizing original:
+///
+/// ```compile_fail
+/// use inwx_client::Credentials;
+///
+/// let credentials = Credentials::new("user", "pass").unwrap();
+/// let _copy = credentials.clone();
+/// ```
+#[derive(PartialEq, Eq)]
 pub struct Credentials {
     username: String,
-    password: String,
+    password: Password,
 }
 
 impl Credentials {
@@ -113,16 +127,12 @@ impl Credentials {
     /// unbounded — neither is truncated here).
     pub fn new(username: impl Into<String>, password: impl Into<String>) -> Result<Self> {
         let username = username.into();
-        let password = password.into();
+        // Move the password into zeroizing storage before any fallible checks,
+        // so an invalid username cannot leave a plaintext copy behind.
+        let password = Zeroizing::new(password.into());
         if username.trim().is_empty() {
             return Err(Error::validation(
                 "credentials.username",
-                "must not be empty",
-            ));
-        }
-        if password.is_empty() {
-            return Err(Error::validation(
-                "credentials.password",
                 "must not be empty",
             ));
         }
@@ -132,6 +142,7 @@ impl Credentials {
                 "must not contain control characters",
             ));
         }
+        let password = Password::from_zeroizing("credentials.password", password, None)?;
         Ok(Self { username, password })
     }
 
@@ -662,18 +673,16 @@ impl<T: Transport> InwxClient<T> {
     /// login but sends no cookie.
     pub async fn login(&self) -> Result<()> {
         let credentials = self.credentials.as_ref().ok_or(Error::NotAuthenticated)?;
-        let mut params = Map::new();
-        params.insert(
-            "user".to_owned(),
-            Value::String(credentials.username.clone()),
-        );
-        params.insert(
-            "pass".to_owned(),
-            Value::String(credentials.password.clone()),
-        );
-        self.add_language(&mut params);
+        let body = Zeroizing::new(serde_json::to_vec(&LoginRequest {
+            method: "account.login",
+            params: LoginParams {
+                user: &credentials.username,
+                pass: credentials.password.expose(),
+                lang: self.language.map(Language::as_str),
+            },
+        })?);
 
-        let response = self.send("account.login", params).await?;
+        let response = self.send_body(&body).await?;
         let envelope = RpcResponse::parse(response.body())?;
         envelope.into_result()?;
 
@@ -865,14 +874,18 @@ impl<T: Transport> InwxClient<T> {
     async fn send(&self, method: &str, params: Map<String, Value>) -> Result<Response> {
         let mut params = params;
         self.add_language(&mut params);
-        let body = RpcRequest::new(method, &Value::Object(params)).to_bytes()?;
+        let body = Zeroizing::new(RpcRequest::new(method, &Value::Object(params)).to_bytes()?);
+        self.send_body(&body).await
+    }
 
+    /// Sends an already serialised JSON-RPC body.
+    async fn send_body(&self, body: &[u8]) -> Result<Response> {
         let cookie = self
             .session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let mut request = Request::post_json(&self.base_url, &body)
+        let mut request = Request::post_json(&self.base_url, body)
             .with_header("Content-Type", "application/json")
             .with_header("Accept", "application/json")
             .with_header(
@@ -893,6 +906,22 @@ impl<T: Transport> InwxClient<T> {
                 .or_insert_with(|| Value::String(language.as_str().to_owned()));
         }
     }
+}
+
+/// The `account.login` envelope, serialised straight from the borrowed secret.
+#[derive(Serialize)]
+struct LoginRequest<'a> {
+    method: &'static str,
+    params: LoginParams<'a>,
+}
+
+/// Parameters for `account.login`.
+#[derive(Serialize)]
+struct LoginParams<'a> {
+    user: &'a str,
+    pass: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lang: Option<&'static str>,
 }
 
 /// Methods that may be called without a session.
@@ -976,10 +1005,37 @@ mod tests {
     }
 
     #[test]
+    fn credentials_compare_by_username_and_password() {
+        let credentials = Credentials::new("user", "hunter2").unwrap();
+        let same = Credentials::new("user", "hunter2").unwrap();
+        let other_password = Credentials::new("user", "hunter3").unwrap();
+        let other_user = Credentials::new("other", "hunter2").unwrap();
+
+        assert_eq!(credentials, same);
+        assert_ne!(credentials, other_password);
+        assert_ne!(credentials, other_user);
+    }
+
+    #[test]
     fn credentials_reject_control_characters() {
-        assert!(Credentials::new("us\ner", "pass").is_err());
-        assert!(Credentials::new("user", "pa\rss").is_err());
+        for (user, password) in [("us\ner", "pass"), ("user", "pa\rss")] {
+            let error = Credentials::new(user, password).unwrap_err();
+            assert!(matches!(
+                error,
+                Error::Validation {
+                    field: "credentials",
+                    ..
+                }
+            ));
+        }
         assert!(Credentials::new("  ", "pass").is_err());
+        assert!(matches!(
+            Credentials::new("user", "").unwrap_err(),
+            Error::Validation {
+                field: "credentials.password",
+                ..
+            }
+        ));
     }
 
     #[test]

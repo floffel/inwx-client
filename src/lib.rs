@@ -80,6 +80,8 @@
 //! * Credentials and session cookies are redacted in `Debug` — [`Credentials`]
 //!   prints `<redacted>` for the password, [`InwxClient`] prints only whether a
 //!   session exists.
+//! * Passwords are zeroized when dropped, cannot be cloned, and compare through
+//!   `subtle` in constant time.
 //! * The password is only ever sent in the `account.login` body, never in a URL
 //!   or a header; afterwards the opaque session cookie is the only credential on
 //!   the wire.
@@ -110,6 +112,7 @@ pub mod error;
 pub mod hosting;
 pub mod nameserver;
 pub mod nameserverset;
+mod password;
 pub mod price;
 pub mod record;
 pub mod rpc;

@@ -3,9 +3,9 @@
 
 use inwx_client::{
     parse_ip, AuthCode, CertificateId, CertificateOrder, CertificateTerm, CertificateUpdate,
-    DnsKey, DnssecKeyQuery, DomainName, DsRecord, Email, Handle, HostingPeriod, Hostname,
-    NameserverSetCreate, NameserverSetType, PostalDelivery, RefundRequest, StatementQuery,
-    TagUpdate, Timestamp, ZoneCreate, ZoneUpdate,
+    DnsKey, DnssecKeyQuery, DomainName, DsRecord, DynDnsAccount, Email, Handle, HostingPeriod,
+    Hostname, NameserverSetCreate, NameserverSetType, PostalDelivery, RefundRequest,
+    StatementQuery, TagUpdate, Timestamp, ZoneCreate, ZoneUpdate,
 };
 
 fn domain(name: &str) -> DomainName {
@@ -106,6 +106,21 @@ fn auth_code_boundaries() {
     for bad in ["", " ", "with space", "line\nbreak", "Ümlaut", "two words"] {
         assert!(AuthCode::new(bad).is_err(), "{bad:?}");
     }
+}
+
+// ------------------------------------------------------------------ dyndns --
+
+#[test]
+fn dyndns_password_boundaries() {
+    let host = Hostname::parse("home.example.net").unwrap();
+    for length in [1, 63, 64] {
+        assert!(
+            DynDnsAccount::create("tenant-42", "x".repeat(length), std::slice::from_ref(&host))
+                .is_ok(),
+            "a {length}-character password is valid"
+        );
+    }
+    assert!(DynDnsAccount::create("tenant-42", "x".repeat(65), &[host]).is_err());
 }
 
 // ------------------------------------------------------------------ handles --

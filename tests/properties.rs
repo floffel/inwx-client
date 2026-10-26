@@ -4,7 +4,8 @@
 mod common;
 
 use inwx_client::{
-    DomainName, Hostname, Period, RecordId, RecordSpec, RecordType, RpcResponse, MAX_TTL,
+    Credentials, DomainName, DynDnsAccount, Hostname, Period, RecordId, RecordSpec, RecordType,
+    RpcResponse, MAX_TTL,
 };
 use proptest::prelude::*;
 use serde_json::Value;
@@ -21,6 +22,33 @@ fn any_text() -> impl Strategy<Value = String> {
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// Credentials accept exactly the non-empty, control-free pair and compare
+    /// by value.
+    #[test]
+    fn credentials_keep_their_invariants(user in any_text(), password in any_text()) {
+        let accepted = !user.trim().is_empty() && !password.is_empty();
+        let credentials = Credentials::new(&user, &password);
+        prop_assert_eq!(credentials.is_ok(), accepted);
+        if let Ok(credentials) = credentials {
+            let repeat = Credentials::new(&user, &password).unwrap();
+            prop_assert_eq!(credentials, repeat);
+        }
+    }
+
+    /// DynDNS passwords use the documented 1–64 character range.
+    #[test]
+    fn dyndns_passwords_follow_the_text64_limit(
+        user in "[A-Za-z0-9_-]{5,42}",
+        password in any_text(),
+    ) {
+        let host = Hostname::parse("home.example.net").unwrap();
+        let accepted = (1..=64).contains(&password.chars().count());
+        prop_assert_eq!(
+            DynDnsAccount::create(&user, &password, &[host]).is_ok(),
+            accepted
+        );
+    }
 
     /// Display and parse are inverses for every known type.
     #[test]
