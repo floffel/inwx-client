@@ -145,7 +145,7 @@ async fn dnssec_info_sends_the_domain_filter_and_parses_the_states() {
     assert_eq!(states[0].status.as_str(), "MANUAL");
 
     let all = client.dnssec_info(None).await.unwrap();
-    assert!(all.is_empty());
+    assert_eq!(all.len(), 0);
 
     let calls = transport.calls();
     assert_eq!(calls[0].method, "dnssec.info");
@@ -331,7 +331,7 @@ async fn nameserver_set_info_and_list() {
     assert_eq!(sets.len(), 1);
 
     let wide = client.list_nameserver_sets(false, 2, 50).await.unwrap();
-    assert!(wide.is_empty());
+    assert_eq!(wide.len(), 0);
 
     let calls = transport.calls();
     assert_eq!(calls[0].method, "nameserverset.info");
@@ -391,7 +391,7 @@ async fn tag_lifecycle_commands_send_their_ids() {
     assert_eq!(tagged[0].count.domain, Some(2));
 
     let empty = client.list_tags(None, None).await.unwrap();
-    assert!(empty.is_empty());
+    assert_eq!(empty.len(), 0);
 
     let calls = transport.calls();
     assert_eq!(calls[0].method, "tag.create");

@@ -156,7 +156,7 @@ async fn certificate_commands_send_their_ids() {
     assert_eq!(missing.certificate_id.as_deref(), Some("9"));
 
     let log = client.certificate_log(None).await.unwrap();
-    assert!(log.is_empty());
+    assert_eq!(log.len(), 0);
 
     let updated = client
         .update_certificate_order(

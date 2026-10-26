@@ -226,7 +226,7 @@ fn permissive_scalars_cover_their_fallbacks() {
     let certificate: Certificate =
         serde_json::from_str(r#"{"commonName":["a.com",{}],"san":null}"#).unwrap();
     assert_eq!(certificate.common_name, ["a.com"]);
-    assert!(certificate.san_list().is_empty());
+    assert_eq!(certificate.san_list().len(), 0);
 }
 
 #[test]
@@ -394,18 +394,24 @@ async fn dnssec_answers_without_arrays_are_tolerated() {
     transport.ok(json!({ "dnskey": {} }));
 
     let client = client(transport);
-    assert!(client.dnssec_info(None).await.unwrap().is_empty());
-    assert!(client
-        .list_dns_keys(&DnssecKeyQuery::new())
-        .await
-        .unwrap()
-        .is_empty());
-    assert!(client.dnssec_info(None).await.unwrap().is_empty());
-    assert!(client
-        .list_dns_keys(&DnssecKeyQuery::new())
-        .await
-        .unwrap()
-        .is_empty());
+    assert_eq!(client.dnssec_info(None).await.unwrap().len(), 0);
+    assert_eq!(
+        client
+            .list_dns_keys(&DnssecKeyQuery::new())
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(client.dnssec_info(None).await.unwrap().len(), 0);
+    assert_eq!(
+        client
+            .list_dns_keys(&DnssecKeyQuery::new())
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -494,11 +500,14 @@ async fn certificate_answers_without_arrays_are_tolerated() {
         1
     );
     assert_eq!(client.certificate_log(None).await.unwrap().len(), 1);
-    assert!(client
-        .list_certificates(&CertificateQuery::new())
-        .await
-        .unwrap()
-        .is_empty());
+    assert_eq!(
+        client
+            .list_certificates(&CertificateQuery::new())
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -581,7 +590,7 @@ async fn accounting_answers_without_arrays_are_tolerated() {
     transport.ok(json!({}));
 
     let invoices = client(transport).list_invoices().await.unwrap();
-    assert!(invoices.is_empty());
+    assert_eq!(invoices.len(), 0);
 }
 
 #[tokio::test]
@@ -591,8 +600,8 @@ async fn hosting_answers_without_arrays_are_tolerated() {
     transport.ok(json!({}));
 
     let client = client(transport);
-    assert!(client.list_hosting().await.unwrap().is_empty());
-    assert!(client.hosting_prices().await.unwrap().is_empty());
+    assert_eq!(client.list_hosting().await.unwrap().len(), 0);
+    assert_eq!(client.hosting_prices().await.unwrap().len(), 0);
     assert_eq!(
         HostingOrder::existing(5).unwrap().dry_run().params()["testing"],
         true
@@ -606,11 +615,14 @@ async fn nameserver_set_answers_without_arrays_are_tolerated() {
     transport.ok(json!({ "id": 9, "ns": [] }));
 
     let client = client(transport);
-    assert!(client
-        .list_nameserver_sets(true, 1, 10)
-        .await
-        .unwrap()
-        .is_empty());
+    assert_eq!(
+        client
+            .list_nameserver_sets(true, 1, 10)
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
     // A set without `type` defaults to PRIMARY.
     let set: NameserverSet = client.nameserver_set_info(9).await.unwrap();
     assert_eq!(set.set_type, NameserverSetType::Primary);
@@ -640,7 +652,7 @@ async fn dyndns_answers_without_arrays_are_tolerated() {
             .len(),
         1
     );
-    assert!(client.list_dyndns(None).await.unwrap().is_empty());
+    assert_eq!(client.list_dyndns(None).await.unwrap().len(), 0);
 }
 
 #[tokio::test]
@@ -669,11 +681,14 @@ async fn dyndns_subscription_answers_are_tolerated() {
         client.list_dyndns_subscriptions(1, 5).await.unwrap().len(),
         1
     );
-    assert!(client
-        .list_dyndns_subscription_products(1, 5)
-        .await
-        .unwrap()
-        .is_empty());
+    assert_eq!(
+        client
+            .list_dyndns_subscription_products(1, 5)
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -729,7 +744,7 @@ fn remaining_public_accessors_and_parsers() {
 fn listing_helpers_report_empty_and_full_pages() {
     let page: inwx_client::DomainListPage =
         serde_json::from_str(r#"{"count":0,"domain":[]}"#).unwrap();
-    assert!(page.is_empty());
+    assert_eq!(page.len(), 0);
     assert_eq!(page.len(), 0);
     assert!(!page.has_more());
 

@@ -314,12 +314,12 @@ fn handles_and_ext_data_are_validated() {
     assert_eq!(i64::from(Handle::new(7).unwrap()), 7);
 
     let mut extra = ExtData::new();
-    assert!(extra.is_empty());
+    assert_eq!(extra, ExtData::new());
     assert!(extra.set("lower", "x").is_err());
     assert!(extra.set("WITH SPACE", "x").is_err());
     assert!(extra.set("OK", "").is_err());
     assert!(extra.birth_date("1990-02-30").is_err());
     assert!(extra.birth_city(&"x".repeat(65)).is_err());
-    assert!(extra.params().as_object().unwrap().is_empty());
+    assert_eq!(extra.params().as_object().unwrap().len(), 0);
     assert_eq!(ExtData::new(), ExtData::default());
 }

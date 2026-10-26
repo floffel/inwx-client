@@ -374,7 +374,7 @@ async fn find_zones_sends_the_wildcard_filter() {
         .find_zones("tenant-*")
         .await
         .unwrap();
-    assert!(page.zones.is_empty());
+    assert_eq!(page.zones.len(), 0);
 
     let call = transport.only_call();
     assert_eq!(call.method, "nameserver.list");
@@ -505,9 +505,9 @@ fn record_set_rejects_exact_duplicates_and_keeps_parameters() {
 #[test]
 fn record_set_records_and_emptiness_are_observable() {
     let empty = RecordSet::new().unwrap();
-    assert!(empty.is_empty());
+    assert_eq!(empty.len(), 0);
     assert_eq!(empty.records().len(), 0);
-    assert!(empty.params_for(&domain("a.de")).is_empty());
+    assert_eq!(empty.params_for(&domain("a.de")).len(), 0);
 
     let one = RecordSet::from_records(vec![RecordSpec::txt("@", "x").unwrap()]).unwrap();
     assert!(!one.is_empty());
