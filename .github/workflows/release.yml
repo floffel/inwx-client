@@ -40,7 +40,11 @@ jobs:
         id: published
         run: |
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-          status=$(curl -s -o /dev/null -w '%{http_code}' "https://crates.io/api/v1/crates/inwx-client/$version")
+          # crates.io rejects requests without a User-Agent (403), which would
+          # otherwise look like "unknown state" and block every release.
+          status=$(curl -s -A "inwx-client-release-workflow (github.com/floffel/inwx-client)" \
+            -o /dev/null -w '%{http_code}' \
+            "https://crates.io/api/v1/crates/inwx-client/$version")
           echo "crates.io answered $status for $version"
           case "$status" in
             200) echo "skip=true" >> "$GITHUB_OUTPUT" ;;
