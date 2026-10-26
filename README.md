@@ -103,9 +103,12 @@ Every method below is implemented against the published INWX API documentation
   it, and on `2200`/`2201`/`2202` (or HTTP 401/403) it logs in once more before
   giving up. Concurrent first calls may each open a session — harmless, and the
   alternative (holding a lock across an await) buys nothing here.
-* **Bounded retries.** Three attempts, exponential backoff from 500 ms to 8 s,
-  only for transport failures, HTTP 429/5xx and result code `2300` (object pending
-  transfer). A rejected command is never repeated.
+* **Bounded retries, never blind replays.** Three attempts, exponential backoff
+  from 500 ms to 8 s, for failures known to precede command execution, HTTP 429,
+  idempotent 5xx/transport failures and result code `2300` (object pending
+  transfer). A mutating command whose outcome is unknown after a timeout or 5xx
+  returns `Error::Ambiguous` rather than risking a duplicate registration, record
+  change or refund.
 
 ## Feature flags
 

@@ -469,6 +469,12 @@ fn error_helpers_cover_every_branch() {
     };
     assert!(!transport.is_retryable());
 
+    let ambiguous = Error::ambiguous("timeout");
+    assert!(ambiguous.is_ambiguous());
+    assert!(!ambiguous.is_retryable());
+    assert!(ambiguous.to_string().contains("timeout"));
+    assert!(!Error::transport("refused").is_ambiguous());
+
     let missing = Error::MissingField {
         method: "domain.info",
         field: "resData.id",
