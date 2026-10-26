@@ -1,7 +1,8 @@
 # inwx-client
 
 Typed Rust client for the [INWX](https://www.inwx.com) DomRobot JSON-RPC API —
-domains, DNS records, contacts and prices.
+zones and DNS records, domain transfers and ownership changes, certificates,
+hosting, DNSSEC, tags, nameserver sets, DynDNS, accounting, contacts and prices.
 
 INWX is a German registrar and DNS provider. One endpoint
 (`https://api.domrobot.com/jsonrpc/`, sandbox: `https://api.ote.domrobot.com/jsonrpc/`)
@@ -12,7 +13,7 @@ correctly — a non-success code is an `Error::Api`, not a parse problem.
 
 ```toml
 [dependencies]
-inwx-client = "0.1"
+inwx-client = "0.2"
 ```
 
 ## Quickstart
@@ -60,14 +61,23 @@ Nothing above needs a socket to compile or test: the HTTP layer sits behind the
 ## What is covered
 
 Every method below is implemented against the published INWX API documentation
-(`account.inwx.de/en/help/apidoc`, chapters 1–4).
+(`account.inwx.com/en/help/apidoc`, chapters 1–4), and every shape is recorded in
+[`docs/contracts.md`](docs/contracts.md) with the table it came from.
 
 | Area | Methods / types | Notes |
 | --- | --- | --- |
 | Session | `account.login`, `account.logout`, `account.check` (implicit), `account.info` | cookie session, lazy login, one re-login on `2200`/`2201`/`2202` |
 | Domains | `domain.check`, `domain.create`, `domain.info`, `domain.list`, `domain.update`, `domain.renew`, `domain.delete`, `domain.whois` | auth code (`authCode`) via `domain.info wide=1`; renewal mode and transfer lock via `domain.update` |
-| DNS records | `nameserver.info` (read), `nameserver.createRecord`, `nameserver.updateRecord`, `nameserver.deleteRecord` | typed payloads per record type, multi-id updates |
-| Zones | `nameserver.list`, `nameserver.info`, `nameserver.delete`, `nameserver.check` | zone *creation* is out of scope, see below |
+| Ownership | `domain.transfer`, `domain.trade`, `domain.push`, `domain.restore`, `domain.transfercancel`, `domain.transferOut` | typed builders behind an `Irreversible` acknowledgement that names the action and the domain; auth codes redacted in `Debug` |
+| Zones | `nameserver.create`, `nameserver.update`, `nameserver.delete`, `nameserver.clone`, `nameserver.list`, `nameserver.info`, `nameserver.check`, `nameserver.export`, `nameserver.exportlist`, `nameserver.exportrecords` | `ZoneCreate`/`ZoneUpdate` builders; an update sends only what changed and can never touch a record |
+| DNS records | `nameserver.info` (read), `nameserver.createRecord`, `nameserver.updateRecord`, `nameserver.deleteRecord` | typed payloads per record type, multi-id updates, `RecordSet` for the set-level rules (apex CNAME, CNAME siblings, duplicates) |
+| Certificates | `certificate.create`, `cancel`, `getProduct`, `info`, `list`, `listProducts`, `listRemainingNeededData`, `log`, `reissue`, `renew`, `setAutorenew`, `setresendapproval`, `updateOrder` | order + `missing` completion flow; a CSR is refused if it carries a private key |
+| Hosting | `hosting.create`, `cancel`, `controlPanel`, `getPrices`, `issuspended`, `list`, `reinstate`, `unsuspend`, `updatePeriod` | billing periods restricted to 1/3/6/12/18/24 months |
+| DNSSEC | `dnssec.enablednssec`, `disablednssec`, `adddnskey`, `deletednskey`, `deleteall`, `info`, `listkeys` | DNSKEY/DS presentation strings parsed and checked; only `ZONE+SEP` keys (flag 257) accepted |
+| Tags | `tag.create`, `delete`, `info`, `list`, `update` | a rename cannot be combined with add/remove (the API would silently drop them) |
+| Nameserver sets | `nameserverset.create`, `delete`, `info`, `list`, `update` | `PRIMARY`/`SECONDARY`/`EXTERNAL`, duplicate nameservers refused |
+| DynDNS | `dyndns.changepassword`, `check`, `create`, `delete`, `info`, `list`, `log`, `updateRecord`; `dyndnssubscription.create`, `cancel`, `list`, `listProducts` | usernames restricted to the documented 5–42 characters |
+| Accounting | `accounting.accountBalance`, `creditLogById`, `getInvoice`, `getPreviewInvoice`, `getReceipt`, `getstatement`, `listInvoices`, `lockedFunds`, `log`, `refund`, `sendbypost` | PDFs decoded from base64 (`Document::pdf_bytes`); `refund` needs the acknowledgement |
 | Contacts | `contact.create`, `contact.info`, `contact.list`, `contact.update`, `contact.delete` | documented field lengths and country codes enforced |
 | Prices | `domain.getPrices`, `domain.getdomainprice` | `f64` quotes, not amounts to sum |
 | Anything else | `InwxClient::call(method, params)` | login, cookies, retries and error envelopes still apply |
@@ -75,9 +85,9 @@ Every method below is implemented against the published INWX API documentation
 ### Design
 
 * **Validate before you send.** `DomainName`, `Hostname`, `RecordSpec`,
-  `ContactRequest`, `Period` and the update builders reject what the API would
-  reject, so a typo is a local error instead of a charged registration or an
-  `2004 Parameter value range error`. `A` records must carry IPv4, `AAAA` IPv6,
+  `RecordSet`, `ZoneCreate`, `ZoneUpdate`, `ContactRequest`, `Period` and the
+  update builders reject what the API would reject, so a typo is a local error
+  instead of a charged registration or an `2004 Parameter value range error`. `A` records must carry IPv4, `AAAA` IPv6,
   `CNAME`/`MX`/`NS`/`PTR`/`SRV` a host name (an IP literal is refused), TTLs must
   fit the documented `int`, and the record name rules allow `@`, `*` and
   `_service` labels while refusing whitespace and control characters.
@@ -114,11 +124,10 @@ Every method below is implemented against the published INWX API documentation
 Everything the INWX API documents is in scope. What is not implemented yet is tracked as an issue
 and worked down in order - the list below is the backlog, not a boundary:
 
-- zone lifecycle (`nameserver.create` / `nameserver.update` / `nameserver.delete`) - [#11](https://github.com/floffel/inwx-client/issues/11)
-- domain transfer, trade, push, restore - [#12](https://github.com/floffel/inwx-client/issues/12)
-- certificates, hosting, DynDNS, DNSSEC, tags, nameserver sets, accounting - [#13](https://github.com/floffel/inwx-client/issues/13)
 - `domain.log`, `domain.stats`, `domain.getRules`, `domain.getTldGroups` - [#14](https://github.com/floffel/inwx-client/issues/14)
 - automatic pagination for the list endpoints - [#15](https://github.com/floffel/inwx-client/issues/15)
+- reseller/partner objects (`application.*`, `authinfo2.*`, `customer.*`, `document.*`, `host.*`,
+  `message.*`, `news.*`, `nichandle.*`, `pdf.*`) - [#22](https://github.com/floffel/inwx-client/issues/22)
 
 Two items are genuinely outside the crate, and here is why rather than a label:
 
@@ -141,6 +150,13 @@ documentation does not state:
 | `nameserver.info` returning the record array | documented (Table 2.208) and implemented; that it *also* serves as the record listing (there is no `nameserver.listRecords`) is an inference from the documented method list. |
 | Prices as `float` | documented; parsed as `f64` and accepted from strings. Display-only: use the amount returned by `create`/`renew` for accounting. |
 | `domain.getdomainprice` response shape | documented as `resData.domain[]`; older flat shapes are tolerated by the parser. |
+| `nameserver.create` with `type=MASTER` and no `ns` | **unverified** — `ns` is optional in the docs; what INWX assigns in that case is not stated. Sent as documented. |
+| `dyndns.updateRecord` account selection | **unverified** — Table 2.159 lists only `ipAddress` and `ipAddressV6`; no account selector is documented. Sent exactly as documented. |
+| `hosting.getPrices` price fields | **unverified** — Table 2.181 lists only `id` and `product`, so no price is modelled. |
+| `certificate.log` answer wrapper | **unverified** — flat fields documented; the parser accepts an array or a single object. |
+| `tag.list` `count.domain` nesting | **unverified** — the table's indentation is ambiguous; both shapes are tolerated. |
+| `dyndnssubscription.cancel` id semantics | **unverified** — Table 2.161 types `id` as "the customer's subscription id", while `create` uses the same name for the plan id; the crate takes two separate parameters so the two cannot be confused. |
+| Every 0.2.0 write against a live endpoint | **unverified** — no credentials in CI; method names, parameters and datatypes come from the tables in `docs/contracts.md`. |
 | Unicode → punycode | UTS-46 mapping via `idna`, so emoji become punycode and characters the mapping deletes disappear. The ACE form (`DomainName::as_str`) is what is sent, logged and compared. |
 
 Two methods the predecessor implementation called do **not** exist in the
@@ -161,13 +177,16 @@ documented API and were replaced: `domain.cancel` (use `domain.delete` or
 * Credentials and session cookies are rejected if they contain control
   characters, so a value cannot smuggle a second header; the same check guards
   record content and update fields.
+* `AuthCode` (the EPP transfer code) prints `<redacted>` in `Debug` and
+  `Display`; `DynDnsAccount` redacts its password. A certificate CSR is refused
+  if it contains a private key — the field takes a signing request only.
 * Retries are bounded and only apply to transient failures, so a rejected
   registration cannot be submitted three times.
 
 ## Testing
 
 ```bash
-cargo test                        # unit + integration + 229 doctests, no network
+cargo test                        # unit + integration + 657 doctests, no network
 cargo test --no-default-features  # the same, without reqwest/tokio
 cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --no-deps --all-features
@@ -183,11 +202,20 @@ cargo +nightly fuzz run parse_response
   zones, prices, plus an edge-case matrix (empty credentials, malformed session
   ids, IP-in-hostname, TTL bounds, unicode/emoji domains, over-long names,
   truncated error bodies) and a 32-task concurrency test.
+  Every 0.2.0 method has its own recording test asserting the method name and the
+  exact parameters (`tests/zones.rs`, `tests/ownership.rs`, `tests/services.rs`,
+  `tests/certificates.rs`); `tests/limits.rs` is the boundary matrix (63/64-byte
+  label, 253/254-byte name, empty label, TTL bounds, IDN form, per-type record
+  values, CSR size, auth-code and email shapes) and `tests/coverage.rs` calls the
+  `Display`/`FromStr`/serde impls and error branches that doctests exercise —
+  `cargo llvm-cov` does not count doctests.
 * **Property** (`proptest`) — builders and parsers never panic over arbitrary
-  input; status classification always agrees with `into_result`.
-* **Coverage** — 98.6 % lines / 99.5 % functions without the `http` feature
-  (96.7 % / 97.7 % with it; the reqwest adapter is the only code that needs a
-  socket). CI gates at 95 %.
+  input; accepted enum values round-trip through `Display`/`FromStr`; accepted
+  emails and timestamps round-trip; zone params survive a JSON round trip;
+  `RecordSet` never accepts an apex CNAME; an `Irreversible` acknowledgement only
+  builds the request whose action it names.
+* **Coverage** — 98.6 % lines / 99.6 % functions without the `http` feature. CI
+  gates at 95 %; the reqwest adapter is the only code that needs a socket.
 * **Fuzz** — `fuzz/fuzz_targets/parse_response.rs` feeds arbitrary bytes through
   the JSON-RPC parser and every typed decoder on `resData`; seeded with success,
   pending, error and hostile-shape bodies.
