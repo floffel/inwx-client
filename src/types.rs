@@ -644,6 +644,585 @@ pub(crate) fn reject_control_chars(field: &'static str, value: &str) -> Result<(
     Ok(())
 }
 
+/// A `token255` value: 1–255 characters, no newline, no control characters.
+///
+/// The INWX documentation types a large number of request fields this way
+/// (redirect titles, nameserver-set names, hosting ids). Rejecting the
+/// out-of-range values locally keeps a typo from becoming an `2005` from the
+/// API after the request has already travelled.
+pub(crate) fn validate_token(field: &'static str, value: &str) -> Result<()> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(Error::validation(field, "must not be empty"));
+    }
+    if trimmed.chars().count() > 255 {
+        return Err(Error::validation(field, "must be at most 255 characters"));
+    }
+    reject_control_chars(field, trimmed)?;
+    if trimmed.contains('\n') || trimmed.contains('\r') {
+        return Err(Error::validation(
+            field,
+            "must not contain newline characters",
+        ));
+    }
+    Ok(())
+}
+
+/// A `text`/`textNNNN` value: 1–`max` characters, newlines allowed.
+pub(crate) fn validate_text(field: &'static str, value: &str, max: usize) -> Result<()> {
+    if value.trim().is_empty() {
+        return Err(Error::validation(field, "must not be empty"));
+    }
+    if value.chars().count() > max {
+        return Err(Error::validation(
+            field,
+            format!("must be at most {max} characters"),
+        ));
+    }
+    // `\t` is not a control character the API rejects, `\0` and friends are.
+    if value
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t')
+    {
+        return Err(Error::validation(
+            field,
+            "must not contain control characters",
+        ));
+    }
+    Ok(())
+}
+
+/// A contact handle id — the `int` INWX uses for `registrant`, `admin`, `tech`,
+/// `billing` and the certificate contacts.
+///
+/// Handles are positive; `0` and negatives are rejected before the request is
+/// built, because the API answers them with `2303 Object does not exist` only
+/// after the round trip.
+///
+/// ```
+/// use inwx_client::Handle;
+///
+/// let handle = Handle::new(991)?;
+/// assert_eq!(handle.get(), 991);
+/// assert_eq!(handle.to_string(), "991");
+/// assert!(Handle::new(0).is_err());
+/// assert!(Handle::new(-1).is_err());
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Handle(i64);
+
+impl Handle {
+    /// Validates a handle id.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the id is not positive.
+    pub fn new(id: i64) -> Result<Self> {
+        if id <= 0 {
+            return Err(Error::validation(
+                "handle",
+                format!("must be a positive contact handle, got {id}"),
+            ));
+        }
+        Ok(Self(id))
+    }
+
+    /// The id as sent on the wire.
+    ///
+    /// ```
+    /// use inwx_client::Handle;
+    /// assert_eq!(Handle::new(7)?.get(), 7);
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn get(self) -> i64 {
+        self.0
+    }
+}
+
+impl fmt::Display for Handle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
+
+impl TryFrom<i64> for Handle {
+    type Error = Error;
+
+    fn try_from(value: i64) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl From<Handle> for i64 {
+    fn from(value: Handle) -> Self {
+        value.0
+    }
+}
+
+impl Serialize for Handle {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_i64(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Handle {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let id = de::opt_i64(deserializer)?.ok_or_else(|| D::Error::custom("handle is missing"))?;
+        Self::new(id).map_err(D::Error::custom)
+    }
+}
+
+/// An email address, validated to the shape every INWX `email` parameter asks
+/// for (`soaEmail`, `hostmaster`, `validationEmail`).
+///
+/// The check is deliberately structural — one `@`, a non-empty local part using
+/// `[A-Za-z0-9._%+-]`, and a domain that passes [`Hostname`] validation. It
+/// cannot prove the mailbox exists; it only keeps obviously malformed values
+/// from being charged for.
+///
+/// ```
+/// use inwx_client::Email;
+///
+/// assert_eq!(Email::parse("Hostmaster@Example.COM")?.as_str(), "Hostmaster@Example.COM");
+/// for bad in ["", "hostmaster", "a@b", "a b@example.com", "@example.com", "a@"] {
+///     assert!(Email::parse(bad).is_err(), "{bad:?}");
+/// }
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Email(String);
+
+impl Email {
+    /// Validates an address.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the address is empty, longer than 255
+    /// characters, has no single `@`, or either side is unusable.
+    pub fn parse(input: &str) -> Result<Self> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Err(Error::validation("email", "must not be empty"));
+        }
+        if trimmed.len() > 255 {
+            return Err(Error::validation("email", "must be at most 255 characters"));
+        }
+        reject_control_chars("email", trimmed)?;
+        let (local, domain) = trimmed
+            .split_once('@')
+            .ok_or_else(|| Error::validation("email", format!("{trimmed:?} has no `@`")))?;
+        if local.is_empty() {
+            return Err(Error::validation("email", "must have a local part"));
+        }
+        if local.len() > 64 {
+            return Err(Error::validation(
+                "email",
+                "local part must be at most 64 characters",
+            ));
+        }
+        if !local
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._%+-".contains(c))
+        {
+            return Err(Error::validation(
+                "email",
+                "local part may only contain letters, digits and ._%+-",
+            ));
+        }
+        if domain.contains('@') {
+            return Err(Error::validation("email", "must have exactly one `@`"));
+        }
+        Hostname::parse(domain)
+            .map_err(|_| Error::validation("email", format!("{domain:?} is not a valid domain")))?;
+        if !domain.contains('.') {
+            return Err(Error::validation(
+                "email",
+                "domain must contain a dot (a TLD)",
+            ));
+        }
+        Ok(Self(trimmed.to_owned()))
+    }
+
+    /// The address as sent on the wire.
+    ///
+    /// ```
+    /// use inwx_client::Email;
+    /// assert_eq!(Email::parse("a@example.com")?.as_str(), "a@example.com");
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for Email {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl FromStr for Email {
+    type Err = Error;
+
+    fn from_str(input: &str) -> Result<Self> {
+        Self::parse(input)
+    }
+}
+
+impl Serialize for Email {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Email {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(D::Error::custom)
+    }
+}
+
+/// A domain authorisation code (`authCode`, the EPP transfer code).
+///
+/// The value is a printable ASCII token; it is not trimmed down to nothing and
+/// it never reaches a log line: `Debug` prints `<redacted>`, the same rule
+/// [`Credentials`](crate::Credentials) follows.
+///
+/// ```
+/// use inwx_client::AuthCode;
+///
+/// let code = AuthCode::new("aB3-xY9_42")?;
+/// assert_eq!(code.as_str(), "aB3-xY9_42");
+/// assert_eq!(format!("{code:?}"), "AuthCode(<redacted>)");
+/// assert!(AuthCode::new("  ").is_err());
+/// assert!(AuthCode::new("with space").is_err());
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct AuthCode(String);
+
+impl AuthCode {
+    /// Validates an authorisation code.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the code is empty, longer than 255
+    /// characters, contains whitespace, or is not printable ASCII.
+    pub fn new(code: impl Into<String>) -> Result<Self> {
+        let raw = code.into();
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(Error::validation("authCode", "must not be empty"));
+        }
+        if trimmed.len() > 255 {
+            return Err(Error::validation(
+                "authCode",
+                "must be at most 255 characters",
+            ));
+        }
+        if !trimmed.is_ascii() {
+            return Err(Error::validation("authCode", "must be printable ASCII"));
+        }
+        if trimmed.chars().any(char::is_whitespace) || trimmed.chars().any(char::is_control) {
+            return Err(Error::validation(
+                "authCode",
+                "must not contain whitespace or control characters",
+            ));
+        }
+        Ok(Self(trimmed.to_owned()))
+    }
+
+    /// The code as sent on the wire.
+    ///
+    /// ```
+    /// use inwx_client::AuthCode;
+    /// assert_eq!(AuthCode::new("secret-1")?.as_str(), "secret-1");
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for AuthCode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AuthCode(<redacted>)")
+    }
+}
+
+impl fmt::Display for AuthCode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<redacted>")
+    }
+}
+
+impl FromStr for AuthCode {
+    type Err = Error;
+
+    fn from_str(input: &str) -> Result<Self> {
+        Self::new(input)
+    }
+}
+
+impl Serialize for AuthCode {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+/// A point in time for the parameters INWX types as `timestamp`
+/// (`2004-05-23T14:25:10`, ISO-8601).
+///
+/// Scheduled executions (`scDate`), accounting ranges and `dnssec.listkeys`
+/// filters take these. The original spelling is kept for the wire; the parsed
+/// value is what makes range validation (`dateFrom <= dateTo`) possible.
+/// Parsing uses the `time` crate rather than a hand-rolled parser.
+///
+/// ```
+/// use inwx_client::Timestamp;
+///
+/// let at = Timestamp::parse("2026-11-01T03:00:00")?;
+/// assert_eq!(at.as_str(), "2026-11-01T03:00:00");
+/// assert!(at > Timestamp::parse("2026-10-31T23:59:59")?);
+///
+/// // An offset is normalised for comparison but kept for the wire.
+/// let zoned = Timestamp::parse("2026-11-01T04:00:00+01:00")?;
+/// assert_eq!(zoned, at);
+/// for bad in ["", "2026-13-01T00:00:00", "tomorrow", "2026-11-01"] {
+///     assert!(Timestamp::parse(bad).is_err(), "{bad:?}");
+/// }
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Debug, Clone, Eq)]
+pub struct Timestamp {
+    raw: String,
+    at: time::PrimitiveDateTime,
+}
+
+impl Timestamp {
+    /// Parses an ISO-8601 timestamp, with or without an offset.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the value is not `YYYY-MM-DDTHH:MM:SS`,
+    /// optionally followed by a fraction, `Z` or a `±HH:MM` offset.
+    pub fn parse(input: &str) -> Result<Self> {
+        let raw = input.trim();
+        if raw.is_empty() {
+            return Err(Error::validation("timestamp", "must not be empty"));
+        }
+        let at = parse_timestamp(raw).ok_or_else(|| {
+            Error::validation(
+                "timestamp",
+                format!("{raw:?} is not an ISO-8601 timestamp (2026-11-01T03:00:00)"),
+            )
+        })?;
+        Ok(Self {
+            raw: raw.to_owned(),
+            at,
+        })
+    }
+
+    /// The timestamp as it will be sent.
+    ///
+    /// ```
+    /// use inwx_client::Timestamp;
+    /// assert_eq!(Timestamp::parse("2026-11-01T03:00:00")?.as_str(), "2026-11-01T03:00:00");
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+}
+
+/// Parses the two timestamp shapes the API documentation shows.
+///
+/// A `+HH:MM` value is converted to UTC so two spellings of the same instant
+/// compare equal; a naive value is taken as UTC, which is the only assumption
+/// that keeps ordering total.
+fn parse_timestamp(raw: &str) -> Option<time::PrimitiveDateTime> {
+    use time::format_description::well_known::Rfc3339;
+    use time::macros::format_description;
+
+    if let Ok(offset) = time::OffsetDateTime::parse(raw, &Rfc3339) {
+        let utc = offset.to_offset(time::UtcOffset::UTC);
+        return Some(time::PrimitiveDateTime::new(utc.date(), utc.time()));
+    }
+    let naive = format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]");
+    time::PrimitiveDateTime::parse(raw, &naive).ok()
+}
+
+/// Timestamps are equal when they name the same instant, whatever offset was
+/// written: `2026-11-01T04:00:00+01:00` equals `2026-11-01T03:00:00`.
+impl PartialEq for Timestamp {
+    fn eq(&self, other: &Self) -> bool {
+        self.at == other.at
+    }
+}
+
+impl PartialOrd for Timestamp {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Timestamp {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.at.cmp(&other.at)
+    }
+}
+
+impl fmt::Display for Timestamp {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.raw)
+    }
+}
+
+impl FromStr for Timestamp {
+    type Err = Error;
+
+    fn from_str(input: &str) -> Result<Self> {
+        Self::parse(input)
+    }
+}
+
+impl Serialize for Timestamp {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.raw)
+    }
+}
+
+impl<'de> Deserialize<'de> for Timestamp {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(D::Error::custom)
+    }
+}
+
+/// The document format the export and accounting endpoints accept
+/// (`documentformat`: `RAW`, `PDF`, `CSV`).
+///
+/// ```
+/// use inwx_client::DocumentFormat;
+///
+/// assert_eq!(DocumentFormat::Pdf.as_str(), "PDF");
+/// assert_eq!("csv".parse::<DocumentFormat>()?, DocumentFormat::Csv);
+/// assert!("xlsx".parse::<DocumentFormat>().is_err());
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DocumentFormat {
+    /// Plain text (`raw`).
+    Raw,
+    /// PDF (`pdf`).
+    Pdf,
+    /// Comma separated values (`csv`).
+    Csv,
+}
+
+impl DocumentFormat {
+    /// Wire representation.
+    ///
+    /// ```
+    /// use inwx_client::DocumentFormat;
+    /// assert_eq!(DocumentFormat::Raw.as_str(), "RAW");
+    /// ```
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Raw => "RAW",
+            Self::Pdf => "PDF",
+            Self::Csv => "CSV",
+        }
+    }
+}
+
+impl fmt::Display for DocumentFormat {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for DocumentFormat {
+    type Err = Error;
+
+    fn from_str(input: &str) -> Result<Self> {
+        match input.trim().to_ascii_uppercase().as_str() {
+            "RAW" => Ok(Self::Raw),
+            "PDF" => Ok(Self::Pdf),
+            "CSV" => Ok(Self::Csv),
+            other => Err(Error::validation(
+                "documentformat",
+                format!("{other:?} is not one of RAW, PDF, CSV"),
+            )),
+        }
+    }
+}
+
+impl Serialize for DocumentFormat {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for DocumentFormat {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::from_str(&raw).map_err(D::Error::custom)
+    }
+}
+
+/// A DynDNS username: 5–42 characters, as the `username` datatype requires.
+pub(crate) fn validate_username(field: &'static str, value: &str) -> Result<()> {
+    let trimmed = value.trim();
+    let len = trimmed.chars().count();
+    if !(5..=42).contains(&len) {
+        return Err(Error::validation(
+            field,
+            format!("must be 5 to 42 characters, got {len}"),
+        ));
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    {
+        return Err(Error::validation(
+            field,
+            "may only contain letters, digits and -_.",
+        ));
+    }
+    Ok(())
+}
+
+/// Parses an IP address before it is put on the wire.
+///
+/// The `ip` datatype is used for `masterIp`, `web`, `ipAddress` and the hosting
+/// answers; parsing it here keeps a typo from becoming a server-side range
+/// error, and accepts both address families where the API does.
+///
+/// ```
+/// use inwx_client::parse_ip;
+///
+/// assert!(parse_ip("203.0.113.7")?.is_ipv4());
+/// assert!(parse_ip("2001:db8::1")?.is_ipv6());
+/// assert!(parse_ip("203.0.113.7/32").is_err());
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// [`Error::Validation`] when the text is not an IPv4 or IPv6 address.
+pub fn parse_ip(text: &str) -> Result<std::net::IpAddr> {
+    text.trim()
+        .parse()
+        .map_err(|_| Error::validation("ip", format!("{text:?} is not an IP address")))
+}
+
 /// Permissive deserialisers.
 ///
 /// INWX is not consistent about scalar types: ids and booleans arrive as JSON
@@ -724,6 +1303,29 @@ pub(crate) mod de {
             Value::Null => None,
             other => Some(other.to_string()),
         })
+    }
+
+    /// An optional record id from a string or a number.
+    pub(crate) fn opt_record_id<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Option<crate::record::RecordId>, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        Ok(match value {
+            Value::String(text) if !text.is_empty() => Some(crate::record::RecordId::from(text)),
+            Value::Number(number) => Some(crate::record::RecordId::from(number.to_string())),
+            _ => None,
+        })
+    }
+
+    /// An optional record type, carried permissively.
+    pub(crate) fn opt_record_type<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Option<crate::record::RecordType>, D::Error> {
+        let raw = opt_string(deserializer)?;
+        match raw {
+            Some(raw) if !raw.trim().is_empty() => Ok(crate::record::RecordType::parse(&raw).ok()),
+            _ => Ok(None),
+        }
     }
 
     /// A list of strings; a single string becomes a one-element list, anything

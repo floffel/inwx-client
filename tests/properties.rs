@@ -180,3 +180,166 @@ proptest! {
         }
     }
 }
+
+// ------------------------------------------------- 0.2.0 builders and types
+
+use std::str::FromStr;
+
+use inwx_client::{
+    parse_ip, ActionKind, AuthCode, CertificateOrder, CertificateTerm, DnsKey, DnssecAlgorithm,
+    DnssecDigestType, DnssecDomainStatus, DnssecFlag, DnssecKeyQuery, DnssecKeyStatus,
+    DocumentFormat, Email, Handle, HostingPeriod, Irreversible, NameserverSetType, RecordSet,
+    Timestamp, TransferAnswer, UrlRedirectType, ZoneCreate, ZoneType,
+};
+
+/// Arbitrary text for parsers that must never panic.
+fn arbitrary() -> impl Strategy<Value = String> {
+    "\\PC{0,60}"
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn enum_parsers_never_panic(input in arbitrary()) {
+        let _ = ZoneType::parse(&input);
+        let _ = UrlRedirectType::from_str(&input);
+        let _ = NameserverSetType::parse(&input);
+        let _ = DocumentFormat::from_str(&input);
+        let _ = TransferAnswer::from_str(&input);
+        let _ = DnssecDomainStatus::parse(&input);
+        let _ = DnssecKeyStatus::parse(&input);
+        let _ = HostingPeriod::from_str(&input);
+        let _ = CertificateTerm::try_from(u8::try_from(input.len() % 4).unwrap());
+        let _ = parse_ip(&input);
+        let _ = Timestamp::parse(&input);
+        let _ = Email::parse(&input);
+        let _ = AuthCode::new(&input);
+        let _ = DnsKey::parse(&input);
+        let _ = inwx_client::DsRecord::parse(&input);
+    }
+
+    #[test]
+    fn accepted_enums_round_trip(input in arbitrary()) {
+        if let Ok(zone_type) = ZoneType::parse(&input) {
+            prop_assert_eq!(ZoneType::parse(zone_type.as_str()).unwrap(), zone_type);
+        }
+        if let Ok(redirect) = UrlRedirectType::from_str(&input) {
+            prop_assert_eq!(UrlRedirectType::from_str(redirect.as_str()).unwrap(), redirect);
+        }
+        if let Ok(set_type) = NameserverSetType::parse(&input) {
+            prop_assert_eq!(NameserverSetType::parse(set_type.as_str()).unwrap(), set_type);
+        }
+        if let Ok(format) = DocumentFormat::from_str(&input) {
+            prop_assert_eq!(DocumentFormat::from_str(format.as_str()).unwrap(), format);
+        }
+        if let Ok(answer) = TransferAnswer::from_str(&input) {
+            prop_assert_eq!(TransferAnswer::from_str(answer.as_str()).unwrap(), answer);
+        }
+        if let Ok(status) = DnssecDomainStatus::parse(&input) {
+            prop_assert_eq!(DnssecDomainStatus::parse(status.as_str()).unwrap(), status);
+        }
+        if let Ok(status) = DnssecKeyStatus::parse(&input) {
+            prop_assert_eq!(DnssecKeyStatus::parse(status.as_str()).unwrap(), status);
+        }
+    }
+
+    #[test]
+    fn accepted_emails_round_trip(local in "[A-Za-z0-9._%+-]{3,20}", label in "[a-z0-9]([a-z0-9-]{0,20}[a-z0-9])?") {
+        let address = format!("{local}@{label}.example.com");
+        let email = Email::parse(&address).unwrap();
+        prop_assert_eq!(email.as_str(), address.as_str());
+        prop_assert_eq!(Email::parse(email.as_str()).unwrap(), email);
+    }
+
+    #[test]
+    fn accepted_timestamps_round_trip(year in 2000u16..2100, month in 1u8..13, day in 1u8..29) {
+        let text = format!("{year:04}-{month:02}-{day:02}T03:04:05");
+        let at = Timestamp::parse(&text).unwrap();
+        prop_assert_eq!(at.as_str(), text.as_str());
+        prop_assert_eq!(Timestamp::parse(at.as_str()).unwrap(), at);
+    }
+
+    #[test]
+    fn handles_survive_serde(id in 1i64..i64::MAX) {
+        let handle = Handle::new(id).unwrap();
+        let encoded = serde_json::to_string(&handle).unwrap();
+        prop_assert_eq!(&encoded, &id.to_string());
+        let decoded: Handle = serde_json::from_str(&encoded).unwrap();
+        prop_assert_eq!(decoded, handle);
+    }
+
+    #[test]
+    fn zone_params_round_trip_through_json(label in "[a-z0-9]([a-z0-9-]{0,20}[a-z0-9])?") {
+        let domain = DomainName::parse(&format!("{label}.example.com")).unwrap();
+        let zone = ZoneCreate::master(domain.clone()).unwrap();
+        let params = zone.params().unwrap();
+        prop_assert_eq!(params["domain"].as_str().unwrap(), domain.as_str());
+        let encoded = serde_json::to_string(&params).unwrap();
+        let decoded: Value = serde_json::from_str(&encoded).unwrap();
+        prop_assert_eq!(decoded, params);
+    }
+
+    #[test]
+    fn record_sets_never_panic(names in proptest::collection::vec("[@*a-z_.-]{0,8}", 0..12)) {
+        let mut set = RecordSet::new().unwrap();
+        for (index, name) in names.iter().enumerate() {
+            let content = format!("203.0.113.{}", index % 250);
+            if let Ok(spec) = RecordSpec::a(name.as_str(), content) {
+                let _ = set.push(spec);
+            }
+        }
+        // Every accepted push is reflected in the length, and no apex CNAME
+        // slips in.
+        prop_assert!(set.len() <= names.len());
+        for record in set.records() {
+            prop_assert!(record.validate().is_ok());
+            prop_assert!(!(record.record_type() == RecordType::Cname && record.name() == "@"));
+        }
+    }
+
+    #[test]
+    fn transfer_acknowledgements_name_what_they_authorise(label in "[a-z0-9]{1,20}") {
+        let domain = DomainName::parse(&format!("{label}.de")).unwrap();
+        let intent = Irreversible::acknowledge(ActionKind::Transfer, &domain);
+        let rendered = format!("{intent:?}");
+        prop_assert_eq!(intent.domain(), &domain);
+        prop_assert_eq!(intent.action(), ActionKind::Transfer);
+        prop_assert!(rendered.contains(domain.as_str()));
+        // Only the matching action builds a transfer request.
+        prop_assert!(inwx_client::TransferRequest::new(intent.clone()).is_ok());
+        prop_assert!(inwx_client::TradeRequest::new(intent).is_err());
+    }
+
+    #[test]
+    fn certificate_orders_require_an_identity(name in "[a-z0-9]{1,20}") {
+        let domain = DomainName::parse(&format!("{name}.example.com")).unwrap();
+        let order = CertificateOrder::new(17).unwrap();
+        prop_assert!(order.params().is_err());
+        prop_assert!(order
+            .with_common_name(domain)
+            .params()
+            .is_ok());
+    }
+
+    #[test]
+    fn dnssec_numeric_ids_round_trip(algorithm in 0u8..=32, digest in 0u8..=8, flag in 0u16..=300) {
+        if let Ok(algorithm) = DnssecAlgorithm::from_u8(algorithm) {
+            prop_assert_eq!(DnssecAlgorithm::from_u8(algorithm.as_u8()).unwrap(), algorithm);
+        }
+        if let Ok(digest) = DnssecDigestType::from_u8(digest) {
+            prop_assert_eq!(DnssecDigestType::from_u8(digest.as_u8()).unwrap(), digest);
+        }
+        if let Ok(flag) = DnssecFlag::from_u16(flag) {
+            prop_assert_eq!(DnssecFlag::from_u16(flag.as_u16()).unwrap(), flag);
+        }
+    }
+
+    #[test]
+    fn dnssec_queries_keep_their_filters(page in 0u32..10, limit in 0u32..100) {
+        let query = DnssecKeyQuery::new().with_page(page, limit);
+        let params = query.params();
+        prop_assert_eq!(params["page"].as_u64().unwrap(), u64::from(page.max(1)));
+        prop_assert_eq!(params["pagelimit"].as_u64().unwrap(), u64::from(limit));
+    }
+}

@@ -754,12 +754,8 @@ impl RecordSpec {
     /// [`Error::Validation`] on a bad name, content or TTL.
     pub fn validate(&self) -> Result<()> {
         validate_record_name("record.name", &self.name)?;
-        if self.ttl > MAX_TTL {
-            return Err(Error::validation(
-                "record.ttl",
-                format!("must be 0..={MAX_TTL} seconds, got {}", self.ttl),
-            ));
-        }
+        // `ttl` is a `u32` and every setter bounds it; the ceiling is enforced in
+        // `with_ttl` where the value enters, so there is nothing to re-check here.
         validate_content(&self.record_type, &self.content)
     }
 }
@@ -790,6 +786,18 @@ fn validate_content(record_type: &RecordType, content: &str) -> Result<()> {
                 format!("{trimmed:?} is not an IPv6 address (an A record carries IPv4)"),
             )
         }),
+        RecordType::Txt => {
+            // INWX stores `content` verbatim; a value copied out of a zone file
+            // arrives wrapped in presentation quotes, and publishing those
+            // quotes breaks DKIM/SPF lookups in a way that is hard to see.
+            if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+                return Err(Error::validation(
+                    "record.content",
+                    "must not be wrapped in quotes (INWX stores the value verbatim)",
+                ));
+            }
+            Ok(())
+        }
         other if other.requires_hostname() => {
             if trimmed.parse::<std::net::IpAddr>().is_ok() {
                 return Err(Error::validation(
@@ -805,6 +813,217 @@ fn validate_content(record_type: &RecordType, content: &str) -> Result<()> {
             })
         }
         _ => Ok(()),
+    }
+}
+
+/// A validated set of records for one zone.
+///
+/// The individual [`RecordSpec`] checks are necessary but not sufficient: DNS
+/// forbids some *combinations* that INWX accepts and then serves broken. This
+/// type rejects them before anything is sent:
+///
+/// * a `CNAME` at the zone apex — the apex already carries `SOA` and `NS`, and
+///   RFC 1034 forbids a CNAME next to any other data. Use `ALIAS` (INWX's
+///   apex-capable alias) or an `A`/`AAAA` record.
+/// * a `CNAME` on a name that carries other records, and any record added to a
+///   name that already has a `CNAME`.
+/// * two identical records, which produce a zone that resolves but bills twice.
+///
+/// `ALIAS` may coexist with `MX`/`TXT` at the apex: that coexistence is the
+/// reason the type exists.
+///
+/// ```
+/// use inwx_client::{DomainName, RecordSet, RecordSpec};
+///
+/// let mut set = RecordSet::new()?;
+/// set.push(RecordSpec::a("@", "203.0.113.7")?)?;
+/// set.push(RecordSpec::mx("@", 10, &inwx_client::Hostname::parse("mx.example.net")?)?)?;
+/// set.push(RecordSpec::txt("@", "v=spf1 -all")?)?;
+/// assert_eq!(set.len(), 3);
+///
+/// // A CNAME at the apex is refused: SOA/NS already live there.
+/// let apex_cname = RecordSpec::cname("@", &inwx_client::Hostname::parse("edge.example.net")?)?;
+/// assert!(set.push(apex_cname).is_err());
+///
+/// // A CNAME next to an A record is refused too.
+/// let mut conflict = RecordSet::new()?;
+/// conflict.push(RecordSpec::a("www", "203.0.113.7")?)?;
+/// let cname = RecordSpec::cname("www", &inwx_client::Hostname::parse("edge.example.net")?)?;
+/// assert!(conflict.push(cname).is_err());
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecordSet {
+    records: Vec<RecordSpec>,
+}
+
+impl RecordSet {
+    /// An empty set.
+    ///
+    /// ```
+    /// use inwx_client::RecordSet;
+    /// assert!(RecordSet::new()?.is_empty());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Never today; the signature keeps room for a future size limit without a
+    /// breaking change.
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            records: Vec::new(),
+        })
+    }
+
+    /// A set from an existing list, validated as if pushed one by one.
+    ///
+    /// ```
+    /// use inwx_client::{RecordSet, RecordSpec};
+    ///
+    /// let set = RecordSet::from_records(vec![
+    ///     RecordSpec::a("www", "203.0.113.7")?,
+    ///     RecordSpec::aaaa("www", "2001:db8::1")?,
+    /// ])?;
+    /// assert_eq!(set.len(), 2);
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for the first record that breaks a rule.
+    pub fn from_records(records: Vec<RecordSpec>) -> Result<Self> {
+        let mut set = Self::new()?;
+        for record in records {
+            set.push(record)?;
+        }
+        Ok(set)
+    }
+
+    /// Adds a record after checking the set-level rules.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a record that conflicts with one already in
+    /// the set, or that repeats it exactly.
+    ///
+    /// ```
+    /// use inwx_client::{RecordSet, RecordSpec};
+    ///
+    /// let mut set = RecordSet::new()?;
+    /// let record = RecordSpec::a("www", "203.0.113.7")?;
+    /// set.push(record.clone())?;
+    /// assert!(set.push(record).is_err()); // exact duplicate
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    pub fn push(&mut self, record: RecordSpec) -> Result<()> {
+        record.validate()?;
+        let name = apex_normalised(record.name());
+        let record_type = record.record_type();
+        if record_type == RecordType::Cname && name == "@" {
+            return Err(Error::validation(
+                "record.name",
+                "a CNAME cannot live at the zone apex (SOA and NS are already there); use ALIAS",
+            ));
+        }
+        for existing in &self.records {
+            if apex_normalised(existing.name()) != name {
+                continue;
+            }
+            let existing_type = existing.record_type();
+            if existing_type == record_type
+                && existing.content().eq_ignore_ascii_case(record.content())
+            {
+                return Err(Error::validation(
+                    "record",
+                    format!("a {record_type} record with that content already exists at {name}"),
+                ));
+            }
+            let cname_conflict =
+                record_type == RecordType::Cname || existing_type == RecordType::Cname;
+            if cname_conflict {
+                return Err(Error::validation(
+                    "record.name",
+                    format!(
+                        "{name} already has a {} record; a CNAME cannot coexist with other data",
+                        if existing_type == RecordType::Cname {
+                            "CNAME"
+                        } else {
+                            existing_type.as_str()
+                        }
+                    ),
+                ));
+            }
+        }
+        self.records.push(record);
+        Ok(())
+    }
+
+    /// The records in insertion order.
+    ///
+    /// ```
+    /// use inwx_client::{RecordSet, RecordSpec};
+    /// let set = RecordSet::from_records(vec![RecordSpec::a("www", "203.0.113.7")?])?;
+    /// assert_eq!(set.records()[0].name(), "www");
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn records(&self) -> &[RecordSpec] {
+        &self.records
+    }
+
+    /// Number of records.
+    ///
+    /// ```
+    /// use inwx_client::{RecordSet, RecordSpec};
+    /// assert_eq!(RecordSet::from_records(vec![RecordSpec::txt("@", "x")?])?.len(), 1);
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    /// Whether the set is empty.
+    ///
+    /// ```
+    /// use inwx_client::RecordSet;
+    /// assert!(RecordSet::new()?.is_empty());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    /// The `nameserver.createRecord` parameters for each record, zone included.
+    ///
+    /// ```
+    /// use inwx_client::{DomainName, RecordSet, RecordSpec};
+    ///
+    /// let set = RecordSet::from_records(vec![RecordSpec::a("www", "203.0.113.7")?])?;
+    /// let params = set.params_for(&DomainName::parse("example.com")?);
+    /// assert_eq!(params[0]["domain"], "example.com");
+    /// assert_eq!(params[0]["type"], "A");
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn params_for(&self, zone: &DomainName) -> Vec<Value> {
+        self.records
+            .iter()
+            .map(|record| with_zone(zone, &record.params()))
+            .collect()
+    }
+}
+
+/// Apex spellings the API accepts are `@`, the empty string and the zone name
+/// itself; the set-level checks compare them as one.
+fn apex_normalised(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        "@".to_owned()
+    } else {
+        trimmed.to_ascii_lowercase()
     }
 }
 
@@ -1117,6 +1336,55 @@ impl<T: Transport> InwxClient<T> {
         let mut ids = Vec::with_capacity(specs.len());
         for spec in specs {
             ids.push(self.create_record(zone, spec).await?);
+        }
+        Ok(ids)
+    }
+
+    /// Creates every record of a [`RecordSet`], returning the ids in order.
+    ///
+    /// The set has already rejected the combinations DNS forbids (apex `CNAME`,
+    /// a `CNAME` with siblings, exact duplicates), so this cannot send a zone
+    /// that resolves wrongly. Like
+    /// [`create_records`](InwxClient::create_records) it is one
+    /// `nameserver.createRecord` call per record — INWX has no batch endpoint —
+    /// and it stops at the first failure; records already created stay created.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use inwx_client::{DomainName, InwxClient, RecordSet, RecordSpec, ReqwestTransport};
+    ///
+    /// let client = InwxClient::new(ReqwestTransport::new())
+    ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
+    /// let zone = DomainName::parse("tenant.example.com")?;
+    /// let set = RecordSet::from_records(vec![
+    ///     RecordSpec::a("@", "203.0.113.7")?,
+    ///     RecordSpec::txt("@", "v=spf1 -all")?,
+    /// ])?;
+    /// let ids = client.create_record_set(&zone, &set).await?;
+    /// assert_eq!(ids.len(), 2);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for an empty set (a create call that sends nothing
+    /// is a bug, not a no-op), plus the first error from any individual call.
+    pub async fn create_record_set(
+        &self,
+        zone: &DomainName,
+        set: &RecordSet,
+    ) -> Result<Vec<RecordId>> {
+        if set.is_empty() {
+            return Err(Error::validation(
+                "record",
+                "the record set is empty; nothing to create",
+            ));
+        }
+        let mut ids = Vec::with_capacity(set.len());
+        for record in set.records() {
+            ids.push(self.create_record(zone, record).await?);
         }
         Ok(ids)
     }

@@ -166,3 +166,84 @@ async fn clearing_the_session_while_calls_run_does_not_panic() {
     // not failed locally. Either way no task panicked, and no call is duplicated.
     assert!(transport.call_count() <= TASKS);
 }
+
+/// The 0.2.0 surface under the same load: zone writes, ownership commands and
+/// service reads from 32 tasks on one client. Every task must see the shared
+/// cookie, and the transport must see exactly one call per task.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn thirty_two_tasks_share_one_client_across_the_new_surface() {
+    use inwx_client::{
+        ActionKind, AuthCode, Handle, Irreversible, Timestamp, TransferRequest, ZoneCreate,
+        ZoneUpdate,
+    };
+
+    let transport = MockTransport::new();
+    for _ in 0..TASKS {
+        transport.ok(json!({ "roId": 42, "available": 190.5, "id": "1" }));
+    }
+
+    let client = Arc::new(client(transport.clone()));
+    let domain = Arc::new(DomainName::parse("example.com").unwrap());
+
+    let mut handles = Vec::with_capacity(TASKS);
+    for index in 0..TASKS {
+        let client = Arc::clone(&client);
+        let domain = Arc::clone(&domain);
+        handles.push(tokio::spawn(async move {
+            match index % 4 {
+                0 => {
+                    let zone = ZoneCreate::master((*domain).clone())
+                        .unwrap()
+                        .with_nameservers(&[
+                            inwx_client::Hostname::parse("ns1.example.net").unwrap()
+                        ])
+                        .unwrap();
+                    client.create_zone(&zone).await.map(|_| ())
+                }
+                1 => {
+                    let update = ZoneUpdate::new((*domain).clone())
+                        .with_nameservers(&[
+                            inwx_client::Hostname::parse("ns2.example.net").unwrap()
+                        ])
+                        .unwrap();
+                    client.update_zone(&update).await
+                }
+                2 => {
+                    let request = TransferRequest::new(Irreversible::acknowledge(
+                        ActionKind::Transfer,
+                        &domain,
+                    ))
+                    .unwrap()
+                    .auth_code(AuthCode::new("aB3-xY9_42").unwrap())
+                    .unwrap()
+                    .with_registrant(Handle::new(991).unwrap())
+                    .scheduled_at(Timestamp::parse("2026-11-01T03:00:00").unwrap());
+                    client.transfer_domain(&request).await.map(|_| ())
+                }
+                _ => client.account_balance().await.map(|_| ()),
+            }
+        }));
+    }
+
+    for handle in handles {
+        handle.await.unwrap().unwrap();
+    }
+
+    let calls = transport.calls();
+    assert_eq!(calls.len(), TASKS);
+    let mut methods: Vec<&str> = calls.iter().map(|call| call.method.as_str()).collect();
+    methods.sort_unstable();
+    methods.dedup();
+    assert_eq!(
+        methods,
+        [
+            "accounting.accountBalance",
+            "domain.transfer",
+            "nameserver.create",
+            "nameserver.update"
+        ]
+    );
+    for call in &calls {
+        assert_eq!(call.header("cookie"), Some("domrobot=test-session"));
+    }
+}

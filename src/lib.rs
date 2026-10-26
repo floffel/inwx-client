@@ -1,5 +1,6 @@
 //! Typed client for the [INWX](https://www.inwx.com) `DomRobot` JSON-RPC API —
-//! domains, DNS records, contacts and prices.
+//! domains, zones and DNS records, ownership changes, certificates, hosting,
+//! DNSSEC, tags, nameserver sets, DynDNS and accounting.
 //!
 //! INWX is a German registrar and DNS provider. Its API is a single JSON-RPC
 //! endpoint (`https://api.domrobot.com/jsonrpc/`, or the free OTE sandbox at
@@ -35,20 +36,31 @@
 //! | --- | --- |
 //! | Session | `account.login`, `account.logout`, `account.check`, `account.info` |
 //! | Domains | `check`, `create`, `info`, `list`, `update`, `renew`, `delete`, `whois` |
+//! | Ownership | `domain.transfer`, `domain.trade`, `domain.push`, `domain.restore`, `domain.transfercancel`, `domain.transferOut` |
 //! | DNS records | `nameserver.info` (read), `createRecord`, `updateRecord`, `deleteRecord` |
-//! | Zones | `nameserver.list`, `nameserver.info`, `nameserver.delete`, `nameserver.check` |
+//! | Zones | `nameserver.create`, `nameserver.update`, `nameserver.delete`, `nameserver.list`, `nameserver.info`, `nameserver.check`, `nameserver.clone`, `nameserver.export`, `nameserver.exportlist`, `nameserver.exportrecords` |
+//! | Certificates | `certificate.*` (13 methods) |
+//! | Hosting | `hosting.*` (9 methods) |
+//! | DNSSEC | `dnssec.*` (7 methods) |
+//! | Tags | `tag.*` (5 methods) |
+//! | Nameserver sets | `nameserverset.*` (5 methods) |
+//! | DynDNS | `dyndns.*` (8 methods) |
+//! | Accounting | `accounting.*` (11 methods) |
 //! | Contacts | `contact.create`, `info`, `list`, `update`, `delete` |
 //! | Prices | `domain.getPrices`, `domain.getdomainprice` |
 //!
-//! Everything else (accounting, certificates, hosting, `DynDNS`, DNSSEC, tags,
-//! transfer/trade/restore, bulk export) is reachable through [`InwxClient::call`]
-//! and is listed as deliberately out of scope in the README.
+//! Unknown methods stay reachable through [`InwxClient::call`]; what is not
+//! modelled yet is tracked as an issue, not hidden as "out of scope".
 //!
 //! # Design
 //!
 //! * **Validate before you send.** [`DomainName`], [`Hostname`], [`RecordSpec`],
-//!   [`ContactRequest`] and [`Period`] reject what the API would reject, so a
-//!   typo costs a local error instead of a charged registration.
+//!   [`RecordSet`], [`ZoneCreate`], [`ContactRequest`] and [`Period`] reject what
+//!   the API would reject, so a typo costs a local error instead of a charged
+//!   registration or a broken zone.
+//! * **Say what cannot be undone.** Ownership changes and refunds take an
+//!   [`Irreversible`] acknowledgement naming the action and the object, so a
+//!   transfer cannot be built by copy-pasting a block and forgetting the domain.
 //! * **Parse permissively.** Unknown fields are ignored, unknown enum values are
 //!   carried ([`RecordType::Other`], [`RenewalMode::Other`],
 //!   [`ContactType::Other`]), and scalars are accepted as numbers or strings —
@@ -73,6 +85,10 @@
 //!   the wire.
 //! * Session cookies and credentials are rejected if they contain control
 //!   characters, so a value cannot smuggle a second header.
+//! * [`AuthCode`] (the EPP transfer code) prints `<redacted>` in `Debug` and
+//!   `Display`; the DynDNS account type redacts its password.
+//! * A certificate CSR is refused if it contains a private key: the field takes a
+//!   signing request, and anything else would upload a secret to a third party.
 //! * Retries are bounded (three attempts, exponential backoff) and only apply to
 //!   transport failures, 429/5xx and `2300` (pending transfer) — a rejected
 //!   command is never repeated.
@@ -82,35 +98,77 @@
 // `record::RecordSpec` and friends read better than a flattened module.
 #![allow(clippy::module_name_repetitions)]
 
+pub mod accounting;
+pub mod certificate;
 pub mod client;
 pub mod contact;
+pub mod dnssec;
 pub mod domain;
+pub mod dyndns;
+pub mod dyndnssubscription;
 pub mod error;
+pub mod hosting;
 pub mod nameserver;
+pub mod nameserverset;
 pub mod price;
 pub mod record;
 pub mod rpc;
+pub mod tag;
+pub mod transfer;
 pub mod transport;
 pub mod types;
+pub mod zone;
 
+pub use accounting::{
+    AccountBalance, CreditLog, Document, Invoice, LockedFund, LockedFunds, PostalDelivery,
+    RefundRequest, SslFund, StatementQuery, Transaction, TransactionLog, TransactionLogQuery,
+};
+pub use certificate::{
+    Certificate, CertificateId, CertificateLogEntry, CertificateMissingData, CertificateOrder,
+    CertificateOrderResult, CertificateProduct, CertificateProductQuery, CertificateQuery,
+    CertificateTerm, CertificateUpdate, CertificateValidationMethod, MAX_CSR_LEN,
+};
 pub use client::{
     AccountInfo, Credentials, InwxClient, Language, RetryPolicy, DEFAULT_ATTEMPTS,
     DEFAULT_BASE_DELAY, DEFAULT_BASE_URL, DEFAULT_MAX_DELAY, SANDBOX_BASE_URL,
 };
 pub use contact::{Contact, ContactListPage, ContactQuery, ContactRequest, ContactUpdate};
+pub use dnssec::{
+    AddDnsKeyRequest, DnsKey, DnsKeyPair, DnssecAlgorithm, DnssecDigestType, DnssecDomainStatus,
+    DnssecFlag, DnssecKey, DnssecKeyQuery, DnssecKeyStatus, DnssecState, DsRecord,
+};
 pub use domain::{
     DomainCheck, DomainCreate, DomainInfo, DomainListPage, DomainListQuery, DomainRenew,
     DomainUpdate, Registration, RenewalResult,
 };
+pub use dyndns::{
+    DynDnsAccount, DynDnsAccountInfo, DynDnsAccountRef, DynDnsCheck, DynDnsCreated, DynDnsLog,
+    DynDnsLogEntry, DynDnsRecord, DynDnsUpdate,
+};
+pub use dyndnssubscription::DynDnsSubscription;
 pub use error::{Error, Result};
+pub use hosting::{
+    HostingOrder, HostingPackage, HostingPeriod, HostingReinstatement, HostingSuspension,
+};
 pub use nameserver::{NameserverCheck, ZoneInfo, ZoneListPage, ZoneSummary};
+pub use nameserverset::{
+    NameserverSet, NameserverSetCreate, NameserverSetType, NameserverSetUpdate,
+};
 pub use price::{DomainPriceQuote, PriceList, TldPrice};
-pub use record::{DnsRecord, RecordId, RecordSpec, RecordType, RecordUpdate, DEFAULT_TTL, MAX_TTL};
+pub use record::{
+    DnsRecord, RecordId, RecordSet, RecordSpec, RecordType, RecordUpdate, DEFAULT_TTL, MAX_TTL,
+};
 pub use rpc::{Detail, RpcRequest, RpcResponse};
+pub use tag::{Tag, TagUpdate, TagUsage, TaggedDomains};
+pub use transfer::{
+    ActionKind, ExtData, Irreversible, OwnershipResult, PushRequest, RestoreRequest, RestoreResult,
+    TradeRequest, TransferAnswer, TransferRequest,
+};
 #[cfg(feature = "http")]
 pub use transport::ReqwestTransport;
 pub use transport::{Response, Transport};
 pub use types::{
-    ContactType, DomainName, Hostname, Period, PriceType, RenewalMode, MAX_DOMAIN_LEN,
-    MAX_LABEL_LEN,
+    parse_ip, AuthCode, ContactType, DocumentFormat, DomainName, Email, Handle, Hostname, Period,
+    PriceType, RenewalMode, Timestamp, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
 };
+pub use zone::{RecordExport, UrlRedirectType, ZoneCreate, ZoneExport, ZoneType, ZoneUpdate};

@@ -1,0 +1,14 @@
+# Provider names clippy's `doc_markdown` would otherwise want in backticks.
+# `..` keeps the built-in list.
+doc-valid-idents = [
+    "INWX",
+    "DomRobot",
+    "DynDNS",
+    "DNSSEC",
+    "DNSKEY",
+    "SSL",
+    "TLS",
+    "IPv4",
+    "IPv6",
+    "..",
+]
