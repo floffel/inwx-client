@@ -30,6 +30,41 @@ settle. It is modelled as documented and flagged rather than guessed at.
 | Prices | `domain.getPrices`, `domain.getdomainprice` | ch02 §2.9 |
 | Envelope | `{"method":…,"params":…}` / `{"code":…,"resData":…}` | ch02 §1.2, §1.4; codes ch04 |
 
+## Pagination (`src/pagination.rs`) — issue #15
+
+The list commands are paged the same way. Sources: ch02 §2.9 (`domain.list`),
+§2.6 (`contact.list`) and §2.15 (`nameserver.list`, Tables 2.209/2.210 for the
+filtered variant; `nameserver.exportlist` is Tables 2.203/2.204):
+
+| Command | Paging in | Total out | Objects out |
+| --- | --- | --- | --- |
+| `domain.list` | `page` `int` (1-based), `pagelimit` `int` | `count` `int` | `domain` array |
+| `contact.list` | `page`, `pagelimit` | `count` | `contact` array |
+| `nameserver.list` | `page`, `pagelimit` | `count` | `domains` array |
+
+`Pages` turns one of those commands into a walk (`list_all_domains`,
+`list_all_contacts`, `list_all_zones`, or `Pages::new` for a `Listing` of your
+own). Rules the crate enforces, with the reason:
+
+- The walk owns the cursor: `page` and `pagelimit` are set by the walker, so a
+  query that pins a page cannot fight it. Filters (`domain`, `search`, `status`,
+  `wide`) are sent unchanged on every request.
+- Termination: a page shorter than requested, an empty page, `yielded >= count`,
+  `with_max_items`, `with_max_pages`. `count` is documented but not guaranteed,
+  so a full page without one asks for exactly one page more instead of stopping.
+- A bound is always in force. `DEFAULT_PAGE_SIZE` is 100 (what `list_zones`
+  already asked for); `MAX_PAGE_SIZE` 1000, `MAX_ITEMS` 100\_000 and
+  `MAX_PAGES` 10\_000 are **crate-side ceilings** — see Unverified — and all
+  three are validated in `Pagination::with_page_size`/`with_max_items`/
+  `with_max_pages`, before any request.
+- The page that crosses `with_max_items` is truncated, so a walk never yields
+  more objects than it promised, and `bound_reached()` distinguishes "stopped at
+  the bound" from "reached the end".
+- A rejected page is terminal: `Error::Api` is returned as-is and the request is
+  not repeated (a list command is idempotent, but retrying a rejected command is
+  the client's business, not the walker's). A transport failure is returned too
+  and the failed page is *not* counted, so continuing the walk re-asks for it.
+
 ## 0.2.0 — zone lifecycle (`src/zone.rs`)
 
 Source: <https://account.inwx.com/en/help/apidoc/f/ch02s15.html>
@@ -278,6 +313,7 @@ flagged here; none is a guess about an endpoint's existence.
 | `nameserver.exportlist` "export as file" | **unverified** | Table 2.203/2.204 promises a document but documents a `count`+`domains` payload; the crate parses the documented payload. |
 | `tag.list` `count` nesting | **unverified** | Table 2.235 shows `count` → `domain` with an ambiguous indentation; parsed as `{"count": {"domain": N}}` with a scalar `count` also tolerated. |
 | Live-endpoint behaviour for every 0.2.0 method | **unverified** | No credentials in CI; every test is offline against fixtures. Method names, parameters and datatypes are from the tables above. |
+| `pagelimit` maximum | **unverified** | The tables document `page` and `pagelimit` but no upper bound, and no maximum is published for the number of objects a listing can return. `MAX_PAGE_SIZE`, `MAX_ITEMS` and `MAX_PAGES` are therefore crate-side ceilings, not API limits; they are validated before the wire. |
 | `extData` per-TLD keys | **documented, not enumerated** | ch03 §3.49 lists the generic keys and then a long TLD-specific list; `ExtData::set` carries any upper-case token. |
 
 ## Deliberately not modelled

@@ -58,6 +58,47 @@ let client = InwxClient::sandbox(ReqwestTransport::new())
 Nothing above needs a socket to compile or test: the HTTP layer sits behind the
 `Transport` trait, and the whole test suite drives a scripted mock.
 
+## Listing everything (pagination)
+
+Every list command is paged (`page` + `pagelimit`), and `list_domains`,
+`list_contacts` and `list_zones` answer one page each. To read the whole
+listing, hand the cursor to the client:
+
+```rust,no_run
+use inwx_client::{DomainListQuery, InwxClient, Pagination, ReqwestTransport};
+
+# async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+let client = InwxClient::new(ReqwestTransport::new())
+    .with_credentials("username", std::env::var("INWX_PASSWORD")?)?;
+
+// At most 10_000 objects, 200 per request.
+let pagination = Pagination::new().with_page_size(200)?.with_max_items(10_000)?;
+let domains = client
+    .list_all_domains(&DomainListQuery::new().with_filter("example"), &pagination)
+    .collect_all()
+    .await?;
+println!("{} domains", domains.len());
+
+// Or drive it page by page (`next_item()` yields one object at a time).
+let mut zones = client.list_all_zones(&inwx_client::ZoneListing::new(), &pagination);
+while let Some(page) = zones.next_page().await? {
+    for zone in &page.zones {
+        println!("{}", zone.domain);
+    }
+}
+# Ok(())
+# }
+```
+
+A walk always carries a bound, and the bound is checked before the first
+request: a page size outside `1..=1000` (`MAX_PAGE_SIZE`) or a bound above
+`MAX_ITEMS` / `MAX_PAGES` is an `Error::Validation` and nothing goes on the
+wire. The walk ends at the first of a short page, an empty page, the `count`
+the API reports, `with_max_items` or `with_max_pages`; only the last two set
+`bound_reached()`, and the page that crosses `with_max_items` is truncated so a
+walk never yields more than it promised. `list_all_contacts` works the same way,
+and `Pages::new` paginates any `Listing` of your own.
+
 ## What is covered
 
 Every method below is implemented against the published INWX API documentation
@@ -80,6 +121,7 @@ Every method below is implemented against the published INWX API documentation
 | Accounting | `accounting.accountBalance`, `creditLogById`, `getInvoice`, `getPreviewInvoice`, `getReceipt`, `getstatement`, `listInvoices`, `lockedFunds`, `log`, `refund`, `sendbypost` | PDFs decoded from base64 (`Document::pdf_bytes`); `refund` needs the acknowledgement |
 | Contacts | `contact.create`, `contact.info`, `contact.list`, `contact.update`, `contact.delete` | documented field lengths and country codes enforced |
 | Prices | `domain.getPrices`, `domain.getdomainprice` | `f64` quotes, not amounts to sum |
+| Pagination | `Pagination`, `Pages`, `DomainListing`, `ContactListing`, `ZoneListing` | `list_all_domains`, `list_all_contacts`, `list_all_zones` walk every page with a bound that is validated before the wire |
 | Anything else | `InwxClient::call(method, params)` | login, cookies, retries and error envelopes still apply |
 
 ### Design
@@ -91,6 +133,11 @@ Every method below is implemented against the published INWX API documentation
   `CNAME`/`MX`/`NS`/`PTR`/`SRV` a host name (an IP literal is refused), TTLs must
   fit the documented `int`, and the record name rules allow `@`, `*` and
   `_service` labels while refusing whitespace and control characters.
+* **Walk the whole list.** `list_all_domains`, `list_all_contacts` and
+  `list_all_zones` return a `Pages` walk instead of a single page, so callers
+  never hand-roll a cursor. Page size and bound are validated where they are
+  set, the last page is cut at the bound, and `bound_reached()` says whether
+  the listing ended or the walk stopped early.
 * **Parse permissively.** Unknown fields are ignored; unknown enum values are
   carried (`RecordType::Other`, `RenewalMode::Other`, `ContactType::Other`);
   scalars are accepted as numbers *or* strings, because INWX is not consistent
@@ -125,7 +172,6 @@ Everything the INWX API documents is in scope. What is not implemented yet is tr
 and worked down in order - the list below is the backlog, not a boundary:
 
 - `domain.log`, `domain.stats`, `domain.getRules`, `domain.getTldGroups` - [#14](https://github.com/floffel/inwx-client/issues/14)
-- automatic pagination for the list endpoints - [#15](https://github.com/floffel/inwx-client/issues/15)
 - reseller/partner objects (`application.*`, `authinfo2.*`, `customer.*`, `document.*`, `host.*`,
   `message.*`, `news.*`, `nichandle.*`, `pdf.*`) - [#22](https://github.com/floffel/inwx-client/issues/22)
 
@@ -145,6 +191,7 @@ documentation does not state:
 | Item | Status |
 | --- | --- |
 | Cookie name, `Path`, `HttpOnly`, expiry | **unverified** — the client never assumes a name; it replays every `Set-Cookie` pair it received, so the name does not matter. Whether the cookie alone is sufficient for every method is not documented. |
+| `pagelimit` ceiling | **unverified** — the API documents `page`/`pagelimit` and a `count` in the answer, but no maximum page size. `MAX_PAGE_SIZE` (1000), `MAX_ITEMS` (100\_000) and `MAX_PAGES` (10\_000) are crate-side ceilings, documented as such. |
 | Rate limits and `Retry-After` | **unverified** — the docs do not mention either. The client backs off on 429 without reading a header, so a sent header is ignored. |
 | API-key authentication | **unverified** — no method is documented; the crate implements password login only. |
 | `nameserver.info` returning the record array | documented (Table 2.208) and implemented; that it *also* serves as the record listing (there is no `nameserver.listRecords`) is an inference from the documented method list. |
@@ -209,11 +256,20 @@ cargo +nightly fuzz run parse_response
   values, CSR size, auth-code and email shapes) and `tests/coverage.rs` calls the
   `Display`/`FromStr`/serde impls and error branches that doctests exercise —
   `cargo llvm-cov` does not count doctests.
+  `tests/pagination.rs` is the pagination matrix: every page of each of the three
+  list commands, filters carried on every request, the cursor owned by the walk,
+  truncation at the object bound, the runaway walk stopped by the request bound,
+  the 1000/1001 page-size pair and the `MAX_ITEMS`/`MAX_PAGES` pairs refused
+  before the wire, terminal vs retryable pages, and eight walks sharing one
+  client across four threads.
 * **Property** (`proptest`) — builders and parsers never panic over arbitrary
   input; accepted enum values round-trip through `Display`/`FromStr`; accepted
   emails and timestamps round-trip; zone params survive a JSON round trip;
   `RecordSet` never accepts an apex CNAME; an `Irreversible` acknowledgement only
-  builds the request whose action it names.
+  builds the request whose action it names; the paging limits accept exactly
+  `1..=MAX_PAGE_SIZE` / `1..=MAX_ITEMS` / `1..=MAX_PAGES` and nothing else; a page
+  always carries the walker's cursor and keeps the listing's filter; a zone
+  filter is refused exactly when it is blank.
 * **Coverage** — 98.6 % lines / 99.6 % functions without the `http` feature. CI
   gates at 95 %; the reqwest adapter is the only code that needs a socket.
 * **Fuzz** — `fuzz/fuzz_targets/parse_response.rs` feeds arbitrary bytes through

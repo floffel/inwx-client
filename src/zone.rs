@@ -1523,6 +1523,11 @@ impl<T: Transport> InwxClient<T> {
 
     /// Reads the zone list filtered by a domain pattern (`nameserver.list`).
     ///
+    /// For more than one page use
+    /// [`InwxClient::list_all_zones`](crate::InwxClient::list_all_zones) with
+    /// [`ZoneListing::with_filter`](crate::ZoneListing::with_filter), which
+    /// sends the same parameters and walks the result.
+    ///
     /// `nameserver.list` accepts a `domain` filter with `*` wildcards; the plain
     /// [`InwxClient::list_zones`](crate::InwxClient::list_zones) does not expose
     /// it.

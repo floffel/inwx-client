@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 
 use crate::client::InwxClient;
 use crate::error::{Error, Result};
+use crate::pagination::{self, Listing, Page, Pages, Pagination};
 use crate::record::DnsRecord;
 use crate::transport::Transport;
 use crate::types::{de, DomainName, Hostname};
@@ -131,6 +132,132 @@ pub struct ZoneListPage {
     pub zones: Vec<ZoneSummary>,
 }
 
+/// The page rules [`Pages`] needs to walk `nameserver.list`.
+///
+/// ```
+/// use inwx_client::{Page, ZoneListPage};
+///
+/// let page: ZoneListPage = serde_json::from_str(
+///     r#"{"domains":[{"domain":"a.de"},{"domain":"b.de"}]}"#,
+/// )?;
+/// assert_eq!(page.total(), None);
+/// assert_eq!(page.len(), 2);
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+impl Page for ZoneListPage {
+    type Item = ZoneSummary;
+
+    fn total(&self) -> Option<i64> {
+        self.count
+    }
+
+    fn len(&self) -> usize {
+        self.zones.len()
+    }
+
+    fn truncate_to(&mut self, len: usize) {
+        self.zones.truncate(len);
+    }
+
+    fn into_items(self) -> Vec<ZoneSummary> {
+        self.zones
+    }
+}
+
+/// The `nameserver.list` command, ready to be walked page by page with
+/// [`Pages`].
+///
+/// Without a filter the request carries only `page` and `pagelimit`, exactly
+/// like [`InwxClient::list_zones`]. With one it
+/// carries `domain` and `wide` like
+/// [`InwxClient::find_zones`], so a filtered
+/// search can be paginated too.
+///
+/// ```
+/// use inwx_client::{Listing, ZoneListing};
+///
+/// assert_eq!(<ZoneListing as Listing>::METHOD, "nameserver.list");
+/// assert_eq!(
+///     ZoneListing::new().params(2, 25),
+///     serde_json::json!({"page": 2, "pagelimit": 25})
+/// );
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ZoneListing {
+    filter: Option<String>,
+}
+
+impl ZoneListing {
+    /// Every zone of the account.
+    ///
+    /// ```
+    /// use inwx_client::ZoneListing;
+    ///
+    /// assert_eq!(ZoneListing::new().filter(), None);
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Only zones whose name matches `filter`, which may contain `*`
+    /// wildcards.
+    ///
+    /// ```
+    /// use inwx_client::{Listing, ZoneListing};
+    ///
+    /// let listing = ZoneListing::with_filter("tenant-*")?;
+    /// assert_eq!(listing.filter(), Some("tenant-*"));
+    /// assert_eq!(
+    ///     listing.params(1, 10),
+    ///     serde_json::json!({"domain": "tenant-*", "wide": 1, "page": 1, "pagelimit": 10})
+    /// );
+    /// assert!(ZoneListing::with_filter("   ").is_err());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the filter is
+    /// empty — `*` is the documented way to ask for everything.
+    pub fn with_filter(filter: &str) -> Result<Self> {
+        let filter = filter.trim();
+        if filter.is_empty() {
+            return Err(Error::validation("domain", "must not be empty (use `*`)"));
+        }
+        Ok(Self {
+            filter: Some(filter.to_owned()),
+        })
+    }
+
+    /// The filter the walk is using, when it has one.
+    ///
+    /// ```
+    /// use inwx_client::ZoneListing;
+    ///
+    /// assert_eq!(ZoneListing::new().filter(), None);
+    /// assert_eq!(ZoneListing::with_filter("*").unwrap().filter(), Some("*"));
+    /// ```
+    #[must_use]
+    pub fn filter(&self) -> Option<&str> {
+        self.filter.as_deref()
+    }
+}
+
+impl Listing for ZoneListing {
+    type Page = ZoneListPage;
+
+    const METHOD: &'static str = "nameserver.list";
+
+    fn params(&self, page: u32, page_size: u32) -> Value {
+        let params = match &self.filter {
+            Some(filter) => json!({ "domain": filter, "wide": 1 }),
+            None => json!({}),
+        };
+        pagination::with_paging(params, page, page_size)
+    }
+}
+
 /// The result of checking one nameserver (`nameserver.check`).
 ///
 /// ```
@@ -200,6 +327,9 @@ impl<T: Transport> InwxClient<T> {
 
     /// Lists the account's zones (`nameserver.list`), first page.
     ///
+    /// For more than one page use
+    /// [`InwxClient::list_all_zones`], which walks them.
+    ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
     /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
@@ -222,6 +352,9 @@ impl<T: Transport> InwxClient<T> {
     }
 
     /// Lists one page of zones (`nameserver.list`).
+    ///
+    /// [`InwxClient::list_all_zones`] does the same requests in order and
+    /// stops at a bound, so a caller does not have to count pages.
     ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
@@ -251,6 +384,66 @@ impl<T: Transport> InwxClient<T> {
             )
             .await?;
         serde_json::from_value(data).map_err(Error::from)
+    }
+
+    /// Walks every page of the account's zones (`nameserver.list`).
+    ///
+    /// [`InwxClient::list_zones`] answers the
+    /// first page only; this is the cursor for accounts with more zones than
+    /// fit into one request. The bound in `pagination` decides how far the walk
+    /// goes, and it is checked before the first request.
+    ///
+    /// ```
+    /// # use inwx_client::{
+    /// #     InwxClient, Pagination, Result, ZoneListing,
+    /// #     transport::{Request, Response, Transport},
+    /// # };
+    /// # use std::sync::{Arc, Mutex};
+    /// #[derive(Clone)]
+    /// struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+    ///
+    /// impl Transport for Scripted {
+    ///     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    ///         let body = self.0.lock().unwrap().remove(0);
+    ///         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    ///     }
+    /// }
+    ///
+    /// # async fn demo() -> Result<Vec<String>> {
+    /// let transport = Scripted(Arc::new(Mutex::new(vec![
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domains":[{"domain":"a.de"},{"domain":"b.de"}]}}"#,
+    ///     r#"{"code":1000,"msg":"ok","resData":{"domains":[{"domain":"c.de"}]}}"#,
+    /// ])));
+    /// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+    /// let listing = ZoneListing::with_filter("*")?;
+    /// let names = client
+    ///     .list_all_zones(&listing, &Pagination::new().with_page_size(2)?)
+    ///     .collect_all()
+    ///     .await?
+    ///     .iter()
+    ///     .map(|zone| zone.domain.to_string())
+    ///     .collect();
+    /// # Ok(names)
+    /// # }
+    /// # assert_eq!(
+    /// #     tokio::runtime::Runtime::new().unwrap().block_on(demo()).unwrap(),
+    /// #     ["a.de", "b.de", "c.de"]
+    /// # );
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The bound is validated when it is built (see
+    /// [`Pagination::with_page_size`]) and
+    /// so is the listing's filter
+    /// ([`ZoneListing::with_filter`]); the walk itself reports the usual
+    /// transport and API errors.
+    pub fn list_all_zones(
+        &self,
+        listing: &ZoneListing,
+        pagination: &Pagination,
+    ) -> Pages<'_, T, ZoneListing> {
+        Pages::new(self, listing.clone(), *pagination)
     }
 
     /// Deletes a zone (`nameserver.delete`).
