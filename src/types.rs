@@ -17,6 +17,21 @@ use crate::{Error, Result};
 pub const MAX_DOMAIN_LEN: usize = 253;
 
 /// Longest legal single DNS label.
+///
+/// The limit is measured in bytes on the ASCII (punycode) form and applies to
+/// every label, including the first and the last.
+///
+/// ```
+/// use inwx_client::{DomainName, Hostname, MAX_LABEL_LEN};
+///
+/// let at_limit = format!("{}.com", "a".repeat(MAX_LABEL_LEN));
+/// assert!(DomainName::parse(&at_limit).is_ok());
+/// assert!(Hostname::parse(&at_limit).is_ok());
+///
+/// let over_limit = format!("{}.com", "a".repeat(MAX_LABEL_LEN + 1));
+/// assert!(DomainName::parse(&over_limit).is_err());
+/// assert!(Hostname::parse(&over_limit).is_err());
+/// ```
 pub const MAX_LABEL_LEN: usize = 63;
 
 /// A domain name, validated and converted to its ASCII (punycode) form.
@@ -1362,9 +1377,40 @@ mod tests {
     }
 
     #[test]
-    fn domain_rejects_overlong_names() {
-        let long_label = "a".repeat(64);
-        assert!(DomainName::parse(&format!("{long_label}.com")).is_err());
+    fn domain_and_hostname_enforce_label_and_name_limits() {
+        let max_label = "a".repeat(MAX_LABEL_LEN);
+        let at_limit = format!("{max_label}.com");
+        assert_eq!(
+            DomainName::parse(&at_limit)
+                .ok()
+                .as_ref()
+                .map(DomainName::as_str),
+            Some(at_limit.as_str())
+        );
+        assert_eq!(
+            Hostname::parse(&at_limit)
+                .ok()
+                .as_ref()
+                .map(Hostname::as_str),
+            Some(at_limit.as_str())
+        );
+
+        let long_label = format!("{}.com", "a".repeat(MAX_LABEL_LEN + 1));
+        assert!(matches!(
+            DomainName::parse(&long_label),
+            Err(Error::Validation {
+                field: "domain",
+                ..
+            })
+        ));
+        assert!(matches!(
+            Hostname::parse(&long_label),
+            Err(Error::Validation {
+                field: "hostname",
+                ..
+            })
+        ));
+
         let long_name = format!("{}.com", "a".repeat(250));
         assert!(DomainName::parse(&long_name).is_err());
     }

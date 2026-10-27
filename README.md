@@ -186,7 +186,7 @@ documented API and were replaced: `domain.cancel` (use `domain.delete` or
 ## Testing
 
 ```bash
-cargo test                        # unit + integration + 657 doctests, no network
+cargo test                        # unit + integration + 658 doctests, no network
 cargo test --no-default-features  # the same, without reqwest/tokio
 cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --no-deps --all-features
