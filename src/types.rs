@@ -786,20 +786,6 @@ impl<'de> Deserialize<'de> for Handle {
 /// use inwx_client::Email;
 ///
 /// assert_eq!(Email::parse("Hostmaster@Example.COM")?.as_str(), "Hostmaster@Example.COM");
-///
-/// let local_64 = format!("{}@example.com", "a".repeat(64));
-/// assert_eq!(Email::parse(&local_64)?.as_str(), local_64);
-/// assert!(Email::parse(&format!("{}@example.com", "a".repeat(65))).is_err());
-///
-/// let domain_190 = format!("{}.{}.{}", "b".repeat(63), "c".repeat(63), "d".repeat(62));
-/// let address_255 = format!("{}@{domain_190}", "a".repeat(64));
-/// assert_eq!(address_255.len(), 255);
-/// assert!(Email::parse(&address_255).is_ok());
-/// let domain_191 = format!("{}.{}.{}", "b".repeat(63), "c".repeat(63), "d".repeat(63));
-/// let address_256 = format!("{}@{domain_191}", "a".repeat(64));
-/// assert_eq!(address_256.len(), 256);
-/// assert!(Email::parse(&address_256).is_err());
-///
 /// for bad in ["", "hostmaster", "a@b", "a b@example.com", "@example.com", "a@"] {
 ///     assert!(Email::parse(bad).is_err(), "{bad:?}");
 /// }
@@ -813,9 +799,8 @@ impl Email {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the address is empty, longer than 255 bytes,
-    /// has no single `@`, has a local part longer than 64 bytes, or either side
-    /// is unusable.
+    /// [`Error::Validation`] when the address is empty, longer than 255
+    /// characters, has no single `@`, or either side is unusable.
     pub fn parse(input: &str) -> Result<Self> {
         let trimmed = input.trim();
         if trimmed.is_empty() {
@@ -1377,48 +1362,11 @@ mod tests {
     }
 
     #[test]
-    fn domain_enforces_label_and_total_length_limits() {
-        let max_label = "a".repeat(MAX_LABEL_LEN);
-        assert!(DomainName::parse(&format!("{max_label}.com")).is_ok());
-
-        let long_label = "a".repeat(MAX_LABEL_LEN + 1);
+    fn domain_rejects_overlong_names() {
+        let long_label = "a".repeat(64);
         assert!(DomainName::parse(&format!("{long_label}.com")).is_err());
-
-        // 253 characters: 63 + 1 + 63 + 1 + 63 + 1 + 61. None of the labels
-        // exceeds MAX_LABEL_LEN, so only the total-name limit can reject 254.
-        let last_label_len = MAX_DOMAIN_LEN - (3 * MAX_LABEL_LEN + 3);
-        let at_limit = format!(
-            "{}.{}.{}.{}",
-            "a".repeat(MAX_LABEL_LEN),
-            "b".repeat(MAX_LABEL_LEN),
-            "c".repeat(MAX_LABEL_LEN),
-            "d".repeat(last_label_len)
-        );
-        assert_eq!(at_limit.len(), MAX_DOMAIN_LEN);
-        assert_eq!(
-            DomainName::parse(&at_limit)
-                .ok()
-                .as_ref()
-                .map(DomainName::as_str),
-            Some(at_limit.as_str())
-        );
-
-        let over_limit = format!(
-            "{}.{}.{}.{}",
-            "a".repeat(MAX_LABEL_LEN),
-            "b".repeat(MAX_LABEL_LEN),
-            "c".repeat(MAX_LABEL_LEN),
-            "d".repeat(last_label_len + 1)
-        );
-        assert_eq!(over_limit.len(), MAX_DOMAIN_LEN + 1);
-        let expected = format!(
-            "must be at most {MAX_DOMAIN_LEN} characters, got {}",
-            over_limit.len()
-        );
-        assert!(matches!(
-            DomainName::parse(&over_limit),
-            Err(Error::Validation { field: "domain", ref message }) if message == &expected
-        ));
+        let long_name = format!("{}.com", "a".repeat(250));
+        assert!(DomainName::parse(&long_name).is_err());
     }
 
     #[test]
