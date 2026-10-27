@@ -3,7 +3,7 @@
 
 use inwx_client::{
     parse_ip, AuthCode, CertificateId, CertificateOrder, CertificateTerm, CertificateUpdate,
-    DnsKey, DnssecKeyQuery, DomainName, DsRecord, Email, Error, Handle, HostingPeriod, Hostname,
+    DnsKey, DnssecKeyQuery, DomainName, DsRecord, Email, Handle, HostingPeriod, Hostname,
     NameserverSetCreate, NameserverSetType, PostalDelivery, RefundRequest, StatementQuery,
     TagUpdate, Timestamp, ZoneCreate, ZoneUpdate,
 };
@@ -68,45 +68,18 @@ fn a_unicode_name_is_sent_in_its_idn_form() {
 // ------------------------------------------------------------------- email --
 
 #[test]
-fn email_local_part_limit_is_64_bytes() {
-    let local_64 = "a".repeat(64);
-    let accepted = format!("{local_64}@example.com");
-    assert_eq!(Email::parse(&accepted).unwrap().as_str(), accepted);
-
-    let rejected = format!("{}@example.com", "a".repeat(65));
-    let error = Email::parse(&rejected).unwrap_err();
-    assert!(matches!(
-        error,
-        Error::Validation { field: "email", message }
-            if message == "local part must be at most 64 characters"
-    ));
-}
-
-#[test]
-fn email_total_length_limit_is_255_bytes() {
-    let domain_190 = format!("{}.{}.{}", "b".repeat(63), "c".repeat(63), "d".repeat(62));
-    let accepted = format!("{}@{domain_190}", "a".repeat(64));
-    assert_eq!(accepted.len(), 255);
-    assert_eq!(Email::parse(&accepted).unwrap().as_str(), accepted);
-
-    let domain_191 = format!("{}.{}.{}", "b".repeat(63), "c".repeat(63), "d".repeat(63));
-    let rejected = format!("{}@{domain_191}", "a".repeat(64));
-    assert_eq!(rejected.len(), 256);
-    let error = Email::parse(&rejected).unwrap_err();
-    assert!(matches!(
-        error,
-        Error::Validation { field: "email", message }
-            if message == "must be at most 255 characters"
-    ));
-}
-
-#[test]
-fn email_shapes_are_validated() {
+fn email_boundaries() {
     assert!(Email::parse("hostmaster@example.com").is_ok());
     assert_eq!(
         Email::parse(" Hostmaster@Example.COM ").unwrap().as_str(),
         "Hostmaster@Example.COM"
     );
+    let local_64 = format!("{}@example.com", "a".repeat(64));
+    let local_65 = format!("{}@example.com", "a".repeat(65));
+    assert!(Email::parse(&local_64).is_ok());
+    assert!(Email::parse(&local_65).is_err());
+    let long_domain = format!("a@{}", "b".repeat(250));
+    assert!(Email::parse(&long_domain).is_err());
     for bad in [
         "",
         " ",

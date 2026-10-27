@@ -1377,11 +1377,48 @@ mod tests {
     }
 
     #[test]
-    fn domain_rejects_overlong_names() {
-        let long_label = "a".repeat(64);
+    fn domain_enforces_label_and_total_length_limits() {
+        let max_label = "a".repeat(MAX_LABEL_LEN);
+        assert!(DomainName::parse(&format!("{max_label}.com")).is_ok());
+
+        let long_label = "a".repeat(MAX_LABEL_LEN + 1);
         assert!(DomainName::parse(&format!("{long_label}.com")).is_err());
-        let long_name = format!("{}.com", "a".repeat(250));
-        assert!(DomainName::parse(&long_name).is_err());
+
+        // 253 characters: 63 + 1 + 63 + 1 + 63 + 1 + 61. None of the labels
+        // exceeds MAX_LABEL_LEN, so only the total-name limit can reject 254.
+        let last_label_len = MAX_DOMAIN_LEN - (3 * MAX_LABEL_LEN + 3);
+        let at_limit = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(MAX_LABEL_LEN),
+            "b".repeat(MAX_LABEL_LEN),
+            "c".repeat(MAX_LABEL_LEN),
+            "d".repeat(last_label_len)
+        );
+        assert_eq!(at_limit.len(), MAX_DOMAIN_LEN);
+        assert_eq!(
+            DomainName::parse(&at_limit)
+                .ok()
+                .as_ref()
+                .map(DomainName::as_str),
+            Some(at_limit.as_str())
+        );
+
+        let over_limit = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(MAX_LABEL_LEN),
+            "b".repeat(MAX_LABEL_LEN),
+            "c".repeat(MAX_LABEL_LEN),
+            "d".repeat(last_label_len + 1)
+        );
+        assert_eq!(over_limit.len(), MAX_DOMAIN_LEN + 1);
+        let expected = format!(
+            "must be at most {MAX_DOMAIN_LEN} characters, got {}",
+            over_limit.len()
+        );
+        assert!(matches!(
+            DomainName::parse(&over_limit),
+            Err(Error::Validation { field: "domain", ref message }) if message == &expected
+        ));
     }
 
     #[test]

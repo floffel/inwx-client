@@ -58,6 +58,11 @@ pub enum Reply {
         /// Whether a retry could help.
         retryable: bool,
     },
+    /// A transport-level failure whose outcome is unknown.
+    AmbiguousFailure {
+        /// Message for [`Error::Ambiguous`].
+        message: String,
+    },
 }
 
 /// Records calls and replays scripted replies.
@@ -140,6 +145,13 @@ impl MockTransport {
         });
     }
 
+    /// Queues an ambiguous transport failure.
+    pub fn ambiguous_failure(&self, message: &str) {
+        self.push(Reply::AmbiguousFailure {
+            message: message.to_owned(),
+        });
+    }
+
     /// Every recorded call.
     pub fn calls(&self) -> Vec<Call> {
         self.state.lock().unwrap().calls.clone()
@@ -200,6 +212,7 @@ impl Transport for MockTransport {
                     retryable: false,
                 }
             }),
+            Some(Reply::AmbiguousFailure { message }) => Err(Error::ambiguous(message)),
             None => Ok(json_response(r#"{"code":1000,"msg":"ok"}"#)),
         }
     }
