@@ -80,6 +80,7 @@ Every method below is implemented against the published INWX API documentation
 | Accounting | `accounting.accountBalance`, `creditLogById`, `getInvoice`, `getPreviewInvoice`, `getReceipt`, `getstatement`, `listInvoices`, `lockedFunds`, `log`, `refund`, `sendbypost` | PDFs decoded from base64 (`Document::pdf_bytes`); `refund` needs the acknowledgement |
 | Contacts | `contact.create`, `contact.info`, `contact.list`, `contact.update`, `contact.delete` | documented field lengths and country codes enforced |
 | Prices | `domain.getPrices`, `domain.getdomainprice` | `f64` quotes, not amounts to sum |
+| Pagination | `Pagination`, `DomainPager`, `ContactPager`, `ZonePager`, `all_domains`, `all_contacts`, `all_zones` | bounded walk over `page`/`pagelimit` for `domain.list`, `contact.list`, `nameserver.list`; the item cap truncates, the request cap is an error |
 | Anything else | `InwxClient::call(method, params)` | login, cookies, retries and error envelopes still apply |
 
 ### Design
@@ -106,6 +107,16 @@ Every method below is implemented against the published INWX API documentation
 * **Bounded retries.** Three attempts, exponential backoff from 500 ms to 8 s,
   only for transport failures, HTTP 429/5xx and result code `2300` (object pending
   transfer). A rejected command is never repeated.
+* **Pagination you do not hand-roll.** The list methods take a 1-based `page` and a
+  `pagelimit` and answer with one page plus a `count` of all matches, so a single
+  call is never the whole list. `Pagination` sets the bounds - page size, item cap,
+  request cap - and all three are checked locally before anything is sent, so a
+  mistyped limit is a `Validation` error and not a request. `DomainPager`,
+  `ContactPager` and `ZonePager` then walk every page and stop when the provider
+  says there is nothing left. Reaching the item cap truncates quietly
+  (`is_truncated`), because the caller asked for exactly that many items; reaching
+  the request cap is `Error::Pagination`, because a list that stops early must never
+  look complete.
 
 ## Feature flags
 
@@ -125,7 +136,6 @@ Everything the INWX API documents is in scope. What is not implemented yet is tr
 and worked down in order - the list below is the backlog, not a boundary:
 
 - `domain.log`, `domain.stats`, `domain.getRules`, `domain.getTldGroups` - [#14](https://github.com/floffel/inwx-client/issues/14)
-- automatic pagination for the list endpoints - [#15](https://github.com/floffel/inwx-client/issues/15)
 - reseller/partner objects (`application.*`, `authinfo2.*`, `customer.*`, `document.*`, `host.*`,
   `message.*`, `news.*`, `nichandle.*`, `pdf.*`) - [#22](https://github.com/floffel/inwx-client/issues/22)
 
@@ -157,6 +167,7 @@ documentation does not state:
 | `tag.list` `count.domain` nesting | **unverified** — the table's indentation is ambiguous; both shapes are tolerated. |
 | `dyndnssubscription.cancel` id semantics | **unverified** — Table 2.161 types `id` as "the customer's subscription id", while `create` uses the same name for the plan id; the crate takes two separate parameters so the two cannot be confused. |
 | Every 0.2.0 write against a live endpoint | **unverified** — no credentials in CI; method names, parameters and datatypes come from the tables in `docs/contracts.md`. |
+| `pagelimit` maximum | **unverified** — INWX types `pagelimit` as a plain `int` (Tables 2.99, 2.203, 2.209) and publishes no maximum, so `MAX_PAGE_SIZE = 1000` is a crate-side bound rather than a documented one; a larger value is refused locally. |
 | Unicode → punycode | UTS-46 mapping via `idna`, so emoji become punycode and characters the mapping deletes disappear. The ACE form (`DomainName::as_str`) is what is sent, logged and compared. |
 
 Two methods the predecessor implementation called do **not** exist in the

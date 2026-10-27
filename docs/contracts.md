@@ -263,6 +263,39 @@ decodes them with the `base64` crate and refuses invalid input rather than writi
 a corrupt file. `accounting.refund` moves money and therefore requires the same
 `Irreversible` acknowledgement as the ownership commands.
 
+## Automatic pagination (`src/pagination.rs`)
+
+Sources: <https://account.inwx.com/en/help/apidoc/f/ch02s09.html> (`domain.list`,
+§2.9), <https://account.inwx.com/en/help/apidoc/f/ch02s06.html> (`contact.list`,
+§2.6), <https://account.inwx.com/en/help/apidoc/f/ch02s15.html> (`nameserver.list`,
+Tables 2.209/2.210).
+
+| Method | Paging input | Paging output | Item array |
+| --- | --- | --- | --- |
+| `domain.list` | `page` `int` (1-based), `pagelimit` `int` | `count` `int` (all matches) | `domain[]` |
+| `contact.list` | `page`, `pagelimit` | `count` | `contact[]` |
+| `nameserver.list` | `page`, `pagelimit` (Tables 2.209) | `count` (Table 2.210) | `domains[]` |
+
+The same pair is documented for `nameserver.exportlist` (Table 2.203) and
+`dnssec.listkeys` (Tables 2.99/2.100), which is what fixes the semantics: `page`
+counts pages from 1, `pagelimit` is the maximum number of items the provider puts
+on one page, and `count` is the total number of matching objects across all pages,
+not the length of the answer.
+
+Reading of the shape, as implemented by `Pagination` and the three pagers:
+
+- A single call returns one page, never the whole list; the walks in
+  `DomainPager`, `ContactPager` and `ZonePager` increment `page` until the answer
+  runs out.
+- End of the walk is decided from `count` when the API sent one (items read so far
+  `>= count`), from the page length when it did not (a short page is the last
+  page), and always on an empty page. `count` is therefore `Option<i64>` on the
+  page types rather than a required field.
+- The provider publishes **no maximum for `pagelimit`** (it is a plain `int`), so
+  `MAX_PAGE_SIZE` is a crate-side bound; see Unverified below.
+- Filters are orthogonal to paging: `domain.list`'s `domain` filter array and
+  `contact.list`'s `search` are sent unchanged on every page of a walk.
+
 ## Unverified
 
 Points the documentation does not settle. Each is modelled as documented and
@@ -277,6 +310,7 @@ flagged here; none is a guess about an endpoint's existence.
 | `certificate.log` answer shape | **unverified** | Table 2.64 lists flat fields; whether the API wraps them in an array is not shown. The parser accepts an array or a single object. |
 | `nameserver.exportlist` "export as file" | **unverified** | Table 2.203/2.204 promises a document but documents a `count`+`domains` payload; the crate parses the documented payload. |
 | `tag.list` `count` nesting | **unverified** | Table 2.235 shows `count` → `domain` with an ambiguous indentation; parsed as `{"count": {"domain": N}}` with a scalar `count` also tolerated. |
+| `pagelimit` maximum | **unverified** | The tables type `pagelimit` as a plain `int` (2.99, 2.203, 2.209) and state no upper bound, so `MAX_PAGE_SIZE = 1000` is a crate-side guard chosen to keep one response comfortably in memory. Values above it are refused locally; values at or below it are sent as documented. |
 | Live-endpoint behaviour for every 0.2.0 method | **unverified** | No credentials in CI; every test is offline against fixtures. Method names, parameters and datatypes are from the tables above. |
 | `extData` per-TLD keys | **documented, not enumerated** | ch03 §3.49 lists the generic keys and then a long TLD-specific list; `ExtData::set` carries any upper-case token. |
 

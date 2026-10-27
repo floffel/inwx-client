@@ -5,11 +5,15 @@
 //! mirrors the documented field types (`text64` street, `text10` postcode,
 //! two-letter country) so a rejected handle is a local error.
 
+use std::collections::VecDeque;
+use std::fmt;
+
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::client::InwxClient;
 use crate::error::{Error, Result};
+use crate::pagination::{Pagination, Walk};
 use crate::transport::Transport;
 use crate::types::{de, reject_control_chars, ContactType};
 
@@ -882,6 +886,97 @@ impl<T: Transport> InwxClient<T> {
         serde_json::from_value(data).map_err(Error::from)
     }
 
+    /// Walks every page of `contact.list` with bounded automatic pagination.
+    ///
+    /// The pager owns `page` and `pagelimit`; the search term in `query` is
+    /// kept, so a filtered search still walks all of its pages. See
+    /// [`ContactPager`] for the bounds and for how to drive the walk.
+    ///
+    /// ```
+    /// # use std::sync::{Arc, Mutex};
+    /// # use inwx_client::transport::{Request, Response, Transport};
+    /// # use inwx_client::{ContactQuery, InwxClient, Pagination, Result};
+    /// # #[derive(Clone)]
+    /// # struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+    /// # impl Transport for Scripted {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         let body = self.0.lock().unwrap().remove(0);
+    /// #         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<usize> {
+    /// let transport = Scripted(Arc::new(Mutex::new(vec![
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"contact":[{"roId":1,"name":"A"},{"roId":2,"name":"B"}]}}"#,
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"contact":[{"roId":3,"name":"C"}]}}"#,
+    /// ])));
+    /// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+    /// let paging = Pagination::new().with_page_size(2)?;
+    /// let mut pager = client.paginate_contacts(&ContactQuery::new().with_search("acme"), &paging);
+    /// let runtime = tokio::runtime::Runtime::new().unwrap();
+    /// let first = runtime.block_on(pager.next_page())?.expect("one page");
+    /// assert_eq!(first.contacts.len(), 2);
+    /// assert_eq!(pager.pages_fetched(), 1);
+    /// # Ok(first.contacts.len())
+    /// # }
+    /// # assert_eq!(demo().unwrap(), 2);
+    /// ```
+    #[must_use]
+    pub fn paginate_contacts(
+        &self,
+        query: &ContactQuery,
+        paging: &Pagination,
+    ) -> ContactPager<'_, T> {
+        ContactPager::new(self, query.clone(), paging)
+    }
+
+    /// Collects every handle of `contact.list` that the bounds allow.
+    ///
+    /// Reaching [`Pagination::max_items`] truncates the answer without saying so
+    /// here, so a bounded scan that has to be complete should be driven through
+    /// [`paginate_contacts`](Self::paginate_contacts) instead.
+    ///
+    /// ```
+    /// # use std::sync::{Arc, Mutex};
+    /// # use inwx_client::transport::{Request, Response, Transport};
+    /// # use inwx_client::{Contact, ContactQuery, InwxClient, Pagination, Result};
+    /// # #[derive(Clone)]
+    /// # struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+    /// # impl Transport for Scripted {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         let body = self.0.lock().unwrap().remove(0);
+    /// #         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<Vec<i64>> {
+    /// let transport = Scripted(Arc::new(Mutex::new(vec![
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"contact":[{"roId":1,"name":"A"},{"roId":2,"name":"B"}]}}"#,
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"contact":[{"roId":3,"name":"C"}]}}"#,
+    /// ])));
+    /// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+    /// let paging = Pagination::new().with_page_size(2)?;
+    /// let runtime = tokio::runtime::Runtime::new().unwrap();
+    /// let contacts = runtime.block_on(
+    ///     client.all_contacts(&ContactQuery::new(), &paging),
+    /// )?;
+    /// let handles: Vec<i64> = contacts.iter().filter_map(Contact::handle).collect();
+    /// assert_eq!(handles, [1, 2, 3]);
+    /// # Ok(handles)
+    /// # }
+    /// # assert_eq!(demo().unwrap(), [1, 2, 3]);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Pagination`] when the request cap is reached while the provider
+    /// still has more handles, plus the usual transport and API errors.
+    pub async fn all_contacts(
+        &self,
+        query: &ContactQuery,
+        paging: &Pagination,
+    ) -> Result<Vec<Contact>> {
+        self.paginate_contacts(query, paging).collect().await
+    }
+
     /// Updates a handle (`contact.update`).
     ///
     /// ```no_run
@@ -926,6 +1021,331 @@ impl<T: Transport> InwxClient<T> {
     pub async fn delete_contact(&self, id: i64) -> Result<()> {
         self.call("contact.delete", json!({ "id": id })).await?;
         Ok(())
+    }
+}
+
+/// Walks the pages of `contact.list` until the provider runs out of handles or
+/// the bounds of the [`Pagination`] it was built with are reached.
+///
+/// Obtained from [`InwxClient::paginate_contacts`]. A pager is a cursor, not a
+/// [`std::iter::Iterator`]: every step is an `.await`, and a synchronous
+/// iterator cannot do I/O. Use [`next_item`](Self::next_item) handle by handle,
+/// [`next_page`](Self::next_page) page by page, or
+/// [`collect`](Self::collect) for everything the bounds allow.
+///
+/// The pager owns `page` and `pagelimit`. A page set on the query is
+/// overwritten — the search term is kept, paging is not.
+///
+/// ```
+/// # use std::sync::{Arc, Mutex};
+/// # use inwx_client::transport::{Request, Response, Transport};
+/// # use inwx_client::{ContactQuery, InwxClient, Pagination, Result};
+/// # #[derive(Clone)]
+/// # struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+/// # impl Transport for Scripted {
+/// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+/// #         let body = self.0.lock().unwrap().remove(0);
+/// #         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+/// #     }
+/// # }
+/// # fn demo() -> Result<Vec<i64>> {
+/// let transport = Scripted(Arc::new(Mutex::new(vec![
+///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"contact":[{"roId":1,"name":"A"},{"roId":2,"name":"B"}]}}"#,
+///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"contact":[{"roId":3,"name":"C"}]}}"#,
+/// ])));
+/// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+/// let paging = Pagination::new().with_page_size(2)?;
+/// let mut pager = client.paginate_contacts(&ContactQuery::new().with_search("acme"), &paging);
+///
+/// let runtime = tokio::runtime::Runtime::new().unwrap();
+/// let mut handles = Vec::new();
+/// while let Some(contact) = runtime.block_on(pager.next_item())? {
+///     handles.push(contact.handle().unwrap_or_default());
+/// }
+/// assert_eq!(handles, [1, 2, 3]);
+/// assert_eq!(pager.pages_fetched(), 2);
+/// assert!(!pager.is_truncated());
+/// # Ok(handles)
+/// # }
+/// # assert_eq!(demo().unwrap(), [1, 2, 3]);
+/// ```
+pub struct ContactPager<'c, T: Transport> {
+    client: &'c InwxClient<T>,
+    query: ContactQuery,
+    walk: Walk,
+    buffer: VecDeque<Contact>,
+}
+
+/// `Debug` shows where the walk stands; the client is left to its own
+/// redacting `Debug`, so no cookie can leak through a pager.
+impl<T: Transport> fmt::Debug for ContactPager<'_, T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ContactPager")
+            .field("query", &self.query)
+            .field("pages_fetched", &self.walk.pages())
+            .field("items_read", &self.walk.items())
+            .field("buffered", &self.buffer.len())
+            .field("finished", &self.walk.is_finished())
+            .field("truncated", &self.walk.is_truncated())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'c, T: Transport> ContactPager<'c, T> {
+    pub(crate) fn new(client: &'c InwxClient<T>, query: ContactQuery, paging: &Pagination) -> Self {
+        Self {
+            client,
+            query,
+            walk: paging.walk(),
+            buffer: VecDeque::new(),
+        }
+    }
+
+    /// Fetches the next page, or `None` when the walk is over.
+    ///
+    /// Handles of the page are buffered for [`next_item`](Self::next_item), so
+    /// mixing the two methods never reads a handle twice.
+    ///
+    /// ```
+    /// # use std::sync::{Arc, Mutex};
+    /// # use inwx_client::transport::{Request, Response, Transport};
+    /// # use inwx_client::{ContactQuery, InwxClient, Pagination, Result};
+    /// # #[derive(Clone)]
+    /// # struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+    /// # impl Transport for Scripted {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         let body = self.0.lock().unwrap().remove(0);
+    /// #         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<usize> {
+    /// let transport = Scripted(Arc::new(Mutex::new(vec![
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"contact":[{"roId":1,"name":"A"},{"roId":2,"name":"B"}]}}"#,
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"contact":[{"roId":3,"name":"C"}]}}"#,
+    /// ])));
+    /// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+    /// let mut pager = client.paginate_contacts(
+    ///     &ContactQuery::new(),
+    ///     &Pagination::new().with_page_size(2)?,
+    /// );
+    /// let runtime = tokio::runtime::Runtime::new().unwrap();
+    /// let page = runtime.block_on(pager.next_page())?.expect("one page");
+    /// assert_eq!(page.contacts.len(), 2);
+    /// assert_eq!(pager.pages_fetched(), 1);
+    /// # Ok(page.contacts.len())
+    /// # }
+    /// # assert_eq!(demo().unwrap(), 2);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Pagination`] when the request cap is reached while the provider
+    /// still has more handles; the pages read so far stay buffered. Plus the
+    /// usual transport and API errors.
+    pub async fn next_page(&mut self) -> Result<Option<ContactListPage>> {
+        if self.walk.is_finished() {
+            return Ok(None);
+        }
+        let (page, limit) = self.walk.request();
+        let query = self.query.clone().with_page(page, limit);
+        let page = self.client.list_contacts(&query).await?;
+        let kept = self.walk.keep(limit, page.contacts.len());
+        self.buffer.extend(page.contacts.iter().take(kept).cloned());
+        self.walk.absorb(limit, page.count, kept)?;
+        Ok(Some(page))
+    }
+
+    /// Reads the next handle, fetching as many pages as it takes.
+    ///
+    /// ```
+    /// # use std::sync::{Arc, Mutex};
+    /// # use inwx_client::transport::{Request, Response, Transport};
+    /// # use inwx_client::{ContactQuery, InwxClient, Pagination, Result};
+    /// # #[derive(Clone)]
+    /// # struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+    /// # impl Transport for Scripted {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         let body = self.0.lock().unwrap().remove(0);
+    /// #         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<Option<i64>> {
+    /// let transport = Scripted(Arc::new(Mutex::new(vec![
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":1,"contact":[{"roId":991,"name":"Erika"}]}}"#,
+    /// ])));
+    /// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+    /// let mut pager = client.paginate_contacts(&ContactQuery::new(), &Pagination::new());
+    /// let runtime = tokio::runtime::Runtime::new().unwrap();
+    /// let first = runtime
+    ///     .block_on(pager.next_item())?
+    ///     .and_then(|contact| contact.handle());
+    /// let second = runtime.block_on(pager.next_item())?;
+    /// assert_eq!(first, Some(991));
+    /// assert!(second.is_none());
+    /// # Ok(first)
+    /// # }
+    /// # assert_eq!(demo().unwrap(), Some(991));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The same as [`next_page`](Self::next_page).
+    pub async fn next_item(&mut self) -> Result<Option<Contact>> {
+        loop {
+            if let Some(contact) = self.buffer.pop_front() {
+                return Ok(Some(contact));
+            }
+            if self.walk.is_finished() {
+                return Ok(None);
+            }
+            self.next_page().await?;
+        }
+    }
+
+    /// Reads every handle the bounds allow and returns them in provider order.
+    ///
+    /// Hitting the item cap is not an error: the walk stops and
+    /// [`is_truncated`](Self::is_truncated) says so. Hitting the request cap is
+    /// an error, because a silently short list cannot be told apart from a
+    /// complete one.
+    ///
+    /// ```
+    /// # use std::sync::{Arc, Mutex};
+    /// # use inwx_client::transport::{Request, Response, Transport};
+    /// # use inwx_client::{ContactQuery, InwxClient, Pagination, Result};
+    /// # #[derive(Clone)]
+    /// # struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+    /// # impl Transport for Scripted {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         let body = self.0.lock().unwrap().remove(0);
+    /// #         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<usize> {
+    /// let transport = Scripted(Arc::new(Mutex::new(vec![
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"contact":[{"roId":1,"name":"A"},{"roId":2,"name":"B"}]}}"#,
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"contact":[{"roId":3,"name":"C"}]}}"#,
+    /// ])));
+    /// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+    /// let mut pager = client.paginate_contacts(
+    ///     &ContactQuery::new(),
+    ///     &Pagination::new().with_page_size(2)?,
+    /// );
+    /// let runtime = tokio::runtime::Runtime::new().unwrap();
+    /// let contacts = runtime.block_on(pager.collect())?;
+    /// assert_eq!(contacts.len(), 3);
+    /// # Ok(contacts.len())
+    /// # }
+    /// # assert_eq!(demo().unwrap(), 3);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The same as [`next_page`](Self::next_page).
+    pub async fn collect(&mut self) -> Result<Vec<Contact>> {
+        let mut contacts = Vec::new();
+        while let Some(contact) = self.next_item().await? {
+            contacts.push(contact);
+        }
+        Ok(contacts)
+    }
+
+    /// Requests made so far.
+    ///
+    /// ```
+    /// # use inwx_client::{ContactQuery, InwxClient, Pagination, Result, Transport};
+    /// # use inwx_client::transport::{Request, Response};
+    /// # struct Never;
+    /// # impl Transport for Never {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         unreachable!("nothing is fetched here")
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<()> {
+    /// let client = InwxClient::new(Never).with_session("domrobot=test")?;
+    /// let pager = client.paginate_contacts(&ContactQuery::new(), &Pagination::new());
+    /// assert_eq!(pager.pages_fetched(), 0);
+    /// # Ok(())
+    /// # }
+    /// # demo().unwrap();
+    /// ```
+    #[must_use]
+    pub fn pages_fetched(&self) -> u32 {
+        self.walk.pages()
+    }
+
+    /// Handles read so far, including the ones still buffered.
+    ///
+    /// ```
+    /// # use inwx_client::{ContactQuery, InwxClient, Pagination, Result, Transport};
+    /// # use inwx_client::transport::{Request, Response};
+    /// # struct Never;
+    /// # impl Transport for Never {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         unreachable!("nothing is fetched here")
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<()> {
+    /// let client = InwxClient::new(Never).with_session("domrobot=test")?;
+    /// let pager = client.paginate_contacts(&ContactQuery::new(), &Pagination::new());
+    /// assert_eq!(pager.items_read(), 0);
+    /// # Ok(())
+    /// # }
+    /// # demo().unwrap();
+    /// ```
+    #[must_use]
+    pub fn items_read(&self) -> usize {
+        self.walk.items()
+    }
+
+    /// Whether the walk is over, for any reason.
+    ///
+    /// ```
+    /// # use inwx_client::{ContactQuery, InwxClient, Pagination, Result, Transport};
+    /// # use inwx_client::transport::{Request, Response};
+    /// # struct Never;
+    /// # impl Transport for Never {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         unreachable!("nothing is fetched here")
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<()> {
+    /// let client = InwxClient::new(Never).with_session("domrobot=test")?;
+    /// let pager = client.paginate_contacts(&ContactQuery::new(), &Pagination::new());
+    /// assert!(!pager.is_finished());
+    /// # Ok(())
+    /// # }
+    /// # demo().unwrap();
+    /// ```
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.walk.is_finished()
+    }
+
+    /// Whether the walk stopped although the provider had more to give, because
+    /// [`Pagination::max_items`] was reached.
+    ///
+    /// ```
+    /// # use inwx_client::{ContactQuery, InwxClient, Pagination, Result, Transport};
+    /// # use inwx_client::transport::{Request, Response};
+    /// # struct Never;
+    /// # impl Transport for Never {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         unreachable!("nothing is fetched here")
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<()> {
+    /// let client = InwxClient::new(Never).with_session("domrobot=test")?;
+    /// let pager = client.paginate_contacts(&ContactQuery::new(), &Pagination::new());
+    /// assert!(!pager.is_truncated());
+    /// # Ok(())
+    /// # }
+    /// # demo().unwrap();
+    /// ```
+    #[must_use]
+    pub fn is_truncated(&self) -> bool {
+        self.walk.is_truncated()
     }
 }
 

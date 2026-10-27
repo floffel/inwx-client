@@ -48,6 +48,7 @@
 //! | Accounting | `accounting.*` (11 methods) |
 //! | Contacts | `contact.create`, `info`, `list`, `update`, `delete` |
 //! | Prices | `domain.getPrices`, `domain.getdomainprice` |
+//! | Pagination | `Pagination` + `DomainPager`, `ContactPager`, `ZonePager` over `domain.list`, `contact.list`, `nameserver.list` |
 //!
 //! Unknown methods stay reachable through [`InwxClient::call`]; what is not
 //! modelled yet is tracked as an issue, not hidden as "out of scope".
@@ -65,6 +66,11 @@
 //!   carried ([`RecordType::Other`], [`RenewalMode::Other`],
 //!   [`ContactType::Other`]), and scalars are accepted as numbers or strings —
 //!   INWX is inconsistent between methods.
+//! * **Paginate within bounds.** [`Pagination`] carries a page size, an item cap and
+//!   a request cap, all checked before the wire, and [`DomainPager`],
+//!   [`ContactPager`] and [`ZonePager`] walk `page`/`pagelimit` until the provider
+//!   runs out. Hitting the item cap truncates quietly; hitting the request cap is
+//!   [`Error::Pagination`], so a partial list cannot look complete.
 //! * **No socket needed.** The HTTP layer sits behind [`Transport`]; the test
 //!   suite and the examples in these docs drive a scripted mock.
 //!
@@ -110,6 +116,7 @@ pub mod error;
 pub mod hosting;
 pub mod nameserver;
 pub mod nameserverset;
+pub mod pagination;
 pub mod price;
 pub mod record;
 pub mod rpc;
@@ -132,14 +139,16 @@ pub use client::{
     AccountInfo, Credentials, InwxClient, Language, RetryPolicy, DEFAULT_ATTEMPTS,
     DEFAULT_BASE_DELAY, DEFAULT_BASE_URL, DEFAULT_MAX_DELAY, SANDBOX_BASE_URL,
 };
-pub use contact::{Contact, ContactListPage, ContactQuery, ContactRequest, ContactUpdate};
+pub use contact::{
+    Contact, ContactListPage, ContactPager, ContactQuery, ContactRequest, ContactUpdate,
+};
 pub use dnssec::{
     AddDnsKeyRequest, DnsKey, DnsKeyPair, DnssecAlgorithm, DnssecDigestType, DnssecDomainStatus,
     DnssecFlag, DnssecKey, DnssecKeyQuery, DnssecKeyStatus, DnssecState, DsRecord,
 };
 pub use domain::{
-    DomainCheck, DomainCreate, DomainInfo, DomainListPage, DomainListQuery, DomainRenew,
-    DomainUpdate, Registration, RenewalResult,
+    DomainCheck, DomainCreate, DomainInfo, DomainListPage, DomainListQuery, DomainPager,
+    DomainRenew, DomainUpdate, Registration, RenewalResult,
 };
 pub use dyndns::{
     DynDnsAccount, DynDnsAccountInfo, DynDnsAccountRef, DynDnsCheck, DynDnsCreated, DynDnsLog,
@@ -150,9 +159,13 @@ pub use error::{Error, Result};
 pub use hosting::{
     HostingOrder, HostingPackage, HostingPeriod, HostingReinstatement, HostingSuspension,
 };
-pub use nameserver::{NameserverCheck, ZoneInfo, ZoneListPage, ZoneSummary};
+pub use nameserver::{NameserverCheck, ZoneInfo, ZoneListPage, ZonePager, ZoneSummary};
 pub use nameserverset::{
     NameserverSet, NameserverSetCreate, NameserverSetType, NameserverSetUpdate,
+};
+pub use pagination::{
+    Pagination, DEFAULT_MAX_ITEMS, DEFAULT_MAX_PAGES, DEFAULT_PAGE_SIZE, MAX_ITEMS, MAX_PAGES,
+    MAX_PAGE_SIZE,
 };
 pub use price::{DomainPriceQuote, PriceList, TldPrice};
 pub use record::{

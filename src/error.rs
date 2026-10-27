@@ -113,6 +113,39 @@ pub enum Error {
         field: &'static str,
     },
 
+    /// A paginated walk stopped before the provider ran out of items, because
+    /// its request cap ([`max_pages`](crate::Pagination::max_pages)) was reached.
+    ///
+    /// The list is incomplete, which is why this is an error and not a quiet
+    /// short answer: a caller cannot tell 100 domains out of 4 000 from all of
+    /// them. Reaching the *item* cap instead is expected behaviour and reports
+    /// [`is_truncated`](crate::ZonePager::is_truncated) without an error.
+    ///
+    /// The error is terminal — repeating the call reads the same pages again —
+    /// so the answer is a bigger [`Pagination`](crate::Pagination), not a retry. Pages already read
+    /// stay in the pager.
+    ///
+    /// ```
+    /// use inwx_client::{Error, Pagination};
+    ///
+    /// let err = Error::Pagination {
+    ///     pages: 3,
+    ///     items: 300,
+    ///     message: "the list still has more items".into(),
+    /// };
+    /// assert_eq!(err.to_string(), "paginated walk stopped after 3 pages / 300 items: the list still has more items");
+    /// assert!(!err.is_retryable());
+    /// ```
+    #[error("paginated walk stopped after {pages} pages / {items} items: {message}")]
+    Pagination {
+        /// Requests the walk made before it gave up.
+        pages: u32,
+        /// Items read before it gave up.
+        items: usize,
+        /// What to change to get the rest.
+        message: String,
+    },
+
     /// The server answered with a non-2xx status and a body that is not an
     /// INWX error envelope.
     #[error("http {status}: {body}")]

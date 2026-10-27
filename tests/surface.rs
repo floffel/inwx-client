@@ -10,12 +10,13 @@ use std::str::FromStr;
 
 use inwx_client::{
     rpc::{self, Detail, RpcRequest, RpcResponse},
-    transport::{Request, Response},
+    transport::{Request, Response, Transport},
     AccountInfo, Contact, ContactQuery, ContactRequest, ContactType, ContactUpdate, Credentials,
     DnsRecord, DomainCheck, DomainCreate, DomainInfo, DomainListPage, DomainListQuery, DomainName,
     DomainPriceQuote, DomainRenew, DomainUpdate, Error, Hostname, InwxClient, Language,
-    NameserverCheck, Period, PriceList, PriceType, RecordId, RecordSpec, RecordType, RecordUpdate,
-    RenewalMode, RetryPolicy, TldPrice, ZoneInfo, ZoneListPage, ZoneSummary,
+    NameserverCheck, Pagination, Period, PriceList, PriceType, RecordId, RecordSpec, RecordType,
+    RecordUpdate, RenewalMode, RetryPolicy, TldPrice, ZoneInfo, ZoneListPage, ZoneSummary,
+    DEFAULT_MAX_ITEMS, DEFAULT_MAX_PAGES, DEFAULT_PAGE_SIZE, MAX_ITEMS, MAX_PAGES, MAX_PAGE_SIZE,
 };
 use serde_json::json;
 
@@ -592,4 +593,77 @@ fn response_payload_types_are_constructible_and_comparable() {
     let contact = Contact::default();
     assert!(contact.handle().is_none());
     assert!(AccountInfo::default().account_id.is_none());
+}
+
+#[test]
+fn pagination_bounds_and_the_pagers_that_use_them() {
+    // A pager can be built and inspected without a single request.
+    struct Idle;
+    impl Transport for Idle {
+        async fn execute(&self, _request: Request<'_>) -> inwx_client::Result<Response> {
+            std::future::ready(()).await;
+            unreachable!("the pagers are only inspected here")
+        }
+    }
+
+    assert_eq!(Pagination::default(), Pagination::new());
+    assert_eq!(Pagination::new().page_size(), DEFAULT_PAGE_SIZE);
+    assert_eq!(Pagination::new().max_items(), DEFAULT_MAX_ITEMS);
+    assert_eq!(Pagination::new().max_pages(), DEFAULT_MAX_PAGES);
+
+    let widest = Pagination::new()
+        .with_page_size(MAX_PAGE_SIZE)
+        .unwrap()
+        .with_max_items(MAX_ITEMS)
+        .unwrap()
+        .with_max_pages(MAX_PAGES)
+        .unwrap();
+    assert_eq!(widest.page_size(), MAX_PAGE_SIZE);
+    assert_eq!(widest.max_items(), MAX_ITEMS);
+    assert_eq!(widest.max_pages(), MAX_PAGES);
+    // Copy, equality and the debug view, which shows the bounds and nothing else.
+    let copied = widest;
+    assert_eq!(widest, copied);
+    assert!(format!("{widest:?}").contains("page_size"));
+
+    // The upper boundary pair: `MAX_*` is allowed, one more is not.
+    assert!(Pagination::new().with_page_size(1).is_ok());
+    assert!(Pagination::new().with_max_items(1).is_ok());
+    assert!(Pagination::new().with_max_pages(1).is_ok());
+    for error in [
+        Pagination::new().with_page_size(MAX_PAGE_SIZE + 1),
+        Pagination::new().with_max_items(MAX_ITEMS + 1),
+        Pagination::new().with_max_pages(MAX_PAGES + 1),
+    ] {
+        assert!(error.unwrap_err().is_validation());
+    }
+
+    let stopped = Error::Pagination {
+        pages: 2,
+        items: 200,
+        message: "the list still has more items".into(),
+    };
+    assert!(!stopped.is_retryable());
+    assert!(!stopped.is_validation());
+    assert!(stopped.to_string().contains("200 items"));
+
+    let client = InwxClient::new(Idle)
+        .with_session("domrobot=hidden")
+        .unwrap();
+    let domains = client.paginate_domains(&DomainListQuery::new(), &Pagination::new());
+    assert_eq!(domains.pages_fetched(), 0);
+    assert_eq!(domains.items_read(), 0);
+    assert!(!domains.is_finished());
+    assert!(!domains.is_truncated());
+    let debug = format!("{domains:?}");
+    assert!(debug.contains("DomainPager"));
+    assert!(!debug.contains("hidden"));
+
+    let contacts = client.paginate_contacts(&ContactQuery::new(), &widest);
+    assert_eq!(contacts.pages_fetched(), 0);
+    assert!(format!("{contacts:?}").contains("ContactPager"));
+
+    let zones = client.paginate_zones(&Pagination::new());
+    assert_eq!(zones.items_read(), 0);
+    assert!(format!("{zones:?}").contains("ZonePager"));
 }

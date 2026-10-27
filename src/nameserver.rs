@@ -7,11 +7,15 @@
 //! out of scope — see the README — but reachable through
 //! [`InwxClient::call`](crate::InwxClient::call).
 
+use std::collections::VecDeque;
+use std::fmt;
+
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::client::InwxClient;
 use crate::error::{Error, Result};
+use crate::pagination::{Pagination, Walk};
 use crate::record::DnsRecord;
 use crate::transport::Transport;
 use crate::types::{de, DomainName, Hostname};
@@ -253,6 +257,86 @@ impl<T: Transport> InwxClient<T> {
         serde_json::from_value(data).map_err(Error::from)
     }
 
+    /// Walks every page of `nameserver.list` with bounded automatic pagination.
+    ///
+    /// `list_zones` returns one page and stops there; this returns a
+    /// [`ZonePager`] that keeps fetching until the provider runs out of zones or
+    /// the bounds in `paging` are reached.
+    ///
+    /// ```
+    /// # use std::sync::{Arc, Mutex};
+    /// # use inwx_client::transport::{Request, Response, Transport};
+    /// # use inwx_client::{InwxClient, Pagination, Result};
+    /// # #[derive(Clone)]
+    /// # struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+    /// # impl Transport for Scripted {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         let body = self.0.lock().unwrap().remove(0);
+    /// #         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<usize> {
+    /// let transport = Scripted(Arc::new(Mutex::new(vec![
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domains":[{"domain":"a.de"},{"domain":"b.de"}]}}"#,
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domains":[{"domain":"c.de"}]}}"#,
+    /// ])));
+    /// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+    /// let mut pager = client.paginate_zones(&Pagination::new().with_page_size(2)?);
+    /// let runtime = tokio::runtime::Runtime::new().unwrap();
+    /// let first = runtime.block_on(pager.next_page())?.expect("one page");
+    /// assert_eq!(first.zones.len(), 2);
+    /// assert_eq!(pager.pages_fetched(), 1);
+    /// # Ok(first.zones.len())
+    /// # }
+    /// # assert_eq!(demo().unwrap(), 2);
+    /// ```
+    #[must_use]
+    pub fn paginate_zones(&self, paging: &Pagination) -> ZonePager<'_, T> {
+        ZonePager::new(self, paging)
+    }
+
+    /// Collects every zone of `nameserver.list` that the bounds allow.
+    ///
+    /// Reaching [`Pagination::max_items`] truncates the answer without saying so
+    /// here, so a bounded scan that has to be complete should be driven through
+    /// [`paginate_zones`](Self::paginate_zones) instead.
+    ///
+    /// ```
+    /// # use std::sync::{Arc, Mutex};
+    /// # use inwx_client::transport::{Request, Response, Transport};
+    /// # use inwx_client::{InwxClient, Pagination, Result};
+    /// # #[derive(Clone)]
+    /// # struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+    /// # impl Transport for Scripted {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         let body = self.0.lock().unwrap().remove(0);
+    /// #         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<Vec<String>> {
+    /// let transport = Scripted(Arc::new(Mutex::new(vec![
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domains":[{"domain":"a.de"},{"domain":"b.de"}]}}"#,
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domains":[{"domain":"c.de"}]}}"#,
+    /// ])));
+    /// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+    /// let paging = Pagination::new().with_page_size(2)?;
+    /// let runtime = tokio::runtime::Runtime::new().unwrap();
+    /// let zones = runtime.block_on(client.all_zones(&paging))?;
+    /// let names: Vec<String> = zones.iter().map(|zone| zone.domain.to_string()).collect();
+    /// assert_eq!(names, ["a.de", "b.de", "c.de"]);
+    /// # Ok(names)
+    /// # }
+    /// # assert_eq!(demo().unwrap(), ["a.de", "b.de", "c.de"]);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Pagination`] when the request cap is reached while the provider
+    /// still has more zones, plus the usual transport and API errors.
+    pub async fn all_zones(&self, paging: &Pagination) -> Result<Vec<ZoneSummary>> {
+        self.paginate_zones(paging).collect().await
+    }
+
     /// Deletes a zone (`nameserver.delete`).
     ///
     /// ```no_run
@@ -330,6 +414,320 @@ impl<T: Transport> InwxClient<T> {
             .into_iter()
             .filter_map(|entry| serde_json::from_value(entry).ok())
             .collect())
+    }
+}
+
+/// Walks the pages of `nameserver.list` until the provider runs out of zones or
+/// the bounds of the [`Pagination`] it was built with are reached.
+///
+/// Obtained from [`InwxClient::paginate_zones`]. A pager is a cursor, not a
+/// [`std::iter::Iterator`]: every step is an `.await`, and a synchronous
+/// iterator cannot do I/O. Use [`next_item`](Self::next_item) zone by zone,
+/// [`next_page`](Self::next_page) page by page, or
+/// [`collect`](Self::collect) for everything the bounds allow.
+///
+/// The pager owns `page` and `pagelimit`, which is why it exists next to the
+/// single-page [`InwxClient::list_zones_page`].
+///
+/// ```
+/// # use std::sync::{Arc, Mutex};
+/// # use inwx_client::transport::{Request, Response, Transport};
+/// # use inwx_client::{InwxClient, Pagination, Result};
+/// # #[derive(Clone)]
+/// # struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+/// # impl Transport for Scripted {
+/// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+/// #         let body = self.0.lock().unwrap().remove(0);
+/// #         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+/// #     }
+/// # }
+/// # fn demo() -> Result<Vec<String>> {
+/// let transport = Scripted(Arc::new(Mutex::new(vec![
+///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domains":[{"domain":"a.de"},{"domain":"b.de"}]}}"#,
+///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domains":[{"domain":"c.de"}]}}"#,
+/// ])));
+/// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+/// let mut pager = client.paginate_zones(&Pagination::new().with_page_size(2)?);
+///
+/// let runtime = tokio::runtime::Runtime::new().unwrap();
+/// let mut names = Vec::new();
+/// while let Some(zone) = runtime.block_on(pager.next_item())? {
+///     names.push(zone.domain.to_string());
+/// }
+/// assert_eq!(names, ["a.de", "b.de", "c.de"]);
+/// assert_eq!(pager.pages_fetched(), 2);
+/// assert!(!pager.is_truncated());
+/// # Ok(names)
+/// # }
+/// # assert_eq!(demo().unwrap(), ["a.de", "b.de", "c.de"]);
+/// ```
+pub struct ZonePager<'c, T: Transport> {
+    client: &'c InwxClient<T>,
+    walk: Walk,
+    buffer: VecDeque<ZoneSummary>,
+}
+
+/// `Debug` shows where the walk stands; the client is left to its own
+/// redacting `Debug`, so no cookie can leak through a pager.
+impl<T: Transport> fmt::Debug for ZonePager<'_, T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ZonePager")
+            .field("pages_fetched", &self.walk.pages())
+            .field("items_read", &self.walk.items())
+            .field("buffered", &self.buffer.len())
+            .field("finished", &self.walk.is_finished())
+            .field("truncated", &self.walk.is_truncated())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'c, T: Transport> ZonePager<'c, T> {
+    pub(crate) fn new(client: &'c InwxClient<T>, paging: &Pagination) -> Self {
+        Self {
+            client,
+            walk: paging.walk(),
+            buffer: VecDeque::new(),
+        }
+    }
+
+    /// Fetches the next page, or `None` when the walk is over.
+    ///
+    /// Zones of the page are buffered for [`next_item`](Self::next_item), so
+    /// mixing the two methods never reads a zone twice.
+    ///
+    /// ```
+    /// # use std::sync::{Arc, Mutex};
+    /// # use inwx_client::transport::{Request, Response, Transport};
+    /// # use inwx_client::{InwxClient, Pagination, Result};
+    /// # #[derive(Clone)]
+    /// # struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+    /// # impl Transport for Scripted {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         let body = self.0.lock().unwrap().remove(0);
+    /// #         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<usize> {
+    /// let transport = Scripted(Arc::new(Mutex::new(vec![
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domains":[{"domain":"a.de"},{"domain":"b.de"}]}}"#,
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domains":[{"domain":"c.de"}]}}"#,
+    /// ])));
+    /// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+    /// let mut pager = client.paginate_zones(&Pagination::new().with_page_size(2)?);
+    /// let runtime = tokio::runtime::Runtime::new().unwrap();
+    /// let page = runtime.block_on(pager.next_page())?.expect("one page");
+    /// assert_eq!(page.zones.len(), 2);
+    /// assert_eq!(pager.pages_fetched(), 1);
+    /// # Ok(page.zones.len())
+    /// # }
+    /// # assert_eq!(demo().unwrap(), 2);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Pagination`] when the request cap is reached while the provider
+    /// still has more zones; the pages read so far stay buffered. Plus the usual
+    /// transport and API errors.
+    pub async fn next_page(&mut self) -> Result<Option<ZoneListPage>> {
+        if self.walk.is_finished() {
+            return Ok(None);
+        }
+        let (page, limit) = self.walk.request();
+        let page = self.client.list_zones_page(page, limit).await?;
+        let kept = self.walk.keep(limit, page.zones.len());
+        self.buffer.extend(page.zones.iter().take(kept).cloned());
+        self.walk.absorb(limit, page.count, kept)?;
+        Ok(Some(page))
+    }
+
+    /// Reads the next zone, fetching as many pages as it takes.
+    ///
+    /// ```
+    /// # use std::sync::{Arc, Mutex};
+    /// # use inwx_client::transport::{Request, Response, Transport};
+    /// # use inwx_client::{InwxClient, Pagination, Result};
+    /// # #[derive(Clone)]
+    /// # struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+    /// # impl Transport for Scripted {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         let body = self.0.lock().unwrap().remove(0);
+    /// #         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<Option<String>> {
+    /// let transport = Scripted(Arc::new(Mutex::new(vec![
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":1,"domains":[{"domain":"a.de"}]}}"#,
+    /// ])));
+    /// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+    /// let mut pager = client.paginate_zones(&Pagination::new());
+    /// let runtime = tokio::runtime::Runtime::new().unwrap();
+    /// let first = runtime
+    ///     .block_on(pager.next_item())?
+    ///     .map(|zone| zone.domain.to_string());
+    /// let second = runtime.block_on(pager.next_item())?;
+    /// assert_eq!(first.as_deref(), Some("a.de"));
+    /// assert!(second.is_none());
+    /// # Ok(first)
+    /// # }
+    /// # assert_eq!(demo().unwrap().as_deref(), Some("a.de"));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The same as [`next_page`](Self::next_page).
+    pub async fn next_item(&mut self) -> Result<Option<ZoneSummary>> {
+        loop {
+            if let Some(zone) = self.buffer.pop_front() {
+                return Ok(Some(zone));
+            }
+            if self.walk.is_finished() {
+                return Ok(None);
+            }
+            self.next_page().await?;
+        }
+    }
+
+    /// Reads every zone the bounds allow and returns them in provider order.
+    ///
+    /// Hitting the item cap is not an error: the walk stops and
+    /// [`is_truncated`](Self::is_truncated) says so. Hitting the request cap is
+    /// an error, because a silently short list cannot be told apart from a
+    /// complete one.
+    ///
+    /// ```
+    /// # use std::sync::{Arc, Mutex};
+    /// # use inwx_client::transport::{Request, Response, Transport};
+    /// # use inwx_client::{InwxClient, Pagination, Result};
+    /// # #[derive(Clone)]
+    /// # struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+    /// # impl Transport for Scripted {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         let body = self.0.lock().unwrap().remove(0);
+    /// #         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<usize> {
+    /// let transport = Scripted(Arc::new(Mutex::new(vec![
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domains":[{"domain":"a.de"},{"domain":"b.de"}]}}"#,
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domains":[{"domain":"c.de"}]}}"#,
+    /// ])));
+    /// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+    /// let mut pager = client.paginate_zones(&Pagination::new().with_page_size(2)?);
+    /// let runtime = tokio::runtime::Runtime::new().unwrap();
+    /// let zones = runtime.block_on(pager.collect())?;
+    /// assert_eq!(zones.len(), 3);
+    /// # Ok(zones.len())
+    /// # }
+    /// # assert_eq!(demo().unwrap(), 3);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The same as [`next_page`](Self::next_page).
+    pub async fn collect(&mut self) -> Result<Vec<ZoneSummary>> {
+        let mut zones = Vec::new();
+        while let Some(zone) = self.next_item().await? {
+            zones.push(zone);
+        }
+        Ok(zones)
+    }
+
+    /// Requests made so far.
+    ///
+    /// ```
+    /// # use inwx_client::{InwxClient, Pagination, Result, Transport};
+    /// # use inwx_client::transport::{Request, Response};
+    /// # struct Never;
+    /// # impl Transport for Never {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         unreachable!("nothing is fetched here")
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<()> {
+    /// let client = InwxClient::new(Never).with_session("domrobot=test")?;
+    /// let pager = client.paginate_zones(&Pagination::new());
+    /// assert_eq!(pager.pages_fetched(), 0);
+    /// # Ok(())
+    /// # }
+    /// # demo().unwrap();
+    /// ```
+    #[must_use]
+    pub fn pages_fetched(&self) -> u32 {
+        self.walk.pages()
+    }
+
+    /// Zones read so far, including the ones still buffered.
+    ///
+    /// ```
+    /// # use inwx_client::{InwxClient, Pagination, Result, Transport};
+    /// # use inwx_client::transport::{Request, Response};
+    /// # struct Never;
+    /// # impl Transport for Never {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         unreachable!("nothing is fetched here")
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<()> {
+    /// let client = InwxClient::new(Never).with_session("domrobot=test")?;
+    /// let pager = client.paginate_zones(&Pagination::new());
+    /// assert_eq!(pager.items_read(), 0);
+    /// # Ok(())
+    /// # }
+    /// # demo().unwrap();
+    /// ```
+    #[must_use]
+    pub fn items_read(&self) -> usize {
+        self.walk.items()
+    }
+
+    /// Whether the walk is over, for any reason.
+    ///
+    /// ```
+    /// # use inwx_client::{InwxClient, Pagination, Result, Transport};
+    /// # use inwx_client::transport::{Request, Response};
+    /// # struct Never;
+    /// # impl Transport for Never {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         unreachable!("nothing is fetched here")
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<()> {
+    /// let client = InwxClient::new(Never).with_session("domrobot=test")?;
+    /// let pager = client.paginate_zones(&Pagination::new());
+    /// assert!(!pager.is_finished());
+    /// # Ok(())
+    /// # }
+    /// # demo().unwrap();
+    /// ```
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.walk.is_finished()
+    }
+
+    /// Whether the walk stopped although the provider had more to give, because
+    /// [`Pagination::max_items`] was reached.
+    ///
+    /// ```
+    /// # use inwx_client::{InwxClient, Pagination, Result, Transport};
+    /// # use inwx_client::transport::{Request, Response};
+    /// # struct Never;
+    /// # impl Transport for Never {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         unreachable!("nothing is fetched here")
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<()> {
+    /// let client = InwxClient::new(Never).with_session("domrobot=test")?;
+    /// let pager = client.paginate_zones(&Pagination::new());
+    /// assert!(!pager.is_truncated());
+    /// # Ok(())
+    /// # }
+    /// # demo().unwrap();
+    /// ```
+    #[must_use]
+    pub fn is_truncated(&self) -> bool {
+        self.walk.is_truncated()
     }
 }
 

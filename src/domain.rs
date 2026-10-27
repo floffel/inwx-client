@@ -3,11 +3,15 @@
 //! Everything here is documented INWX surface (`domain.*`); the request builders
 //! validate before the call, the response types parse permissively.
 
+use std::collections::VecDeque;
+use std::fmt;
+
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::client::InwxClient;
 use crate::error::{Error, Result};
+use crate::pagination::{Pagination, Walk};
 use crate::transport::Transport;
 use crate::types::{de, DomainName, Hostname, Period, RenewalMode};
 
@@ -1119,6 +1123,98 @@ impl<T: Transport> InwxClient<T> {
         serde_json::from_value(data).map_err(Error::from)
     }
 
+    /// Walks every page of `domain.list` with bounded automatic pagination.
+    ///
+    /// The pager owns `page` and `pagelimit`; filters in `query` are kept, so a
+    /// filtered search still walks all of its pages. See [`DomainPager`] for the
+    /// bounds and for how to drive the walk.
+    ///
+    /// ```
+    /// # use std::sync::{Arc, Mutex};
+    /// # use inwx_client::transport::{Request, Response, Transport};
+    /// # use inwx_client::{DomainListQuery, InwxClient, Pagination, Result};
+    /// # #[derive(Clone)]
+    /// # struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+    /// # impl Transport for Scripted {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         let body = self.0.lock().unwrap().remove(0);
+    /// #         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<usize> {
+    /// let transport = Scripted(Arc::new(Mutex::new(vec![
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domain":[{"domain":"a.de"},{"domain":"b.de"}]}}"#,
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domain":[{"domain":"c.de"}]}}"#,
+    /// ])));
+    /// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+    /// let paging = Pagination::new().with_page_size(2)?;
+    /// let mut pager = client.paginate_domains(&DomainListQuery::new().with_filter("de"), &paging);
+    /// let runtime = tokio::runtime::Runtime::new().unwrap();
+    /// let first = runtime.block_on(pager.next_page())?.expect("one page");
+    /// assert_eq!(first.len(), 2);
+    /// assert_eq!(pager.pages_fetched(), 1);
+    /// # Ok(first.len())
+    /// # }
+    /// # assert_eq!(demo().unwrap(), 2);
+    /// ```
+    #[must_use]
+    pub fn paginate_domains(
+        &self,
+        query: &DomainListQuery,
+        paging: &Pagination,
+    ) -> DomainPager<'_, T> {
+        DomainPager::new(self, query.clone(), paging)
+    }
+
+    /// Collects every domain of `domain.list` that the bounds allow.
+    ///
+    /// Reaching [`Pagination::max_items`] truncates the answer and leaves
+    /// [`DomainPager::is_truncated`] unreachable from here, so a bounded scan
+    /// that has to be complete should be driven through
+    /// [`paginate_domains`](Self::paginate_domains) instead.
+    ///
+    /// ```
+    /// # use std::sync::{Arc, Mutex};
+    /// # use inwx_client::transport::{Request, Response, Transport};
+    /// # use inwx_client::{DomainListQuery, InwxClient, Pagination, Result};
+    /// # #[derive(Clone)]
+    /// # struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+    /// # impl Transport for Scripted {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         let body = self.0.lock().unwrap().remove(0);
+    /// #         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<Vec<String>> {
+    /// let transport = Scripted(Arc::new(Mutex::new(vec![
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domain":[{"domain":"a.de"},{"domain":"b.de"}]}}"#,
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domain":[{"domain":"c.de"}]}}"#,
+    /// ])));
+    /// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+    /// let paging = Pagination::new().with_page_size(2)?;
+    /// let runtime = tokio::runtime::Runtime::new().unwrap();
+    /// let domains = runtime.block_on(
+    ///     client.all_domains(&DomainListQuery::new(), &paging),
+    /// )?;
+    /// let names: Vec<String> = domains.into_iter().map(|info| info.domain).collect();
+    /// assert_eq!(names, ["a.de", "b.de", "c.de"]);
+    /// # Ok(names)
+    /// # }
+    /// # assert_eq!(demo().unwrap(), ["a.de", "b.de", "c.de"]);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Pagination`] when the request cap is reached while the provider
+    /// still has more domains, plus the usual transport and API errors.
+    pub async fn all_domains(
+        &self,
+        query: &DomainListQuery,
+        paging: &Pagination,
+    ) -> Result<Vec<DomainInfo>> {
+        self.paginate_domains(query, paging).collect().await
+    }
+
     /// Changes contacts, nameservers, lock or renewal mode (`domain.update`).
     ///
     /// ```no_run
@@ -1297,6 +1393,331 @@ impl<T: Transport> InwxClient<T> {
                 method: "domain.whois",
                 field: "resData.whois",
             })
+    }
+}
+
+/// Walks the pages of `domain.list` until the provider runs out of domains or
+/// the bounds of the [`Pagination`] it was built with are reached.
+///
+/// Obtained from [`InwxClient::paginate_domains`]. A pager is a cursor, not a
+/// [`std::iter::Iterator`]: every step is an `.await`, and a synchronous
+/// iterator cannot do I/O. Use [`next_item`](Self::next_item) item by item,
+/// [`next_page`](Self::next_page) page by page, or
+/// [`collect`](Self::collect) for everything the bounds allow.
+///
+/// The pager owns `page` and `pagelimit`. A page set on the query is
+/// overwritten — filters are kept, paging is not.
+///
+/// ```
+/// # use std::sync::{Arc, Mutex};
+/// # use inwx_client::transport::{Request, Response, Transport};
+/// # use inwx_client::{DomainListQuery, InwxClient, Pagination, Result};
+/// # #[derive(Clone)]
+/// # struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+/// # impl Transport for Scripted {
+/// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+/// #         let body = self.0.lock().unwrap().remove(0);
+/// #         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+/// #     }
+/// # }
+/// # fn demo() -> Result<Vec<String>> {
+/// let transport = Scripted(Arc::new(Mutex::new(vec![
+///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domain":[{"domain":"a.de"},{"domain":"b.de"}]}}"#,
+///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domain":[{"domain":"c.de"}]}}"#,
+/// ])));
+/// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+/// let paging = Pagination::new().with_page_size(2)?;
+/// let mut pager = client.paginate_domains(&DomainListQuery::new().with_filter("de"), &paging);
+///
+/// let runtime = tokio::runtime::Runtime::new().unwrap();
+/// let mut names = Vec::new();
+/// while let Some(domain) = runtime.block_on(pager.next_item())? {
+///     names.push(domain.domain);
+/// }
+/// assert_eq!(names, ["a.de", "b.de", "c.de"]);
+/// assert_eq!(pager.pages_fetched(), 2);
+/// # Ok(names)
+/// # }
+/// # assert_eq!(demo().unwrap(), ["a.de", "b.de", "c.de"]);
+/// ```
+pub struct DomainPager<'c, T: Transport> {
+    client: &'c InwxClient<T>,
+    query: DomainListQuery,
+    walk: Walk,
+    buffer: VecDeque<DomainInfo>,
+}
+
+/// `Debug` shows where the walk stands; the client is left to its own
+/// redacting `Debug`, so no cookie can leak through a pager.
+impl<T: Transport> fmt::Debug for DomainPager<'_, T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DomainPager")
+            .field("query", &self.query)
+            .field("pages_fetched", &self.walk.pages())
+            .field("items_read", &self.walk.items())
+            .field("buffered", &self.buffer.len())
+            .field("finished", &self.walk.is_finished())
+            .field("truncated", &self.walk.is_truncated())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'c, T: Transport> DomainPager<'c, T> {
+    pub(crate) fn new(
+        client: &'c InwxClient<T>,
+        query: DomainListQuery,
+        paging: &Pagination,
+    ) -> Self {
+        Self {
+            client,
+            query,
+            walk: paging.walk(),
+            buffer: VecDeque::new(),
+        }
+    }
+
+    /// Fetches the next page, or `None` when the walk is over.
+    ///
+    /// Items of the page are buffered for [`next_item`](Self::next_item), so
+    /// mixing the two methods never reads a domain twice.
+    ///
+    /// ```
+    /// # use std::sync::{Arc, Mutex};
+    /// # use inwx_client::transport::{Request, Response, Transport};
+    /// # use inwx_client::{DomainListQuery, InwxClient, Pagination, Result};
+    /// # #[derive(Clone)]
+    /// # struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+    /// # impl Transport for Scripted {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         let body = self.0.lock().unwrap().remove(0);
+    /// #         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<usize> {
+    /// let transport = Scripted(Arc::new(Mutex::new(vec![
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domain":[{"domain":"a.de"},{"domain":"b.de"}]}}"#,
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domain":[{"domain":"c.de"}]}}"#,
+    /// ])));
+    /// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+    /// let mut pager = client.paginate_domains(
+    ///     &DomainListQuery::new(),
+    ///     &Pagination::new().with_page_size(2)?,
+    /// );
+    /// let runtime = tokio::runtime::Runtime::new().unwrap();
+    /// let page = runtime.block_on(pager.next_page())?.expect("one page");
+    /// assert_eq!(page.len(), 2);
+    /// assert_eq!(pager.pages_fetched(), 1);
+    /// # Ok(page.len())
+    /// # }
+    /// # assert_eq!(demo().unwrap(), 2);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Pagination`] when the request cap is reached while the provider
+    /// still has more domains; the pages read so far stay buffered. Plus the
+    /// usual transport and API errors.
+    pub async fn next_page(&mut self) -> Result<Option<DomainListPage>> {
+        if self.walk.is_finished() {
+            return Ok(None);
+        }
+        let (page, limit) = self.walk.request();
+        let query = self.query.clone().with_page(page, limit);
+        let page = self.client.list_domains(&query).await?;
+        let kept = self.walk.keep(limit, page.domains.len());
+        self.buffer.extend(page.domains.iter().take(kept).cloned());
+        self.walk.absorb(limit, page.count, kept)?;
+        Ok(Some(page))
+    }
+
+    /// Reads the next domain, fetching as many pages as it takes.
+    ///
+    /// ```
+    /// # use inwx_client::{DomainListQuery, InwxClient, Pagination, Result, Transport};
+    /// # use inwx_client::transport::{Request, Response};
+    /// # #[derive(Clone)]
+    /// # struct Scripted(std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>);
+    /// # impl Transport for Scripted {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         let body = self.0.lock().unwrap().remove(0);
+    /// #         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<Option<String>> {
+    /// let transport = Scripted(std::sync::Arc::new(std::sync::Mutex::new(vec![
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":1,"domain":[{"domain":"a.de"}]}}"#,
+    /// ])));
+    /// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+    /// let mut pager = client.paginate_domains(&DomainListQuery::new(), &Pagination::new());
+    /// let runtime = tokio::runtime::Runtime::new().unwrap();
+    /// let first = runtime.block_on(pager.next_item())?.map(|info| info.domain);
+    /// let second = runtime.block_on(pager.next_item())?;
+    /// assert_eq!(first.as_deref(), Some("a.de"));
+    /// assert!(second.is_none());
+    /// # Ok(first)
+    /// # }
+    /// # assert_eq!(demo().unwrap().as_deref(), Some("a.de"));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The same as [`next_page`](Self::next_page).
+    pub async fn next_item(&mut self) -> Result<Option<DomainInfo>> {
+        loop {
+            if let Some(domain) = self.buffer.pop_front() {
+                return Ok(Some(domain));
+            }
+            if self.walk.is_finished() {
+                return Ok(None);
+            }
+            self.next_page().await?;
+        }
+    }
+
+    /// Reads every domain the bounds allow and returns them in provider order.
+    ///
+    /// Hitting the item cap is not an error: the walk stops and
+    /// [`is_truncated`](Self::is_truncated) says so. Hitting the request cap is
+    /// an error, because a silently short list cannot be told apart from a
+    /// complete one.
+    ///
+    /// ```
+    /// # use std::sync::{Arc, Mutex};
+    /// # use inwx_client::transport::{Request, Response, Transport};
+    /// # use inwx_client::{DomainListQuery, InwxClient, Pagination, Result};
+    /// # #[derive(Clone)]
+    /// # struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+    /// # impl Transport for Scripted {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         let body = self.0.lock().unwrap().remove(0);
+    /// #         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<usize> {
+    /// let transport = Scripted(Arc::new(Mutex::new(vec![
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domain":[{"domain":"a.de"},{"domain":"b.de"}]}}"#,
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domain":[{"domain":"c.de"}]}}"#,
+    /// ])));
+    /// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+    /// let mut pager = client.paginate_domains(
+    ///     &DomainListQuery::new(),
+    ///     &Pagination::new().with_page_size(2)?,
+    /// );
+    /// let runtime = tokio::runtime::Runtime::new().unwrap();
+    /// let domains = runtime.block_on(pager.collect())?;
+    /// assert_eq!(domains.len(), 3);
+    /// # Ok(domains.len())
+    /// # }
+    /// # assert_eq!(demo().unwrap(), 3);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The same as [`next_page`](Self::next_page).
+    pub async fn collect(&mut self) -> Result<Vec<DomainInfo>> {
+        let mut domains = Vec::new();
+        while let Some(domain) = self.next_item().await? {
+            domains.push(domain);
+        }
+        Ok(domains)
+    }
+
+    /// Requests made so far.
+    ///
+    /// ```
+    /// # use inwx_client::{DomainListQuery, InwxClient, Pagination, Result, Transport};
+    /// # use inwx_client::transport::{Request, Response};
+    /// # struct Never;
+    /// # impl Transport for Never {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         unreachable!("nothing is fetched here")
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<()> {
+    /// let client = InwxClient::new(Never).with_session("domrobot=test")?;
+    /// let pager = client.paginate_domains(&DomainListQuery::new(), &Pagination::new());
+    /// assert_eq!(pager.pages_fetched(), 0);
+    /// # Ok(())
+    /// # }
+    /// # demo().unwrap();
+    /// ```
+    #[must_use]
+    pub fn pages_fetched(&self) -> u32 {
+        self.walk.pages()
+    }
+
+    /// Domains read so far, including the ones still buffered.
+    ///
+    /// ```
+    /// # use inwx_client::{DomainListQuery, InwxClient, Pagination, Result, Transport};
+    /// # use inwx_client::transport::{Request, Response};
+    /// # struct Never;
+    /// # impl Transport for Never {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         unreachable!("nothing is fetched here")
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<()> {
+    /// let client = InwxClient::new(Never).with_session("domrobot=test")?;
+    /// let pager = client.paginate_domains(&DomainListQuery::new(), &Pagination::new());
+    /// assert_eq!(pager.items_read(), 0);
+    /// # Ok(())
+    /// # }
+    /// # demo().unwrap();
+    /// ```
+    #[must_use]
+    pub fn items_read(&self) -> usize {
+        self.walk.items()
+    }
+
+    /// Whether the walk is over, for any reason.
+    ///
+    /// ```
+    /// # use inwx_client::{DomainListQuery, InwxClient, Pagination, Result, Transport};
+    /// # use inwx_client::transport::{Request, Response};
+    /// # struct Never;
+    /// # impl Transport for Never {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         unreachable!("nothing is fetched here")
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<()> {
+    /// let client = InwxClient::new(Never).with_session("domrobot=test")?;
+    /// let pager = client.paginate_domains(&DomainListQuery::new(), &Pagination::new());
+    /// assert!(!pager.is_finished());
+    /// # Ok(())
+    /// # }
+    /// # demo().unwrap();
+    /// ```
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.walk.is_finished()
+    }
+
+    /// Whether the walk stopped although the provider had more to give, because
+    /// [`Pagination::max_items`] was reached.
+    ///
+    /// ```
+    /// # use inwx_client::{DomainListQuery, InwxClient, Pagination, Result, Transport};
+    /// # use inwx_client::transport::{Request, Response};
+    /// # struct Never;
+    /// # impl Transport for Never {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         unreachable!("nothing is fetched here")
+    /// #     }
+    /// # }
+    /// # fn demo() -> Result<()> {
+    /// let client = InwxClient::new(Never).with_session("domrobot=test")?;
+    /// let pager = client.paginate_domains(&DomainListQuery::new(), &Pagination::new());
+    /// assert!(!pager.is_truncated());
+    /// # Ok(())
+    /// # }
+    /// # demo().unwrap();
+    /// ```
+    #[must_use]
+    pub fn is_truncated(&self) -> bool {
+        self.walk.is_truncated()
     }
 }
 
