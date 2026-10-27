@@ -191,7 +191,8 @@ cargo test --no-default-features  # the same, without reqwest/tokio
 cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --no-deps --all-features
 cargo llvm-cov --no-default-features --summary-only --fail-under-lines 95
-cargo +nightly fuzz run parse_response
+cargo +nightly fuzz run parse_response  # the RPC envelope and the typed decoders
+cargo +nightly fuzz run parse_names     # the domain, host name and record parsers
 ```
 
 * **Unit** — permissive scalars, cookie collection, retry backoff, record and
@@ -206,9 +207,12 @@ cargo +nightly fuzz run parse_response
   exact parameters (`tests/zones.rs`, `tests/ownership.rs`, `tests/services.rs`,
   `tests/certificates.rs`); `tests/limits.rs` is the boundary matrix (63/64-byte
   label, 253/254-byte name, empty label, TTL bounds, IDN form, per-type record
-  values, CSR size, auth-code and email shapes) and `tests/coverage.rs` calls the
+  values, CSR size, auth-code and email shapes), `tests/coverage.rs` calls the
   `Display`/`FromStr`/serde impls and error branches that doctests exercise —
-  `cargo llvm-cov` does not count doctests.
+  `cargo llvm-cov` does not count doctests — and `tests/fuzz_seeds.rs` replays
+  the fuzz corpus on the stable toolchain and fails if a required seed shape
+  (NUL bytes, 63/64-byte labels, 253/254-byte names, the TTL and content limits)
+  ever disappears from it.
 * **Property** (`proptest`) — builders and parsers never panic over arbitrary
   input; accepted enum values round-trip through `Display`/`FromStr`; accepted
   emails and timestamps round-trip; zone params survive a JSON round trip;
@@ -216,9 +220,17 @@ cargo +nightly fuzz run parse_response
   builds the request whose action it names.
 * **Coverage** — 98.6 % lines / 99.6 % functions without the `http` feature. CI
   gates at 95 %; the reqwest adapter is the only code that needs a socket.
-* **Fuzz** — `fuzz/fuzz_targets/parse_response.rs` feeds arbitrary bytes through
-  the JSON-RPC parser and every typed decoder on `resData`; seeded with success,
+* **Fuzz** — two targets, each with its own seed corpus under `fuzz/corpus/`.
+  `fuzz/fuzz_targets/parse_response.rs` feeds arbitrary bytes through the
+  JSON-RPC parser and every typed decoder on `resData`; seeded with success,
   pending, error and hostile-shape bodies.
+  `fuzz/fuzz_targets/parse_names.rs` feeds every input to `DomainName::parse`,
+  `Hostname::parse` and the record surface (`RecordSpec` name/content/TTL
+  validation, `RecordId`, `RecordType`), and asserts the invariants on top of
+  not-panicking: an accepted name is lower-case ASCII inside the label and name
+  limits, normalisation is a fixed point, and a rejection is always a validation
+  error; seeded with valid names, unicode/IDN labels, empty input, NUL bytes,
+  63/64-byte labels, 253/254-byte names, duplicate and trailing dots.
 
 ## License
 

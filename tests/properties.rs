@@ -4,7 +4,8 @@
 mod common;
 
 use inwx_client::{
-    DomainName, Hostname, Period, RecordId, RecordSpec, RecordType, RpcResponse, MAX_TTL,
+    BoundedBody, DomainName, Error, Hostname, Period, RecordId, RecordSpec, RecordType,
+    RpcResponse, MAX_TTL,
 };
 use proptest::prelude::*;
 use serde_json::Value;
@@ -341,5 +342,96 @@ proptest! {
         let params = query.params();
         prop_assert_eq!(params["page"].as_u64().unwrap(), u64::from(page.max(1)));
         prop_assert_eq!(params["pagelimit"].as_u64().unwrap(), u64::from(limit));
+    }
+
+    /// The response cap follows the total, not the chunking: a body fits exactly
+    /// when it is at most the limit — whatever split it arrives in — and an
+    /// over-cap body is refused within one chunk of the line, so the guard never
+    /// buffers more than `limit + biggest_chunk`.
+    #[test]
+    fn the_response_cap_follows_the_total_not_the_chunking(
+        limit in 1usize..=64,
+        size in 0usize..=96,
+        splits in prop::collection::vec(1usize..=6usize, 1..=24),
+    ) {
+        let mut remaining = size;
+        let mut chunks: Vec<Vec<u8>> = Vec::new();
+        for split in splits {
+            if remaining == 0 {
+                break;
+            }
+            let take = split.min(remaining);
+            chunks.push(vec![b'x'; take]);
+            remaining -= take;
+        }
+        if remaining > 0 {
+            chunks.push(vec![b'x'; remaining]);
+        }
+        let biggest = chunks.iter().map(Vec::len).max().unwrap_or(0);
+
+        let mut body = BoundedBody::new(limit).unwrap();
+        let mut rejection = None;
+        for chunk in &chunks {
+            if let Err(error) = body.push(chunk) {
+                rejection = Some(error);
+                break;
+            }
+        }
+
+        let cap = u64::try_from(limit).unwrap_or(u64::MAX);
+        match rejection {
+            None => {
+                prop_assert!(size <= limit, "a fitting body was refused");
+                prop_assert_eq!(body.finish().len(), size);
+            }
+            Some(error) => {
+                prop_assert!(size > limit, "an over-cap error needs an over-cap body");
+                match error {
+                    Error::ResponseTooLarge {
+                        limit: seen_limit,
+                        observed,
+                        ..
+                    } => {
+                        prop_assert_eq!(seen_limit, cap);
+                        prop_assert!(observed > cap);
+                        prop_assert!(observed <= cap + u64::try_from(biggest).unwrap_or(u64::MAX));
+                        // Nothing past the cap was ever copied in.
+                        let buffered = u64::try_from(body.finish().len()).unwrap_or(u64::MAX);
+                        prop_assert!(buffered <= cap);
+                    }
+                    other => panic!("expected ResponseTooLarge, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// An announced `Content-Length` is checked before a single byte is read:
+    /// over the cap it fails with `observed: 0`, at or under it the declaration
+    /// is simply remembered.
+    #[test]
+    fn a_declared_length_is_checked_upfront(
+        limit in 1usize..=128,
+        declared in 0u64..=192,
+    ) {
+        let body = BoundedBody::new(limit).unwrap().with_content_length(Some(declared));
+        let cap = u64::try_from(limit).unwrap_or(u64::MAX);
+        match body {
+            Ok(body) => {
+                prop_assert!(declared <= cap);
+                prop_assert_eq!(body.declared_length(), Some(declared));
+                prop_assert_eq!(body.bytes_seen(), 0);
+            }
+            Err(Error::ResponseTooLarge {
+                limit: seen_limit,
+                declared: seen_declared,
+                observed,
+            }) => {
+                prop_assert!(declared > cap);
+                prop_assert_eq!(seen_limit, cap);
+                prop_assert_eq!(seen_declared, Some(declared));
+                prop_assert_eq!(observed, 0);
+            }
+            Err(other) => panic!("expected ResponseTooLarge, got {other:?}"),
+        }
     }
 }

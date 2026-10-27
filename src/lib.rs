@@ -89,6 +89,10 @@
 //!   `Display`; the DynDNS account type redacts its password.
 //! * A certificate CSR is refused if it contains a private key: the field takes a
 //!   signing request, and anything else would upload a secret to a third party.
+//! * Responses are streamed through [`BoundedBody`] and capped at
+//!   [`DEFAULT_MAX_RESPONSE_BYTES`] by default, so a misbehaving endpoint cannot
+//!   make the process allocate an unbounded body; crossing the cap is a terminal
+//!   [`Error::ResponseTooLarge`], never a retry.
 //! * Retries are bounded (three attempts, exponential backoff) and only apply to
 //!   transport failures, 429/5xx and `2300` (pending transfer) — a rejected
 //!   command is never repeated.
@@ -166,7 +170,7 @@ pub use transfer::{
 };
 #[cfg(feature = "http")]
 pub use transport::ReqwestTransport;
-pub use transport::{Response, Transport};
+pub use transport::{BoundedBody, Response, Transport, DEFAULT_MAX_RESPONSE_BYTES};
 pub use types::{
     parse_ip, AuthCode, ContactType, DocumentFormat, DomainName, Email, Handle, Hostname, Period,
     PriceType, RenewalMode, Timestamp, MAX_DOMAIN_LEN, MAX_LABEL_LEN,

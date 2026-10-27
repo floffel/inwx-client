@@ -12,8 +12,8 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use inwx_client::transport::{Request, Response, Transport};
-use inwx_client::{Error, InwxClient, Result};
+use inwx_client::transport::{BoundedBody, Request, Response, Transport};
+use inwx_client::{Error, InwxClient, Result, DEFAULT_MAX_RESPONSE_BYTES};
 use serde_json::{json, Value};
 
 /// One recorded call.
@@ -58,6 +58,18 @@ pub enum Reply {
         /// Whether a retry could help.
         retryable: bool,
     },
+    /// A body that arrives chunk by chunk, as a real socket would deliver it.
+    ///
+    /// The mock reads the chunks through [`BoundedBody`] under the transport's
+    /// own `max_response_bytes`, exactly like `ReqwestTransport` does — so an
+    /// over-cap body is refused here, before the client can see or parse it.
+    Streamed {
+        /// The announced `Content-Length`; `None` means a chunked answer that
+        /// announces nothing.
+        content_length: Option<u64>,
+        /// The body, one entry per chunk, in arrival order.
+        chunks: Vec<Vec<u8>>,
+    },
 }
 
 /// Records calls and replays scripted replies.
@@ -69,16 +81,43 @@ pub struct MockTransport {
     state: Arc<Mutex<State>>,
 }
 
-#[derive(Default)]
 struct State {
     calls: Vec<Call>,
     queue: VecDeque<Reply>,
+    max_response_bytes: usize,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            calls: Vec::new(),
+            queue: VecDeque::new(),
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+        }
+    }
 }
 
 impl MockTransport {
-    /// An empty transport.
+    /// An empty transport with the crate's default response cap.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Caps streamed replies at `limit` bytes.
+    ///
+    /// A `limit` of `0` behaves like `1`: the mock clamps instead of failing, so
+    /// a test cannot get stuck on a helper-only error.
+    pub fn with_max_response_bytes(self, limit: usize) -> Self {
+        self.state.lock().unwrap().max_response_bytes = limit.max(1);
+        self
+    }
+
+    /// Queues a streamed reply of `chunks`, announcing `content_length`.
+    pub fn streamed(&self, content_length: Option<u64>, chunks: Vec<Vec<u8>>) {
+        self.push(Reply::Streamed {
+            content_length,
+            chunks,
+        });
     }
 
     /// Queues a reply.
@@ -175,10 +214,10 @@ impl Transport for MockTransport {
             headers: request.headers.clone(),
         };
 
-        let reply = {
+        let (reply, max_response_bytes) = {
             let mut state = self.state.lock().unwrap();
             state.calls.push(call);
-            state.queue.pop_front()
+            (state.queue.pop_front(), state.max_response_bytes)
         };
 
         match reply {
@@ -192,6 +231,23 @@ impl Transport for MockTransport {
                 br#"{"code":1000,"msg":"Login successful","resData":{"accountId":61140}}"#.to_vec(),
             )),
             Some(Reply::Response(response)) => Ok(response),
+            Some(Reply::Streamed {
+                content_length,
+                chunks,
+            }) => {
+                // The same two steps `ReqwestTransport` takes: honour what was
+                // announced, then enforce the running total chunk by chunk.
+                let mut body =
+                    BoundedBody::new(max_response_bytes)?.with_content_length(content_length)?;
+                for chunk in chunks {
+                    body.push(&chunk)?;
+                }
+                let mut headers = vec![("content-type".to_owned(), "application/json".to_owned())];
+                if let Some(announced) = content_length {
+                    headers.push(("content-length".to_owned(), announced.to_string()));
+                }
+                Ok(Response::new(200, headers, body.finish()))
+            }
             Some(Reply::Failure { message, retryable }) => Err(if retryable {
                 Error::transport(message)
             } else {

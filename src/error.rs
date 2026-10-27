@@ -113,6 +113,48 @@ pub enum Error {
         field: &'static str,
     },
 
+    /// A response body crossed the transport's size cap and was discarded
+    /// before the JSON parser saw a byte of it.
+    ///
+    /// `limit` is the configured cap in bytes. `declared` is the
+    /// `Content-Length` the endpoint announced, when it announced one, and
+    /// `observed` counts the bytes that were actually read before the read was
+    /// stopped — `0` when the announced length alone already exceeded the cap.
+    /// The message carries those two numbers and never a byte of the body: an
+    /// unexpected answer can contain a session cookie.
+    ///
+    /// This one is **terminal** ([`Error::is_retryable`] is `false`), on
+    /// purpose. The endpoint did answer, so for a non-idempotent command
+    /// (`domain.create`, `nameserver.createRecord`) a second attempt could
+    /// duplicate work that already happened; and an over-cap body means a
+    /// misbehaving endpoint or a cap set too low, neither of which a retry
+    /// fixes. Raise the cap when a legitimate answer really is bigger than
+    /// [`DEFAULT_MAX_RESPONSE_BYTES`](crate::DEFAULT_MAX_RESPONSE_BYTES).
+    ///
+    /// ```
+    /// use inwx_client::{BoundedBody, Error};
+    ///
+    /// let mut body = BoundedBody::new(4)?;
+    /// let error = body.push(b"12345").unwrap_err();
+    /// assert!(matches!(
+    ///     error,
+    ///     Error::ResponseTooLarge { limit: 4, observed, .. } if observed == 5
+    /// ));
+    /// assert!(!error.is_retryable());
+    /// // The message counts bytes; it never echoes the body.
+    /// assert!(!error.to_string().contains("12345"));
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[error("response body exceeds the {limit} byte limit (read {observed} bytes)")]
+    ResponseTooLarge {
+        /// Cap in bytes that the body crossed.
+        limit: u64,
+        /// `Content-Length` as announced by the endpoint, when it announced one.
+        declared: Option<u64>,
+        /// Bytes read before the read was stopped.
+        observed: u64,
+    },
+
     /// The server answered with a non-2xx status and a body that is not an
     /// INWX error envelope.
     #[error("http {status}: {body}")]
@@ -182,13 +224,21 @@ impl Error {
     ///
     /// Transport failures carry their own flag; an API error is retryable only
     /// for `2300` (object pending transfer), everything else is terminal.
-    /// Validation, decoding and authentication errors are never retryable.
+    /// Validation, decoding, authentication and over-cap responses
+    /// ([`Error::ResponseTooLarge`]) are never retryable — the request reached
+    /// the server, so repeating it could duplicate the work.
     ///
     /// ```
     /// use inwx_client::{Error, RetryPolicy};
     ///
     /// assert!(Error::transport("dns").is_retryable());
     /// assert!(!Error::validation("domain", "empty").is_retryable());
+    /// assert!(!Error::ResponseTooLarge {
+    ///     limit: 1024,
+    ///     declared: None,
+    ///     observed: 1025,
+    /// }
+    /// .is_retryable());
     /// assert_eq!(RetryPolicy::default().delay(1), Some(std::time::Duration::from_millis(500)));
     /// ```
     #[must_use]

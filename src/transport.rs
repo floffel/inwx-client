@@ -252,6 +252,224 @@ impl Response {
     }
 }
 
+/// Default ceiling for a single inbound response body: 4 MiB.
+///
+/// INWX answers are small. The bulkiest documented calls — a `nameserver.info`
+/// over a large zone, a 1000-row accounting page, a `nameserver.exportrecords`
+/// CSV — are tens of kilobytes, so 4 MiB sits roughly two orders of magnitude
+/// above the largest answer the API is known to produce. That is enough
+/// headroom for growth while still bounding what a misbehaving or compromised
+/// endpoint can make this process allocate before the JSON parser sees a byte.
+///
+/// ```
+/// use inwx_client::DEFAULT_MAX_RESPONSE_BYTES;
+///
+/// assert_eq!(DEFAULT_MAX_RESPONSE_BYTES, 4 * 1024 * 1024);
+/// // Roomy for a whole zone file, small enough to bound the damage.
+/// assert!(DEFAULT_MAX_RESPONSE_BYTES >= 1024 * 1024);
+/// ```
+pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Grows a response body one chunk at a time and refuses to cross a size cap.
+///
+/// A transport must not buffer a body first and measure it afterwards: the cap
+/// has to be checked *before* every allocation. This guard does that in two
+/// steps. [`BoundedBody::with_content_length`] rejects an announced length that
+/// already exceeds the cap, so nothing is read at all, and [`BoundedBody::push`]
+/// enforces a running total, so an endpoint that announces 12 bytes and then
+/// streams gigabytes still fails on the first chunk that crosses the line —
+/// never more than one chunk past it.
+///
+/// Crossing the cap yields [`Error::ResponseTooLarge`], which is terminal: the
+/// endpoint did answer, so repeating a non-idempotent command could duplicate
+/// work that already happened.
+///
+/// The guard bounds size only. A body that stops *short* of its announced
+/// length is not an over-cap error; it simply fails to parse as JSON.
+///
+/// ```
+/// use inwx_client::{BoundedBody, DEFAULT_MAX_RESPONSE_BYTES};
+///
+/// // What `ReqwestTransport` does with every chunk it receives.
+/// let mut body = BoundedBody::new(DEFAULT_MAX_RESPONSE_BYTES)?
+///     .with_content_length(Some(24))?;
+/// body.push(br#"{"code":1000,"#)?;
+/// body.push(br#""msg":"ok"}"#)?;
+/// assert_eq!(body.bytes_seen(), 24);
+/// assert_eq!(body.limit(), DEFAULT_MAX_RESPONSE_BYTES);
+/// assert_eq!(body.finish(), br#"{"code":1000,"msg":"ok"}"#.to_vec());
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedBody {
+    limit: u64,
+    seen: u64,
+    declared: Option<u64>,
+    buffer: Vec<u8>,
+}
+
+impl BoundedBody {
+    /// Creates an empty guard that allows `limit` bytes in total.
+    ///
+    /// A limit of `0` is refused: no HTTP answer this crate can use is zero
+    /// bytes, so it is far more likely to be an uninitialised value than an
+    /// intentional choice. Use [`DEFAULT_MAX_RESPONSE_BYTES`] unless a
+    /// legitimate answer is known to be bigger.
+    ///
+    /// ```
+    /// use inwx_client::{BoundedBody, DEFAULT_MAX_RESPONSE_BYTES};
+    ///
+    /// assert!(BoundedBody::new(1).is_ok());
+    /// assert!(BoundedBody::new(DEFAULT_MAX_RESPONSE_BYTES).is_ok());
+    /// assert!(BoundedBody::new(0).is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `limit` is `0`.
+    pub fn new(limit: usize) -> Result<Self> {
+        if limit == 0 {
+            return Err(Error::validation(
+                "transport.max_response_bytes",
+                "must be at least 1 byte; the default is \
+                 {DEFAULT_MAX_RESPONSE_BYTES} (4 MiB), which covers every \
+                 documented INWX answer",
+            ));
+        }
+        Ok(Self {
+            limit: u64::try_from(limit).unwrap_or(u64::MAX),
+            seen: 0,
+            declared: None,
+            buffer: Vec::new(),
+        })
+    }
+
+    /// Records the `Content-Length` the endpoint announced and checks it against
+    /// the cap before a single body byte is read.
+    ///
+    /// `None` is the normal case for a chunked answer: without a declaration the
+    /// running total in [`BoundedBody::push`] is the only line of defence, and
+    /// it still holds.
+    ///
+    /// ```
+    /// use inwx_client::BoundedBody;
+    ///
+    /// // Just inside the cap, and one byte over it.
+    /// assert!(BoundedBody::new(8)?.with_content_length(Some(8)).is_ok());
+    /// assert!(BoundedBody::new(8)?.with_content_length(Some(9)).is_err());
+    /// // Chunked responses announce nothing.
+    /// assert!(BoundedBody::new(8)?.with_content_length(None).is_ok());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ResponseTooLarge`] with `observed: 0` when the announced length
+    /// exceeds the cap.
+    pub fn with_content_length(mut self, declared: Option<u64>) -> Result<Self> {
+        if let Some(announced) = declared {
+            if announced > self.limit {
+                return Err(Error::ResponseTooLarge {
+                    limit: self.limit,
+                    declared: Some(announced),
+                    observed: 0,
+                });
+            }
+        }
+        self.declared = declared;
+        Ok(self)
+    }
+
+    /// Adds one chunk, rejecting the body *before* extending the buffer.
+    ///
+    /// ```
+    /// use inwx_client::BoundedBody;
+    ///
+    /// let mut body = BoundedBody::new(8)?;
+    /// body.push(b"1234")?;
+    /// body.push(b"5678")?; // exactly at the cap: fine
+    /// assert!(body.push(b"9").is_err()); // one byte over
+    /// assert_eq!(body.bytes_seen(), 8);
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ResponseTooLarge`] when the running total would exceed the cap.
+    pub fn push(&mut self, chunk: &[u8]) -> Result<()> {
+        let total = self
+            .seen
+            .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+        if total > self.limit {
+            return Err(Error::ResponseTooLarge {
+                limit: self.limit,
+                declared: self.declared,
+                observed: total,
+            });
+        }
+        self.buffer.extend_from_slice(chunk);
+        self.seen = total;
+        Ok(())
+    }
+
+    /// The cap in bytes.
+    ///
+    /// ```
+    /// use inwx_client::BoundedBody;
+    /// assert_eq!(BoundedBody::new(1024)?.limit(), 1024);
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn limit(&self) -> usize {
+        usize::try_from(self.limit).unwrap_or(usize::MAX)
+    }
+
+    /// Bytes accepted so far.
+    ///
+    /// ```
+    /// use inwx_client::BoundedBody;
+    ///
+    /// let mut body = BoundedBody::new(1024)?;
+    /// body.push(b"abc")?;
+    /// assert_eq!(body.bytes_seen(), 3);
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn bytes_seen(&self) -> usize {
+        usize::try_from(self.seen).unwrap_or(usize::MAX)
+    }
+
+    /// The announced `Content-Length`, when there was one.
+    ///
+    /// ```
+    /// use inwx_client::BoundedBody;
+    ///
+    /// let body = BoundedBody::new(1024)?.with_content_length(Some(42))?;
+    /// assert_eq!(body.declared_length(), Some(42));
+    /// assert_eq!(BoundedBody::new(1024)?.declared_length(), None);
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn declared_length(&self) -> Option<u64> {
+        self.declared
+    }
+
+    /// Hands over the buffered body.
+    ///
+    /// ```
+    /// use inwx_client::BoundedBody;
+    ///
+    /// let mut body = BoundedBody::new(1024)?;
+    /// body.push(br#"{"code":1000}"#)?;
+    /// assert_eq!(body.finish(), br#"{"code":1000}"#.to_vec());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn finish(self) -> Vec<u8> {
+        self.buffer
+    }
+}
+
 /// Performs one HTTP request. Implement it for your own stack, or use
 /// `ReqwestTransport`.
 ///
@@ -294,6 +512,13 @@ pub trait Transport {
 ///
 /// The inner client is cheap to clone and safe to share across tasks.
 ///
+/// Response bodies are streamed through a [`BoundedBody`], so an endpoint that
+/// is misbehaving or compromised cannot make this process allocate without
+/// bound: a `Content-Length` above
+/// [`max_response_bytes`](Self::max_response_bytes) is rejected before the body
+/// is read, and the running total is enforced chunk by chunk. The default cap is
+/// [`DEFAULT_MAX_RESPONSE_BYTES`].
+///
 /// ```no_run
 /// # #[cfg(feature = "http")]
 /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
@@ -307,14 +532,26 @@ pub trait Transport {
 /// # }
 /// ```
 #[cfg(feature = "http")]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ReqwestTransport {
     client: reqwest::Client,
+    max_response_bytes: usize,
+}
+
+#[cfg(feature = "http")]
+impl Default for ReqwestTransport {
+    fn default() -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+        }
+    }
 }
 
 #[cfg(feature = "http")]
 impl ReqwestTransport {
-    /// Creates a transport with a default client (rustls, redirects followed).
+    /// Creates a transport with a default client (rustls, redirects followed)
+    /// and the default response cap.
     ///
     /// ```
     /// # #[cfg(feature = "http")]
@@ -323,6 +560,72 @@ impl ReqwestTransport {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets the ceiling for one response body, in bytes.
+    ///
+    /// The limit is enforced while the body arrives, never after it has been
+    /// buffered: an announced `Content-Length` above the cap fails before the
+    /// first byte is read, and a lying or missing declaration is caught by the
+    /// running total, which stops within one chunk of crossing the line.
+    ///
+    /// `0` is refused — no usable INWX answer is empty, so a zero cap is a
+    /// misconfiguration. `usize::MAX` effectively switches the guard off and is
+    /// only defensible against an endpoint you control yourself.
+    ///
+    /// Crossing the cap is terminal, not retryable ([`Error::ResponseTooLarge`]):
+    /// the server did answer, so repeating a non-idempotent command could
+    /// duplicate work that already happened.
+    ///
+    /// ```
+    /// # #[cfg(feature = "http")]
+    /// # fn main() -> Result<(), inwx_client::Error> {
+    /// use inwx_client::{ReqwestTransport, DEFAULT_MAX_RESPONSE_BYTES};
+    ///
+    /// let transport = ReqwestTransport::new().with_max_response_bytes(64 * 1024)?;
+    /// assert_eq!(transport.max_response_bytes(), 64 * 1024);
+    /// assert_eq!(
+    ///     ReqwestTransport::new().max_response_bytes(),
+    ///     DEFAULT_MAX_RESPONSE_BYTES
+    /// );
+    /// assert!(ReqwestTransport::new().with_max_response_bytes(0).is_err());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `bytes` is `0`.
+    pub fn with_max_response_bytes(mut self, bytes: usize) -> Result<Self> {
+        // One rule for the limit, checked in one place.
+        BoundedBody::new(bytes)?;
+        self.max_response_bytes = bytes;
+        Ok(self)
+    }
+
+    /// The configured ceiling for one response body, in bytes.
+    ///
+    /// ```
+    /// # #[cfg(feature = "http")]
+    /// # fn main() {
+    /// use inwx_client::{ReqwestTransport, DEFAULT_MAX_RESPONSE_BYTES};
+    ///
+    /// assert_eq!(
+    ///     ReqwestTransport::new().max_response_bytes(),
+    ///     DEFAULT_MAX_RESPONSE_BYTES
+    /// );
+    /// assert_eq!(
+    ///     ReqwestTransport::new()
+    ///         .with_max_response_bytes(2048)
+    ///         .unwrap()
+    ///         .max_response_bytes(),
+    ///     2048
+    /// );
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn max_response_bytes(&self) -> usize {
+        self.max_response_bytes
     }
 }
 
@@ -337,7 +640,7 @@ impl Transport for ReqwestTransport {
             builder = builder.header(name.as_str(), value.as_str());
         }
 
-        let response = builder
+        let mut response = builder
             .body(request.body.to_vec())
             .send()
             .await
@@ -353,13 +656,21 @@ impl Transport for ReqwestTransport {
                 )
             })
             .collect::<Vec<_>>();
-        let body = response
-            .bytes()
+
+        // Never `response.bytes()`: that buffers first and only then measures,
+        // so a lying endpoint decides how much we allocate. Check what was
+        // announced, then enforce the total chunk by chunk instead.
+        let declared = response.content_length();
+        let mut body = BoundedBody::new(self.max_response_bytes)?.with_content_length(declared)?;
+        while let Some(chunk) = response
+            .chunk()
             .await
             .map_err(|error| describe_reqwest_error(&error))?
-            .to_vec();
+        {
+            body.push(&chunk)?;
+        }
 
-        Ok(Response::new(status, headers, body))
+        Ok(Response::new(status, headers, body.finish()))
     }
 }
 
