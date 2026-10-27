@@ -4,7 +4,8 @@
 mod common;
 
 use inwx_client::{
-    DomainName, Hostname, Period, RecordId, RecordSpec, RecordType, RpcResponse, MAX_TTL,
+    DomainName, Hostname, Period, RecordId, RecordSpec, RecordType, RpcResponse, DEFAULT_TTL,
+    MAX_TTL,
 };
 use proptest::prelude::*;
 use serde_json::Value;
@@ -120,6 +121,40 @@ proptest! {
         if let Ok(domain) = DomainName::parse(&input) {
             let host = Hostname::parse(domain.as_str()).unwrap();
             prop_assert_eq!(host.as_str(), domain.as_str());
+        }
+    }
+
+    /// The name parsers are stable, not just total: whatever they accept parses
+    /// back to itself. This is the invariant the `parse_names` fuzz target
+    /// asserts on every input, proven here on stable Rust.
+    #[test]
+    fn parsed_names_are_fixed_points(input in any_text()) {
+        if let Ok(name) = DomainName::parse(&input) {
+            prop_assert_eq!(DomainName::parse(name.as_str()).ok(), Some(name.clone()));
+            prop_assert_eq!(name.to_string(), name.as_str());
+            prop_assert!(Hostname::parse(name.as_str()).is_ok());
+        }
+        if let Ok(host) = Hostname::parse(&input) {
+            prop_assert_eq!(Hostname::parse(host.as_str()).ok(), Some(host.clone()));
+            prop_assert_eq!(host.to_string(), host.as_str());
+        }
+    }
+
+    /// A record spec keeps name and content verbatim, starts at the documented
+    /// default TTL, and re-validates what `new` accepted — again the invariant
+    /// the `parse_names` fuzz target checks for every record type.
+    #[test]
+    fn accepted_record_specs_keep_their_input(
+        content in any_text(),
+        type_index in 0usize..RecordType::ALL.len(),
+    ) {
+        let record_type = RecordType::ALL[type_index].clone();
+        if let Ok(spec) = RecordSpec::new(record_type.clone(), "@", content.clone()) {
+            prop_assert_eq!(spec.record_type(), record_type);
+            prop_assert_eq!(spec.name(), "@");
+            prop_assert_eq!(spec.content(), content);
+            prop_assert_eq!(spec.ttl(), DEFAULT_TTL);
+            prop_assert!(spec.validate().is_ok());
         }
     }
 

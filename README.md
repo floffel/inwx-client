@@ -192,6 +192,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --no-deps --all-features
 cargo llvm-cov --no-default-features --summary-only --fail-under-lines 95
 cargo +nightly fuzz run parse_response
+cargo +nightly fuzz run parse_names
 ```
 
 * **Unit** — permissive scalars, cookie collection, retry backoff, record and
@@ -209,16 +210,28 @@ cargo +nightly fuzz run parse_response
   values, CSR size, auth-code and email shapes) and `tests/coverage.rs` calls the
   `Display`/`FromStr`/serde impls and error branches that doctests exercise —
   `cargo llvm-cov` does not count doctests.
+  `tests/fuzz_seeds.rs` replays every `parse_names` corpus seed through the
+  string parsers and pins the boundary fixtures (63/64-byte label, 253/254-byte
+  name and record name, 1024/1025-byte content, root dot, punycode, empty and
+  NUL input) to the expected side.
 * **Property** (`proptest`) — builders and parsers never panic over arbitrary
   input; accepted enum values round-trip through `Display`/`FromStr`; accepted
-  emails and timestamps round-trip; zone params survive a JSON round trip;
+  names are fixed points (reparsing the ACE form yields the same name); accepted
+  record specs keep name and content verbatim; accepted emails and timestamps
+  round-trip; zone params survive a JSON round trip;
   `RecordSet` never accepts an apex CNAME; an `Irreversible` acknowledgement only
   builds the request whose action it names.
 * **Coverage** — 98.6 % lines / 99.6 % functions without the `http` feature. CI
   gates at 95 %; the reqwest adapter is the only code that needs a socket.
-* **Fuzz** — `fuzz/fuzz_targets/parse_response.rs` feeds arbitrary bytes through
-  the JSON-RPC parser and every typed decoder on `resData`; seeded with success,
+* **Fuzz** — two targets, both built in CI.
+  `fuzz/fuzz_targets/parse_response.rs` feeds arbitrary bytes through the
+  JSON-RPC parser and every typed decoder on `resData`, seeded with success,
   pending, error and hostile-shape bodies.
+  `fuzz/fuzz_targets/parse_names.rs` feeds every byte string to the hand-rolled
+  string parsers (`DomainName`, `Hostname`, `RecordSpec`, `RecordType`,
+  `RecordId`); `fuzz/corpus/parse_names` seeds it with valid names, unicode/IDN
+  and punycode labels, empty input, NUL bytes, invalid UTF-8, duplicate and
+  trailing dots and the 63/64-byte, 253/254-byte and 1024/1025-byte limits.
 
 ## License
 

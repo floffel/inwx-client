@@ -22,4 +22,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "parse_names"
+path = "fuzz_targets/parse_names.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
