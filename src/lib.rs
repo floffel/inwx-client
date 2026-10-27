@@ -80,6 +80,8 @@
 //! * Credentials and session cookies are redacted in `Debug` — [`Credentials`]
 //!   prints `<redacted>` for the password, [`InwxClient`] prints only whether a
 //!   session exists.
+//! * [`Credentials`] cannot be cloned, zeroes the password when dropped, and
+//!   compares passwords in constant time with `subtle`.
 //! * The password is only ever sent in the `account.login` body, never in a URL
 //!   or a header; afterwards the opaque session cookie is the only credential on
 //!   the wire.

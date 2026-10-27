@@ -177,6 +177,9 @@ documented API and were replaced: `domain.cancel` (use `domain.delete` or
 * `Debug` redacts: `Credentials` prints `<redacted>` for the password, and
   `InwxClient` prints only whether a session exists. Session cookies never reach
   a log line through this crate.
+* `Credentials` cannot be cloned, zeroes the password when dropped, and uses a
+  constant-time password comparison so equality does not reveal a matching
+  prefix.
 * Credentials and session cookies are rejected if they contain control
   characters, so a value cannot smuggle a second header; the same check guards
   record content and update fields.

@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 
 #[test]
 fn empty_and_whitespace_credentials_are_refused() {
+    assert!(Credentials::new("user", "p").is_ok());
     assert!(Credentials::new("", "pass").is_err());
     assert!(Credentials::new("user", "").is_err());
     assert!(Credentials::new("   ", "pass").is_err());
@@ -22,6 +23,15 @@ fn empty_and_whitespace_credentials_are_refused() {
         Credentials::new("user", "   ").is_ok(),
         "spaces are a legal password"
     );
+}
+
+#[test]
+fn credentials_compare_both_fields_without_exposing_the_password() {
+    let credentials = Credentials::new("user", "pass").unwrap();
+    assert_eq!(credentials, Credentials::new("user", "pass").unwrap());
+    assert_ne!(credentials, Credentials::new("other", "pass").unwrap());
+    assert_ne!(credentials, Credentials::new("user", "pAss").unwrap());
+    assert_ne!(credentials, Credentials::new("user", "password").unwrap());
 }
 
 #[test]

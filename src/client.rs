@@ -12,6 +12,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+use subtle::ConstantTimeEq;
+use zeroize::Zeroize;
 
 use crate::error::{Error, Result};
 use crate::rpc::{RpcRequest, RpcResponse};
@@ -88,19 +90,35 @@ impl std::str::FromStr for Language {
 /// make every call fail with a confusing API error, and a control character
 /// would let a value escape its JSON string into a header.
 ///
+/// The password is kept in a private wrapper that is deliberately not
+/// `Clone`, is zeroed when the credentials are dropped, and compares in
+/// constant time. This means credentials cannot be duplicated accidentally and
+/// equality checks do not leak the position of the first differing byte.
+///
 /// ```
 /// use inwx_client::Credentials;
 ///
 /// let credentials = Credentials::new("florian", "s3cret")?;
 /// assert_eq!(credentials.username(), "florian");
+/// assert_eq!(credentials, Credentials::new("florian", "s3cret")?);
+/// assert_ne!(credentials, Credentials::new("florian", "other")?);
 /// assert!(Credentials::new("", "s3cret").is_err());
 /// assert!(Credentials::new("florian", "with\nnewline").is_err());
 /// # Ok::<(), inwx_client::Error>(())
 /// ```
-#[derive(Clone, PartialEq, Eq)]
+///
+/// Cloning is intentionally unavailable:
+///
+/// ```compile_fail
+/// use inwx_client::Credentials;
+///
+/// let credentials = Credentials::new("florian", "s3cret")?;
+/// let duplicate = credentials.clone();
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
 pub struct Credentials {
     username: String,
-    password: String,
+    password: Password,
 }
 
 impl Credentials {
@@ -132,7 +150,10 @@ impl Credentials {
                 "must not contain control characters",
             ));
         }
-        Ok(Self { username, password })
+        Ok(Self {
+            username,
+            password: Password::new(password),
+        })
     }
 
     /// The username.
@@ -145,6 +166,45 @@ impl Credentials {
     #[must_use]
     pub fn username(&self) -> &str {
         &self.username
+    }
+}
+
+/// Compares both fields. The password comparison is constant-time and always
+/// runs, regardless of whether the usernames match.
+impl PartialEq for Credentials {
+    fn eq(&self, other: &Self) -> bool {
+        let usernames_match = self.username == other.username;
+        let passwords_match = self.password == other.password;
+        usernames_match && passwords_match
+    }
+}
+
+impl Eq for Credentials {}
+
+/// Password storage that cannot be cloned and erases its contents on drop.
+struct Password(String);
+
+impl Password {
+    fn new(password: String) -> Self {
+        Self(password)
+    }
+
+    fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq for Password {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.as_bytes().ct_eq(other.0.as_bytes()).into()
+    }
+}
+
+impl Eq for Password {}
+
+impl Drop for Password {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 
@@ -660,8 +720,9 @@ impl<T: Transport> InwxClient<T> {
     /// # Errors
     ///
     /// [`Error::NotAuthenticated`] without credentials, [`Error::Api`] when the
-    /// API rejects the login, [`Error::Authentication`] when it accepts the
-    /// login but sends no cookie.
+    /// API rejects the login, [`Error::Ambiguous`] when a timeout or 5xx leaves
+    /// it unknown whether the login ran, [`Error::Authentication`] when it
+    /// accepts the login but sends no cookie.
     pub async fn login(&self) -> Result<()> {
         let credentials = self.credentials.as_ref().ok_or(Error::NotAuthenticated)?;
         let mut params = Map::new();
@@ -671,11 +732,17 @@ impl<T: Transport> InwxClient<T> {
         );
         params.insert(
             "pass".to_owned(),
-            Value::String(credentials.password.clone()),
+            Value::String(credentials.password.expose().to_owned()),
         );
         self.add_language(&mut params);
 
         let response = self.send("account.login", params).await?;
+        if is_server_error(response.status()) {
+            return Err(Error::ambiguous(format!(
+                "HTTP {} after sending `account.login`; the login may have succeeded",
+                response.status()
+            )));
+        }
         let envelope = RpcResponse::parse(response.body())?;
         envelope.into_result()?;
 

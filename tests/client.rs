@@ -176,6 +176,21 @@ async fn a_rejected_login_is_an_api_error() {
 }
 
 #[tokio::test]
+async fn a_login_server_error_is_ambiguous_and_not_retried() {
+    let transport = MockTransport::new();
+    transport.status(503, "<html>bad gateway</html>");
+    transport.login("domrobot=abc");
+
+    let client = anonymous_client(transport.clone());
+    let error = client.login().await.unwrap_err();
+
+    assert!(error.is_ambiguous());
+    assert!(!error.is_retryable());
+    assert!(!client.is_authenticated());
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
 async fn logout_drops_the_session_even_when_the_call_fails() {
     let transport = MockTransport::new();
     transport.api_error(2303, "Object does not exist");
