@@ -175,8 +175,10 @@ documented API and were replaced: `domain.cancel` (use `domain.delete` or
   `InwxClient` prints only whether a session exists. Session cookies never reach
   a log line through this crate.
 * Credentials and session cookies are rejected if they contain control
-  characters, so a value cannot smuggle a second header; the same check guards
-  record content and update fields.
+  characters, so a value cannot smuggle a second header; usernames are also
+  limited to the documented 64 characters, and both checks run on borrowed input
+  before a credential is copied into owned storage. The same checks guard record
+  content and update fields.
 * `AuthCode` (the EPP transfer code) prints `<redacted>` in `Debug` and
   `Display`; `DynDnsAccount` redacts its password. A certificate CSR is refused
   if it contains a private key — the field takes a signing request only.

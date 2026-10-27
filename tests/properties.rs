@@ -4,7 +4,8 @@
 mod common;
 
 use inwx_client::{
-    DomainName, Hostname, Period, RecordId, RecordSpec, RecordType, RpcResponse, MAX_TTL,
+    Credentials, DomainName, Hostname, Period, RecordId, RecordSpec, RecordType, RpcResponse,
+    MAX_TTL,
 };
 use proptest::prelude::*;
 use serde_json::Value;
@@ -21,6 +22,18 @@ fn any_text() -> impl Strategy<Value = String> {
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// The `text64` username limit holds for every length in and around it.
+    #[test]
+    fn credential_usernames_respect_the_text64_limit(length in 1usize..=128) {
+        let username = "u".repeat(length);
+        let result = Credentials::new(username, "pass");
+        if length <= 64 {
+            prop_assert!(result.is_ok());
+        } else {
+            prop_assert!(result.is_err());
+        }
+    }
 
     /// Display and parse are inverses for every known type.
     #[test]
