@@ -174,6 +174,8 @@ documented API and were replaced: `domain.cancel` (use `domain.delete` or
 * `Debug` redacts: `Credentials` prints `<redacted>` for the password, and
   `InwxClient` prints only whether a session exists. Session cookies never reach
   a log line through this crate.
+* Stored passwords (`Credentials`, `DynDnsAccount`) cannot be cloned, are zeroed
+  when dropped, and compare in constant time.
 * Credentials and session cookies are rejected if they contain control
   characters, so a value cannot smuggle a second header; the same check guards
   record content and update fields.

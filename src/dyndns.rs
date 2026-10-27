@@ -38,6 +38,7 @@ use serde_json::{json, Value};
 use crate::client::InwxClient;
 use crate::error::{Error, Result};
 use crate::record::RecordId;
+use crate::secret::Password;
 use crate::transport::Transport;
 use crate::types::{de, validate_username, Hostname};
 
@@ -220,7 +221,30 @@ impl DynDnsCheck {
 
 /// A `dyndns.create` request.
 ///
+/// The password is stored without `Clone`, zeroed when the request is dropped,
+/// and compared in constant time.
+///
 /// ```
+/// use inwx_client::{DynDnsAccount, Hostname};
+///
+/// let host = Hostname::parse("home.example.net")?;
+/// let request = DynDnsAccount::create(
+///     "tenant-42",
+///     "s3cret-pass",
+///     &[host.clone()],
+/// )?;
+/// assert_eq!(request.params()["hostname"][0], "home.example.net");
+/// assert_eq!(
+///     request,
+///     DynDnsAccount::create("tenant-42", "s3cret-pass", &[host])?,
+/// );
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+///
+/// Cloning is intentionally unavailable:
+///
+/// ```compile_fail
+/// # fn main() -> Result<(), inwx_client::Error> {
 /// use inwx_client::{DynDnsAccount, Hostname};
 ///
 /// let request = DynDnsAccount::create(
@@ -228,13 +252,13 @@ impl DynDnsCheck {
 ///     "s3cret-pass",
 ///     &[Hostname::parse("home.example.net")?],
 /// )?;
-/// assert_eq!(request.params()["hostname"][0], "home.example.net");
-/// # Ok::<(), inwx_client::Error>(())
+/// let duplicate = request.clone();
+/// # Ok(())
+/// # }
 /// ```
-#[derive(Clone, PartialEq, Eq)]
 pub struct DynDnsAccount {
     username: String,
-    password: String,
+    password: Password,
     hostnames: Vec<Hostname>,
     testing: bool,
 }
@@ -293,7 +317,7 @@ impl DynDnsAccount {
         }
         Ok(Self {
             username: username.trim().to_owned(),
-            password,
+            password: Password::new(password),
             hostnames: hostnames.to_vec(),
             testing: false,
         })
@@ -340,12 +364,26 @@ impl DynDnsAccount {
     pub fn params(&self) -> Value {
         json!({
             "username": self.username,
-            "password": self.password,
+            "password": self.password.expose(),
             "hostname": self.hostnames.iter().map(Hostname::as_str).collect::<Vec<_>>(),
             "testing": self.testing,
         })
     }
 }
+
+/// Compares every field. The password comparison is constant-time and always
+/// runs, regardless of whether the other fields match.
+impl PartialEq for DynDnsAccount {
+    fn eq(&self, other: &Self) -> bool {
+        let passwords_match = self.password == other.password;
+        self.username == other.username
+            && passwords_match
+            && self.hostnames == other.hostnames
+            && self.testing == other.testing
+    }
+}
+
+impl Eq for DynDnsAccount {}
 
 /// `Debug` redacts the password, the same rule [`crate::Credentials`] follows.
 impl fmt::Debug for DynDnsAccount {
@@ -781,6 +819,20 @@ mod tests {
         let rendered = format!("{account:?}");
         assert!(rendered.contains("tenant-42"));
         assert!(!rendered.contains("hunter2"));
+    }
+
+    #[test]
+    fn accounts_compare_their_values() {
+        let account =
+            DynDnsAccount::create("tenant-42", "hunter2", &[host("a.example.net")]).unwrap();
+        assert_eq!(
+            account,
+            DynDnsAccount::create("tenant-42", "hunter2", &[host("a.example.net")]).unwrap()
+        );
+        assert_ne!(
+            account,
+            DynDnsAccount::create("tenant-42", "hunter3", &[host("a.example.net")]).unwrap()
+        );
     }
 
     #[test]
