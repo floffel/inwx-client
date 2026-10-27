@@ -7,6 +7,12 @@
 //!
 //! Every request is a `POST` to the JSON-RPC endpoint, so [`Request`] carries no
 //! verb field: there is only one.
+//!
+//! Inbound bodies are bounded. [`read_capped_body`] refuses a response that does
+//! not fit the transport's cap before buffering it, first by honouring
+//! `Content-Length` and then by a running total over the stream, so neither a
+//! huge answer nor a header that lies about its size can make the process
+//! allocate without limit.
 
 use std::time::Duration;
 
@@ -252,6 +258,160 @@ impl Response {
     }
 }
 
+/// Default ceiling for one response body: 4 MiB.
+///
+/// INWX answers are small. A record list, a zone info or a paginated export
+/// page is tens to hundreds of kilobytes, and the JSON-RPC envelope adds
+/// nothing worth counting — so 4 MiB leaves room for the largest answer the API
+/// documents while capping what a single misbehaving or compromised endpoint can
+/// make this process allocate. `nameserver.export` with `zonefile=true` hands
+/// back a whole zone in one `text` field and is the one documented shape that
+/// could plausibly need more: build that client's transport with
+/// `ReqwestTransport::with_max_response_bytes` instead of lowering the default
+/// to something a normal answer no longer fits into.
+///
+/// ```
+/// use inwx_client::DEFAULT_MAX_RESPONSE_BYTES;
+///
+/// assert_eq!(DEFAULT_MAX_RESPONSE_BYTES, 4 * 1024 * 1024);
+/// ```
+pub const DEFAULT_MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Where [`read_capped_body`] takes the next piece of a response body.
+///
+/// `reqwest::Response` implements it, and so can a mock that hands out a body in
+/// pieces — which is how the cap is tested without a socket. The trait is not
+/// object safe (its method returns a `Future`), so use it generically.
+///
+/// ```
+/// use inwx_client::transport::ChunkSource;
+/// use inwx_client::Result;
+///
+/// /// Hands out a scripted body, one chunk per call.
+/// struct Scripted {
+///     chunks: Vec<Vec<u8>>,
+///     position: usize,
+/// }
+///
+/// impl ChunkSource for Scripted {
+///     type Chunk = Vec<u8>;
+///
+///     fn next_chunk(&mut self) -> impl std::future::Future<Output = Result<Option<Vec<u8>>>> {
+///         let next = self.chunks.get(self.position).cloned();
+///         self.position += 1;
+///         std::future::ready(Ok(next))
+///     }
+/// }
+///
+/// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+/// let mut source = Scripted { chunks: vec![b"de".to_vec(), b"ad".to_vec()], position: 0 };
+/// let body = inwx_client::read_capped_body(&mut source, None, 16).await.unwrap();
+/// assert_eq!(body, b"dead");
+/// # });
+/// ```
+#[allow(async_fn_in_trait)]
+pub trait ChunkSource {
+    /// The chunk type; anything byte-like (`Vec<u8>`, `bytes::Bytes`, …).
+    type Chunk: AsRef<[u8]>;
+
+    /// Resolves to the next chunk, or to `None` once the body is done.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Transport`] when the next chunk cannot be read.
+    fn next_chunk(&mut self) -> impl std::future::Future<Output = Result<Option<Self::Chunk>>>;
+}
+
+/// Reads a whole body from `source` without ever buffering more than `limit`
+/// bytes allow.
+///
+/// Two checks, in this order:
+///
+/// * `declared_len` — the `Content-Length` value, when the endpoint sent one —
+///   is compared against `limit` first, so an oversized answer is refused before
+///   a single body byte is read and before anything is allocated from it;
+/// * while the chunks arrive, a running total is compared against `limit`, so a
+///   `Content-Length` that lies too small (or a body with no header at all)
+///   still fails fast — at most one chunk past the cap is ever taken.
+///
+/// An empty body is fine, and so is a `limit` of `0` for one. The returned
+/// error carries sizes only, never body bytes.
+///
+/// ```
+/// use inwx_client::transport::ChunkSource;
+/// use inwx_client::{read_capped_body, Error, Result};
+///
+/// # struct One(Option<Vec<u8>>);
+/// # impl ChunkSource for One {
+/// #     type Chunk = Vec<u8>;
+/// #     fn next_chunk(&mut self) -> impl std::future::Future<Output = Result<Option<Vec<u8>>>> {
+/// #         std::future::ready(Ok(self.0.take()))
+/// #     }
+/// # }
+/// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+/// // Just outside the cap: refused, and the error says how big it was.
+/// let error = read_capped_body(&mut One(Some(b"12345".to_vec())), Some(5), 4)
+///     .await
+///     .unwrap_err();
+/// assert!(matches!(error, Error::ResponseTooLarge { limit: 4, observed: Some(5) }));
+///
+/// // Just inside it — exactly at the cap — is accepted.
+/// let body = read_capped_body(&mut One(Some(b"1234".to_vec())), Some(4), 4)
+///     .await
+///     .unwrap();
+/// assert_eq!(body, b"1234");
+/// # });
+/// ```
+///
+/// # Errors
+///
+/// [`Error::ResponseTooLarge`] when the declared or the observed size exceeds
+/// `limit`. Whatever the source reports as a read failure is passed through
+/// unchanged.
+pub async fn read_capped_body<S: ChunkSource>(
+    source: &mut S,
+    declared_len: Option<u64>,
+    limit: u64,
+) -> Result<Vec<u8>> {
+    let mut body: Vec<u8> = Vec::new();
+    if let Some(declared) = declared_len {
+        if declared > limit {
+            return Err(Error::ResponseTooLarge {
+                limit,
+                observed: Some(declared),
+            });
+        }
+        // The declared size is within the cap here, so reserving from it cannot
+        // be talked into an allocation the cap does not allow. Where `usize` is
+        // too small to hold it, nothing is reserved and the running total does
+        // the work.
+        if let Ok(size) = usize::try_from(declared) {
+            body.reserve(size);
+        }
+    }
+
+    while let Some(chunk) = source.next_chunk().await? {
+        let seen = u64::try_from(body.len()).unwrap_or(u64::MAX);
+        let total = seen.saturating_add(u64::try_from(chunk.as_ref().len()).unwrap_or(u64::MAX));
+        if total > limit {
+            return Err(Error::ResponseTooLarge {
+                limit,
+                observed: Some(total),
+            });
+        }
+        body.extend_from_slice(chunk.as_ref());
+    }
+    Ok(body)
+}
+
+/// Parses a `Content-Length` value. Anything that is not a plain unsigned
+/// number — absent, `-1`, `42x`, two values in one header, bigger than
+/// `u64` — becomes `None`, which leaves enforcement to the running total.
+#[cfg(feature = "http")]
+fn parse_content_length(value: Option<&str>) -> Option<u64> {
+    value?.trim().parse().ok()
+}
+
 /// Performs one HTTP request. Implement it for your own stack, or use
 /// `ReqwestTransport`.
 ///
@@ -261,6 +421,9 @@ impl Response {
 /// * return the raw status, headers and body even for non-2xx (the client
 ///   decides what is retryable),
 /// * classify connection failures as [`Error::transport`],
+/// * bound the body they buffer — [`read_capped_body`] does that for a chunked
+///   source, and a transport that reads differently must still refuse a body
+///   over its cap with [`Error::ResponseTooLarge`],
 /// * never log the body of a `account.login` call: it carries the password.
 ///
 /// ```
@@ -294,6 +457,10 @@ pub trait Transport {
 ///
 /// The inner client is cheap to clone and safe to share across tasks.
 ///
+/// Bodies are capped at [`DEFAULT_MAX_RESPONSE_BYTES`], which is enforced while
+/// the response streams (see [`read_capped_body`]); a body over the cap becomes
+/// [`Error::ResponseTooLarge`] and nothing of it is returned or logged.
+///
 /// ```no_run
 /// # #[cfg(feature = "http")]
 /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
@@ -307,14 +474,26 @@ pub trait Transport {
 /// # }
 /// ```
 #[cfg(feature = "http")]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ReqwestTransport {
     client: reqwest::Client,
+    max_response_bytes: u64,
+}
+
+#[cfg(feature = "http")]
+impl Default for ReqwestTransport {
+    fn default() -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+        }
+    }
 }
 
 #[cfg(feature = "http")]
 impl ReqwestTransport {
-    /// Creates a transport with a default client (rustls, redirects followed).
+    /// Creates a transport with a default client (rustls, redirects followed)
+    /// and the [`DEFAULT_MAX_RESPONSE_BYTES`] cap.
     ///
     /// ```
     /// # #[cfg(feature = "http")]
@@ -323,6 +502,58 @@ impl ReqwestTransport {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets the ceiling for one response body, in bytes.
+    ///
+    /// A smaller value protects the process harder; a bigger one is what a
+    /// caller reading a huge export needs. `0` accepts an empty body and
+    /// nothing else, which is a legitimate way to refuse every answer.
+    ///
+    /// The cap is checked against `Content-Length` before the body is read and
+    /// against a running total while it streams, so it holds even when the
+    /// endpoint lies about the size. Going over it is
+    /// [`Error::ResponseTooLarge`], which is terminal on purpose: repeating the
+    /// request could run the same command twice.
+    ///
+    /// ```
+    /// # #[cfg(feature = "http")]
+    /// # {
+    /// use inwx_client::{ReqwestTransport, DEFAULT_MAX_RESPONSE_BYTES};
+    ///
+    /// let transport = ReqwestTransport::new().with_max_response_bytes(64 * 1024);
+    /// assert_eq!(transport.max_response_bytes(), 64 * 1024);
+    /// assert_eq!(ReqwestTransport::new().max_response_bytes(), DEFAULT_MAX_RESPONSE_BYTES);
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn with_max_response_bytes(mut self, max_response_bytes: u64) -> Self {
+        self.max_response_bytes = max_response_bytes;
+        self
+    }
+
+    /// The configured ceiling for one response body, in bytes.
+    ///
+    /// ```
+    /// # #[cfg(feature = "http")]
+    /// use inwx_client::{ReqwestTransport, DEFAULT_MAX_RESPONSE_BYTES};
+    ///
+    /// assert_eq!(ReqwestTransport::new().max_response_bytes(), DEFAULT_MAX_RESPONSE_BYTES);
+    /// ```
+    #[must_use]
+    pub fn max_response_bytes(&self) -> u64 {
+        self.max_response_bytes
+    }
+}
+
+#[cfg(feature = "http")]
+impl ChunkSource for reqwest::Response {
+    type Chunk = bytes::Bytes;
+
+    async fn next_chunk(&mut self) -> Result<Option<Self::Chunk>> {
+        self.chunk()
+            .await
+            .map_err(|error| describe_reqwest_error(&error))
     }
 }
 
@@ -337,7 +568,7 @@ impl Transport for ReqwestTransport {
             builder = builder.header(name.as_str(), value.as_str());
         }
 
-        let response = builder
+        let mut response = builder
             .body(request.body.to_vec())
             .send()
             .await
@@ -353,11 +584,16 @@ impl Transport for ReqwestTransport {
                 )
             })
             .collect::<Vec<_>>();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|error| describe_reqwest_error(&error))?
-            .to_vec();
+        // The declared size is only a hint: `read_capped_body` checks it and
+        // then counts what actually arrives, so a lying header cannot buy a
+        // bigger allocation.
+        let declared_len = parse_content_length(
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok()),
+        );
+        let body = read_capped_body(&mut response, declared_len, self.max_response_bytes).await?;
 
         Ok(Response::new(status, headers, body))
     }
@@ -383,6 +619,203 @@ fn describe_reqwest_error(error: &reqwest::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A body handed out chunk by chunk. `polled` records how many chunks the
+    /// reader took, which is how the tests tell "refused before reading" from
+    /// "read everything and complained afterwards".
+    struct Scripted {
+        chunks: Vec<Vec<u8>>,
+        position: usize,
+    }
+
+    impl Scripted {
+        fn new(chunks: &[&[u8]]) -> Self {
+            Self {
+                chunks: chunks.iter().map(|chunk| chunk.to_vec()).collect(),
+                position: 0,
+            }
+        }
+
+        fn polled(&self) -> usize {
+            self.position.min(self.chunks.len())
+        }
+    }
+
+    impl ChunkSource for Scripted {
+        type Chunk = Vec<u8>;
+
+        fn next_chunk(&mut self) -> impl std::future::Future<Output = Result<Option<Vec<u8>>>> {
+            let next = self.chunks.get(self.position).cloned();
+            self.position += 1;
+            std::future::ready(Ok(next))
+        }
+    }
+
+    /// A source that fails on the second chunk, as a reset connection does.
+    struct Breaks;
+
+    impl ChunkSource for Breaks {
+        type Chunk = Vec<u8>;
+
+        fn next_chunk(&mut self) -> impl std::future::Future<Output = Result<Option<Vec<u8>>>> {
+            std::future::ready(Err(Error::transport("connection reset")))
+        }
+    }
+
+    fn is_too_large(error: &Error, limit: u64, observed: Option<u64>) -> bool {
+        matches!(
+            error,
+            Error::ResponseTooLarge { limit: seen, observed: seen_observed }
+                if *seen == limit && *seen_observed == observed
+        )
+    }
+
+    #[test]
+    fn the_default_cap_is_four_mebibytes() {
+        assert_eq!(DEFAULT_MAX_RESPONSE_BYTES, 4 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn a_body_exactly_at_the_cap_is_accepted() {
+        let body = vec![b'x'; 64];
+        let mut source = Scripted::new(&[&body]);
+        let read = read_capped_body(&mut source, None, 64).await.unwrap();
+        assert_eq!(read.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn one_byte_over_the_cap_is_refused() {
+        let body = vec![b'x'; 65];
+        let mut source = Scripted::new(&[&body]);
+        let error = read_capped_body(&mut source, None, 64).await.unwrap_err();
+        assert!(is_too_large(&error, 64, Some(65)));
+    }
+
+    #[tokio::test]
+    async fn chunks_are_summed_and_the_cap_is_crossed_mid_stream() {
+        // 40 + 40 against a cap of 64: the second chunk is the one that
+        // crosses, and the read stops there.
+        let part = vec![b'y'; 40];
+        let mut source = Scripted::new(&[&part, &part, b"never read".as_slice()]);
+        let error = read_capped_body(&mut source, None, 64).await.unwrap_err();
+        assert!(is_too_large(&error, 64, Some(80)));
+        assert_eq!(source.polled(), 2, "the rest of the body must stay unread");
+    }
+
+    #[tokio::test]
+    async fn many_small_chunks_add_up_to_the_whole_body() {
+        let mut source = Scripted::new(&[b"dead".as_slice(), b"be".as_slice(), b"ef".as_slice()]);
+        let read = read_capped_body(&mut source, None, 8).await.unwrap();
+        assert_eq!(read, b"deadbeef");
+    }
+
+    #[tokio::test]
+    async fn a_declared_length_exactly_at_the_cap_is_accepted() {
+        let body = vec![b'x'; 64];
+        let mut source = Scripted::new(&[&body]);
+        let read = read_capped_body(&mut source, Some(64), 64).await.unwrap();
+        assert_eq!(read.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn a_declared_length_one_over_the_cap_is_refused_before_reading() {
+        let body = vec![b'x'; 128];
+        let mut source = Scripted::new(&[&body]);
+        let error = read_capped_body(&mut source, Some(65), 64)
+            .await
+            .unwrap_err();
+        assert!(is_too_large(&error, 64, Some(65)));
+        assert_eq!(source.polled(), 0, "Content-Length alone must refuse");
+    }
+
+    #[tokio::test]
+    async fn a_lying_declared_length_still_fails_while_streaming() {
+        // Declares 8 bytes, sends 80. The header cannot buy a bigger read than
+        // the cap, and the running total catches the lie.
+        let part = vec![b'z'; 40];
+        let mut source = Scripted::new(&[&part, &part]);
+        let error = read_capped_body(&mut source, Some(8), 64)
+            .await
+            .unwrap_err();
+        assert!(is_too_large(&error, 64, Some(80)));
+        assert_eq!(source.polled(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_empty_body_is_accepted_with_a_header_without_one_and_at_a_zero_cap() {
+        let mut no_header = Scripted::new(&[]);
+        assert_eq!(
+            read_capped_body(&mut no_header, None, 64)
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+
+        let mut declared_empty = Scripted::new(&[]);
+        assert_eq!(
+            read_capped_body(&mut declared_empty, Some(0), 64)
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+
+        let mut zero_cap = Scripted::new(&[]);
+        assert_eq!(
+            read_capped_body(&mut zero_cap, None, 0)
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+
+        // A zero cap still refuses one byte.
+        let mut one_byte = Scripted::new(&[b"x".as_slice()]);
+        let error = read_capped_body(&mut one_byte, None, 0).await.unwrap_err();
+        assert!(is_too_large(&error, 0, Some(1)));
+    }
+
+    #[tokio::test]
+    async fn the_error_never_carries_body_bytes() {
+        let secret = br#"{"password":"hunter2","token":"s3cr3t"}"#;
+        let mut source = Scripted::new(&[secret]);
+        let error = read_capped_body(&mut source, None, 8).await.unwrap_err();
+        let rendered = format!("{error}");
+        let debug = format!("{error:?}");
+        assert!(rendered.contains('8'), "the cap belongs in the message");
+        assert!(!rendered.contains("hunter2"));
+        assert!(!rendered.contains("s3cr3t"));
+        assert!(!debug.contains("hunter2"));
+        assert!(!debug.contains("s3cr3t"));
+    }
+
+    #[tokio::test]
+    async fn a_failing_source_is_reported_as_the_transport_error_it_gave() {
+        let mut source = Breaks;
+        let error = read_capped_body(&mut source, None, 64).await.unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Transport {
+                retryable: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "http")]
+    fn only_a_plain_number_counts_as_a_declared_length() {
+        assert_eq!(parse_content_length(Some("64")), Some(64));
+        assert_eq!(parse_content_length(Some(" 64 ")), Some(64));
+        assert_eq!(parse_content_length(Some("0")), Some(0));
+        assert_eq!(parse_content_length(None), None);
+        assert_eq!(parse_content_length(Some("")), None);
+        assert_eq!(parse_content_length(Some("-1")), None);
+        assert_eq!(parse_content_length(Some("64x")), None);
+        assert_eq!(parse_content_length(Some("64, 64")), None);
+        assert_eq!(parse_content_length(Some("99999999999999999999999")), None);
+    }
 
     #[test]
     fn headers_are_case_insensitive_and_duplicates_survive() {

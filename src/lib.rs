@@ -67,6 +67,9 @@
 //!   INWX is inconsistent between methods.
 //! * **No socket needed.** The HTTP layer sits behind [`Transport`]; the test
 //!   suite and the examples in these docs drive a scripted mock.
+//! * **Cap what arrives.** [`read_capped_body`] bounds a response before it is
+//!   buffered, so a huge answer or a header that lies about its size costs an
+//!   error instead of memory.
 //!
 //! # Feature flags
 //!
@@ -92,6 +95,12 @@
 //! * Retries are bounded (three attempts, exponential backoff) and only apply to
 //!   transport failures, 429/5xx and `2300` (pending transfer) — a rejected
 //!   command is never repeated.
+//! * A response body is capped at [`DEFAULT_MAX_RESPONSE_BYTES`], checked against
+//!   `Content-Length` before the body is read and against a running total while
+//!   it streams, so neither a misbehaving nor a compromised endpoint can make
+//!   this process allocate without bound. Crossing the cap is
+//!   [`Error::ResponseTooLarge`], which is
+//!   terminal: the command behind it may already have run.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -166,7 +175,9 @@ pub use transfer::{
 };
 #[cfg(feature = "http")]
 pub use transport::ReqwestTransport;
-pub use transport::{Response, Transport};
+pub use transport::{
+    read_capped_body, ChunkSource, Response, Transport, DEFAULT_MAX_RESPONSE_BYTES,
+};
 pub use types::{
     parse_ip, AuthCode, ContactType, DocumentFormat, DomainName, Email, Handle, Hostname, Period,
     PriceType, RenewalMode, Timestamp, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
