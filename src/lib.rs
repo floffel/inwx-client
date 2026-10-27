@@ -1,6 +1,8 @@
 //! Typed client for the [INWX](https://www.inwx.com) `DomRobot` JSON-RPC API —
 //! domains, zones and DNS records, ownership changes, certificates, hosting,
-//! DNSSEC, tags, nameserver sets, DynDNS and accounting.
+//! DNSSEC, tags, nameserver sets, DynDNS, accounting and the reseller/partner
+//! objects (applications, customers, documents, hosts, messages, news, NIC
+//! handles, PDFs).
 //!
 //! INWX is a German registrar and DNS provider. Its API is a single JSON-RPC
 //! endpoint (`https://api.domrobot.com/jsonrpc/`, or the free OTE sandbox at
@@ -48,6 +50,14 @@
 //! | Accounting | `accounting.*` (11 methods) |
 //! | Contacts | `contact.create`, `info`, `list`, `update`, `delete` |
 //! | Prices | `domain.getPrices`, `domain.getdomainprice` |
+//! | Applications | `application.*` (6 methods) |
+//! | AuthInfo2 | `authinfo2.create`, `authinfo2.getprice` |
+//! | Customers | `customer.*` (7 methods) |
+//! | Documents | `document.*` (4 methods) |
+//! | Host objects | `host.*` (6 methods) |
+//! | Messages | `message.poll`, `message.ack` |
+//! | News and NIC handles | `news.list`, `nichandle.list` |
+//! | PDFs | `pdf.document`, `pdf.get` |
 //!
 //! Unknown methods stay reachable through [`InwxClient::call`]; what is not
 //! modelled yet is tracked as an issue, not hidden as "out of scope".
@@ -57,14 +67,18 @@
 //! * **Validate before you send.** [`DomainName`], [`Hostname`], [`RecordSpec`],
 //!   [`RecordSet`], [`ZoneCreate`], [`ContactRequest`] and [`Period`] reject what
 //!   the API would reject, so a typo costs a local error instead of a charged
-//!   registration or a broken zone.
+//!   registration or a broken zone. On the reseller surface that rule extends to
+//!   ids (positive), paging (1 to 1000 per page), an update that changes nothing
+//!   and a document payload above 8 MiB — all refused before the wire.
 //! * **Say what cannot be undone.** Ownership changes and refunds take an
 //!   [`Irreversible`] acknowledgement naming the action and the object, so a
 //!   transfer cannot be built by copy-pasting a block and forgetting the domain.
 //! * **Parse permissively.** Unknown fields are ignored, unknown enum values are
 //!   carried ([`RecordType::Other`], [`RenewalMode::Other`],
 //!   [`ContactType::Other`]), and scalars are accepted as numbers or strings —
-//!   INWX is inconsistent between methods.
+//!   INWX is inconsistent between methods. The reseller objects keep what is not
+//!   modelled in a `rest` map instead of dropping it, and accept both
+//!   `customerNo` and `customer_no`.
 //! * **No socket needed.** The HTTP layer sits behind [`Transport`]; the test
 //!   suite and the examples in these docs drive a scripted mock.
 //!
@@ -86,7 +100,8 @@
 //! * Session cookies and credentials are rejected if they contain control
 //!   characters, so a value cannot smuggle a second header.
 //! * [`AuthCode`] (the EPP transfer code) prints `<redacted>` in `Debug` and
-//!   `Display`; the DynDNS account type redacts its password.
+//!   `Display`; the DynDNS account type redacts its password, and so does
+//!   [`AuthInfo2Code`] — its value only leaves through `expose`.
 //! * A certificate CSR is refused if it contains a private key: the field takes a
 //!   signing request, and anything else would upload a secret to a third party.
 //! * Retries are bounded (three attempts, exponential backoff) and only apply to
@@ -99,17 +114,27 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod accounting;
+pub mod application;
+pub mod authinfo2;
 pub mod certificate;
 pub mod client;
 pub mod contact;
+pub mod customer;
 pub mod dnssec;
+pub mod document;
 pub mod domain;
 pub mod dyndns;
 pub mod dyndnssubscription;
 pub mod error;
+pub mod host;
 pub mod hosting;
+pub mod message;
 pub mod nameserver;
 pub mod nameserverset;
+pub mod news;
+pub mod nichandle;
+mod params;
+pub mod pdf;
 pub mod price;
 pub mod record;
 pub mod rpc;
@@ -123,6 +148,13 @@ pub use accounting::{
     AccountBalance, CreditLog, Document, Invoice, LockedFund, LockedFunds, PostalDelivery,
     RefundRequest, SslFund, StatementQuery, Transaction, TransactionLog, TransactionLogQuery,
 };
+pub use application::{
+    Application, ApplicationCheck, ApplicationCreate, ApplicationListPage, ApplicationListQuery,
+    ApplicationUpdate,
+};
+pub use authinfo2::{
+    AuthInfo2, AuthInfo2Code, AuthInfo2Order, AuthInfo2Price, MAX_AUTHINFO2_QUANTITY,
+};
 pub use certificate::{
     Certificate, CertificateId, CertificateLogEntry, CertificateMissingData, CertificateOrder,
     CertificateOrderResult, CertificateProduct, CertificateProductQuery, CertificateQuery,
@@ -133,9 +165,16 @@ pub use client::{
     DEFAULT_BASE_DELAY, DEFAULT_BASE_URL, DEFAULT_MAX_DELAY, SANDBOX_BASE_URL,
 };
 pub use contact::{Contact, ContactListPage, ContactQuery, ContactRequest, ContactUpdate};
+pub use customer::{
+    ContactVerificationSettings, ContactVerificationSettingsUpdate, Customer, CustomerDownload,
+    CustomerDownloadPage, CustomerDownloadQuery, CustomerUpdate, DataExport, DataExportRequest,
+};
 pub use dnssec::{
     AddDnsKeyRequest, DnsKey, DnsKeyPair, DnssecAlgorithm, DnssecDigestType, DnssecDomainStatus,
     DnssecFlag, DnssecKey, DnssecKeyQuery, DnssecKeyStatus, DnssecState, DsRecord,
+};
+pub use document::{
+    DocumentDownload, DocumentListPage, DocumentQuery, DocumentSummary, DocumentUpload,
 };
 pub use domain::{
     DomainCheck, DomainCreate, DomainInfo, DomainListPage, DomainListQuery, DomainRenew,
@@ -147,13 +186,18 @@ pub use dyndns::{
 };
 pub use dyndnssubscription::DynDnsSubscription;
 pub use error::{Error, Result};
+pub use host::{Host, HostCreate, HostListPage, HostListQuery, HostUpdate};
 pub use hosting::{
     HostingOrder, HostingPackage, HostingPeriod, HostingReinstatement, HostingSuspension,
 };
+pub use message::{Message, MessageQueue};
 pub use nameserver::{NameserverCheck, ZoneInfo, ZoneListPage, ZoneSummary};
 pub use nameserverset::{
     NameserverSet, NameserverSetCreate, NameserverSetType, NameserverSetUpdate,
 };
+pub use news::{NewsItem, NewsListPage, NewsQuery};
+pub use nichandle::{NicHandle, NicHandleListPage, NicHandleQuery};
+pub use pdf::{PdfDocument, PdfHash, PdfRender};
 pub use price::{DomainPriceQuote, PriceList, TldPrice};
 pub use record::{
     DnsRecord, RecordId, RecordSet, RecordSpec, RecordType, RecordUpdate, DEFAULT_TTL, MAX_TTL,
@@ -168,7 +212,7 @@ pub use transfer::{
 pub use transport::ReqwestTransport;
 pub use transport::{Response, Transport};
 pub use types::{
-    parse_ip, AuthCode, ContactType, DocumentFormat, DomainName, Email, Handle, Hostname, Period,
-    PriceType, RenewalMode, Timestamp, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
+    parse_ip, AuthCode, CheckOutcome, ContactType, DocumentFormat, DomainName, Email, Handle,
+    Hostname, Period, PriceType, RenewalMode, Timestamp, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
 };
 pub use zone::{RecordExport, UrlRedirectType, ZoneCreate, ZoneExport, ZoneType, ZoneUpdate};

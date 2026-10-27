@@ -263,6 +263,105 @@ decodes them with the `base64` crate and refuses invalid input rather than writi
 a corrupt file. `accounting.refund` moves money and therefore requires the same
 `Irreversible` acknowledgement as the ownership commands.
 
+## Reseller/partner objects (`src/application.rs`, `src/authinfo2.rs`, `src/customer.rs`,
+`src/document.rs`, `src/host.rs`, `src/message.rs`, `src/news.rs`, `src/nichandle.rs`,
+`src/pdf.rs`)
+
+**Provenance caveat — read this before trusting a row.** Issue #22 was implemented in a
+sandbox without network access, so the pages below could not be re-read and their
+`Table 2.NNN` anchors were not copied. The method names come from the issue and are the
+documented ones; the parameter keys, the identifier spelling and the response fields are
+reconstructed from the conventions this crate already verified for `certificate.*`
+(`certificateId`, camelCase answers) and `accounting.*`. Every row is therefore marked
+**unverified (offline reconstruction)** and has to be pinned to its table number against
+`https://account.inwx.com/en/help/apidoc/f/ch02sNN.html` before a release. The parsers are
+permissive (unknown fields land in `rest`, both `customerNo` and `customer_no` are
+accepted, scalars arrive as number or string) and every builder that takes
+product-specific fields has a `with_field`, so a wrong key is correctable at one call
+site — or through `InwxClient::call` — without a breaking change.
+
+Section URLs: application ch02s03, authinfo2 ch02s04, customer ch02s07, host ch02s12,
+message ch02s14, news ch02s17, nichandle ch02s18, pdf ch02s19, document ch02s21.
+
+### `application.*` (ch02s03) — **unverified (offline reconstruction)**
+
+| Method | Wrapper | Input table | Output table | Notes |
+| --- | --- | --- | --- | --- |
+| `application.check` | `ApplicationCheck` → `check_application` | §2.3 (not pinned) | §2.3 (not pinned) | `type`, `name`, `customer` + `with_field`; an empty check is refused locally; the answer is parsed as `CheckOutcome` |
+| `application.create` | `ApplicationCreate` → `create_application` | §2.3 (not pinned) | §2.3 (not pinned) | `type`, `name`, `customer`, `comment`, `testing` (via `dry_run`) + `with_field`; an order with no parameter is refused |
+| `application.info` | `application_info` | §2.3 (not pinned) | §2.3 (not pinned) | `applicationId` |
+| `application.list` | `ApplicationListQuery` → `list_applications` | §2.3 (not pinned) | §2.3 (not pinned) | `type`, `state`, `customer`, `page`, `pagelimit`; output `count` + `application[]` |
+| `application.update` | `ApplicationUpdate` → `update_application` | §2.3 (not pinned) | §2.3 (not pinned) | `applicationId` + the changed fields; an update that changes nothing is refused |
+| `application.delete` | `delete_application` | §2.3 (not pinned) | — | `applicationId` |
+
+### `authinfo2.*` (ch02s04) — **unverified (offline reconstruction)**
+
+| Method | Wrapper | Input table | Output table | Notes |
+| --- | --- | --- | --- | --- |
+| `authinfo2.create` | `AuthInfo2Order` → `create_authinfo2` | §2.4 (not pinned) | §2.4 (not pinned) | `domain`, `quantity` (1–100), `customer` + `with_field`; the answer's `authinfo2` becomes an `AuthInfo2Code`, redacted in `Debug`/`Display` |
+| `authinfo2.getprice` | `AuthInfo2Order` → `authinfo2_price` | §2.4 (not pinned) | §2.4 (not pinned) | the same request type as `create`, so a quote cannot drift from the order it quotes |
+
+### `customer.*` (ch02s07) — **unverified (offline reconstruction)**
+
+| Method | Wrapper | Input table | Output table | Notes |
+| --- | --- | --- | --- | --- |
+| `customer.info` | `customer_info` | §2.7 (not pinned) | §2.7 (not pinned) | `customerId`; output `id`, `customerNo`, the address fields, `customerType`, `creditLimit` + `rest` |
+| `customer.update` | `CustomerUpdate` → `update_customer` | §2.7 (not pinned) | §2.7 (not pinned) | `customerId` + `title`, `name`, `street`, `zip`, `city`, `country` (ISO 3166-1 alpha-2, upper-cased), `email` (`Email`), `phone`, `fax`, `locale`, `vat` + `with_field`; an update that changes nothing is refused |
+| `customer.delete` | `delete_customer` | §2.7 (not pinned) | — | `customerId` |
+| `customer.listdownloads` | `CustomerDownloadQuery` → `list_customer_downloads` | §2.7 (not pinned) | §2.7 (not pinned) | `customer`, `page`, `pagelimit`; output `count` + `download[]` (`hash`, `filename`, `size`, `validUntil`) |
+| `customer.requestdataexport` | `DataExportRequest` → `request_customer_data_export` | §2.7 (not pinned) | §2.7 (not pinned) | an empty request is legal here (it exports the whole account), so there is no empty-payload guard |
+| `customer.contactverificationsettingsinfo` | `contact_verification_settings` | §2.7 (not pinned) | §2.7 (not pinned) | optional `customerId`; settings are read **by name** (`value`, `bool_value`, `string_value`), because which ones exist is not settled |
+| `customer.contactverificationsettingsupdate` | `ContactVerificationSettingsUpdate` → `update_contact_verification_settings` | §2.7 (not pinned) | §2.7 (not pinned) | `customerId` + `with_field`; an update that changes no setting is refused |
+
+### `document.*` (ch02s21) — **unverified (offline reconstruction)**
+
+| Method | Wrapper | Input table | Output table | Notes |
+| --- | --- | --- | --- | --- |
+| `document.list` | `DocumentQuery` → `list_documents` | §2.21 (not pinned) | §2.21 (not pinned) | `customer`, `type`, `name`, `page`, `pagelimit`; output `count` + `document[]` |
+| `document.upload` | `DocumentUpload` → `upload_document` | §2.21 (not pinned) | §2.21 (not pinned) | `name`, `type` (MIME), `data` (base64), `customer` + `with_field`; bytes are encoded at construction, the size being checked first |
+| `document.download` | `download_document` | §2.21 (not pinned) | §2.21 (not pinned) | `documentId`; the answer's `data` is decoded by `DocumentDownload::bytes`, the encoded length being checked before decoding |
+| `document.delete` | `delete_document` | §2.21 (not pinned) | — | `documentId` |
+
+### `host.*` (ch02s12) — **unverified (offline reconstruction)**
+
+The reseller host object. `hosting.*` (§2.13, Tables 2.178–2.189) is a different object and
+is already modelled in `src/hosting.rs`.
+
+| Method | Wrapper | Input table | Output table | Notes |
+| --- | --- | --- | --- | --- |
+| `host.check` | `check_host` | §2.12 (not pinned) | §2.12 (not pinned) | `name` (`Hostname`); the answer is parsed as `CheckOutcome` |
+| `host.create` | `HostCreate` → `create_host` | §2.12 (not pinned) | §2.12 (not pinned) | `name` required, `customer`, `ipAddress` (`parse_ip`, either family), `testing` (via `dry_run`) + `with_field` |
+| `host.info` | `host_info` | §2.12 (not pinned) | §2.12 (not pinned) | `hostId` |
+| `host.list` | `HostListQuery` → `list_hosts` | §2.12 (not pinned) | §2.12 (not pinned) | `customer`, `name`, `state`, `page`, `pagelimit`; output `count` + `host[]` |
+| `host.update` | `HostUpdate` → `update_host` | §2.12 (not pinned) | §2.12 (not pinned) | `hostId` + `name`/`customer`/`ipAddress` + `with_field`; an update that changes nothing is refused |
+| `host.delete` | `delete_host` | §2.12 (not pinned) | — | `hostId` |
+
+### `message.*`, `news.list`, `nichandle.list`, `pdf.*` — **unverified (offline reconstruction)**
+
+| Method | Wrapper | Input table | Output table | Notes |
+| --- | --- | --- | --- | --- |
+| `message.poll` | `poll_messages` | §2.14 (not pinned) | §2.14 (not pinned) | no parameters; output `count` + `message[]`, the payload staying a `Value` in `Message::content` |
+| `message.ack` | `ack_message` | §2.14 (not pinned) | — | `messageId` — see the identifier caveat below |
+| `news.list` | `NewsQuery` → `list_news` | §2.17 (not pinned) | §2.17 (not pinned) | `customer`, `onlyUnread`, `page`, `pagelimit` + `with_field`; output `count` + `news[]` |
+| `nichandle.list` | `NicHandleQuery` → `list_nic_handles` | §2.18 (not pinned) | §2.18 (not pinned) | `customer`, `handle`, `page`, `pagelimit` + `with_field`; output `count` + `handle[]`; read-only — handle *contents* go through `contact.*` |
+| `pdf.document` | `PdfRender` → `render_pdf` | §2.19 (not pinned) | §2.19 (not pinned) | `type`, `customer`, `language` (`Language`, `en`/`de`) + `with_field`; an empty render is refused |
+| `pdf.get` | `PdfHash` → `fetch_pdf` | §2.19 (not pinned) | §2.19 (not pinned) | `hash`, validated as a `token255` before the wire; the body is decoded by `PdfDocument::bytes` |
+
+Validation added on top of the reconstructed shapes — each one has a
+just-inside/just-outside pair in `tests/reseller.rs` and `tests/reseller_accounts.rs`:
+
+- ids must be positive (`applicationId`, `customerId`, `documentId`, `hostId`, `messageId`);
+- `pagelimit` must be 1–1000 and `page` is clamped to at least 1;
+- a `*.check`, `*.create`, `*.update`, quote or settings update that would send no
+  parameter is refused — the API answers that with `2003 Required parameter missing`;
+- AuthInfo2 `quantity` is 1–100;
+- a document payload is at most 8 MiB, checked against the *input* length before base64
+  encoding or decoding;
+- a caller-supplied parameter name is 1–64 ASCII characters, starts with a letter, holds no
+  control character, and may not be a key the builder already owns;
+- host names go through `Hostname`, glue addresses through `parse_ip`, customer countries
+  through the ISO 3166-1 alpha-2 check and customer e-mail through `Email`.
+
 ## Unverified
 
 Points the documentation does not settle. Each is modelled as documented and
@@ -279,13 +378,16 @@ flagged here; none is a guess about an endpoint's existence.
 | `tag.list` `count` nesting | **unverified** | Table 2.235 shows `count` → `domain` with an ambiguous indentation; parsed as `{"count": {"domain": N}}` with a scalar `count` also tolerated. |
 | Live-endpoint behaviour for every 0.2.0 method | **unverified** | No credentials in CI; every test is offline against fixtures. Method names, parameters and datatypes are from the tables above. |
 | `extData` per-TLD keys | **documented, not enumerated** | ch03 §3.49 lists the generic keys and then a long TLD-specific list; `ExtData::set` carries any upper-case token. |
+| Every reseller/partner parameter key | **unverified (offline reconstruction)** | issue #22 was implemented without network access, so `type`/`name`/`customer`/`state`/`comment`/`onlyUnread`/`hash` are reconstructed from the verified `certificate.*`/`accounting.*` conventions rather than copied from the tables. `with_field` and `InwxClient::call` are the escape hatches while they are checked. |
+| Identifier key spelling on the reseller objects | **unverified (offline reconstruction)** | the crate sends `applicationId`, `customerId`, `documentId`, `hostId`, `messageId`, following the verified `certificateId`; the older `message.ack` in particular may take `message` instead. |
+| `pagelimit` ceiling of 1000, AuthInfo2 `quantity` ceiling of 100, document ceiling of 8 MiB | **the crate's own bound** | the pages do not state a maximum here, so absurd paging, bulk sizes and payloads are refused locally. |
+| Response container keys of the reseller list methods | **unverified (offline reconstruction)** | each list page accepts the singular and the plural key (`application`/`applications`, `handle`/`handles`/`nichandle`, `download`/`downloads`, `message`/`messages`, `news`). |
 
 ## Deliberately not modelled
 
 - **API-key authentication** — marketed by INWX but absent from the public API
   documentation; the crate implements password login only (see README).
-- **`application.*`, `authinfo2.*`, `customer.*`, `document.*`, `host.*`,
-  `message.*`, `news.list`, `nichandle.list`, `pdf.*`** — separate API objects for
-  the reseller/partner product, not part of the registrar surface this crate
-  claims. They are reachable through `InwxClient::call`, and the gap is tracked
-  as an issue rather than presented as a boundary.
+
+Everything else the API documents is modelled. The reseller/partner objects arrived in
+issue #22; what is still open on them is the parameter-name verification described in
+their section, not a missing surface.

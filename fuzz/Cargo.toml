@@ -22,4 +22,14 @@ test = false
 doc = false
 bench = false
 
+# The hand-rolled value parsers (Period, RenewalMode, ContactType, PriceType).
+# Their curated seeds live in fuzz/corpus/parse_types and are replayed with
+# their exact expected outcome by tests/fuzz_fixtures.rs.
+[[bin]]
+name = "parse_types"
+path = "fuzz_targets/parse_types.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

@@ -2,7 +2,9 @@
 
 Typed Rust client for the [INWX](https://www.inwx.com) DomRobot JSON-RPC API —
 zones and DNS records, domain transfers and ownership changes, certificates,
-hosting, DNSSEC, tags, nameserver sets, DynDNS, accounting, contacts and prices.
+hosting, DNSSEC, tags, nameserver sets, DynDNS, accounting, contacts, prices and
+the reseller/partner objects (applications, customers, documents, hosts,
+messages, news, NIC handles, PDFs).
 
 INWX is a German registrar and DNS provider. One endpoint
 (`https://api.domrobot.com/jsonrpc/`, sandbox: `https://api.ote.domrobot.com/jsonrpc/`)
@@ -80,6 +82,15 @@ Every method below is implemented against the published INWX API documentation
 | Accounting | `accounting.accountBalance`, `creditLogById`, `getInvoice`, `getPreviewInvoice`, `getReceipt`, `getstatement`, `listInvoices`, `lockedFunds`, `log`, `refund`, `sendbypost` | PDFs decoded from base64 (`Document::pdf_bytes`); `refund` needs the acknowledgement |
 | Contacts | `contact.create`, `contact.info`, `contact.list`, `contact.update`, `contact.delete` | documented field lengths and country codes enforced |
 | Prices | `domain.getPrices`, `domain.getdomainprice` | `f64` quotes, not amounts to sum |
+| Applications | `application.check`, `create`, `delete`, `info`, `list`, `update` | typed builders; an order or update with no field is refused locally |
+| AuthInfo2 | `authinfo2.create`, `authinfo2.getprice` | one request type drives order and quote, so they cannot drift; the code is redacted in `Debug`/`Display` |
+| Customers | `customer.contactverificationsettingsinfo`, `contactverificationsettingsupdate`, `delete`, `info`, `listdownloads`, `requestdataexport`, `update` | ISO 3166-1 country codes and `Email` enforced; settings are read by name |
+| Documents | `document.delete`, `download`, `list`, `upload` | bytes in, base64 out (and back), size checked before allocating |
+| Host objects | `host.check`, `create`, `delete`, `info`, `list`, `update` | names through `Hostname`, glue through `parse_ip`; reseller object, not `hosting.*` |
+| Messages | `message.poll`, `message.ack` | the payload stays a `Value` (it depends on the message type) |
+| News | `news.list` | unread filter and paging |
+| NIC handles | `nichandle.list` | read-only here; handle contents live in `contact.*` |
+| PDFs | `pdf.document`, `pdf.get` | rendered PDF decoded from base64 (`PdfDocument::bytes`), hash validated for a re-fetch |
 | Anything else | `InwxClient::call(method, params)` | login, cookies, retries and error envelopes still apply |
 
 ### Design
@@ -90,9 +101,15 @@ Every method below is implemented against the published INWX API documentation
   instead of a charged registration or an `2004 Parameter value range error`. `A` records must carry IPv4, `AAAA` IPv6,
   `CNAME`/`MX`/`NS`/`PTR`/`SRV` a host name (an IP literal is refused), TTLs must
   fit the documented `int`, and the record name rules allow `@`, `*` and
-  `_service` labels while refusing whitespace and control characters.
-* **Parse permissively.** Unknown fields are ignored; unknown enum values are
-  carried (`RecordType::Other`, `RenewalMode::Other`, `ContactType::Other`);
+  `_service` labels while refusing whitespace and control characters. The
+  reseller builders add their own rules: ids must be positive, a page may hold
+  1 to 1000 entries, an `*.update` that changes nothing is refused, an AuthInfo2
+  quantity is 1 to 100 and a document payload is at most 8 MiB — checked against
+  the input before anything is encoded.
+* **Parse permissively.** Unknown fields are ignored — the reseller types keep
+  them in a `rest` map rather than dropping them — and both `customerNo` and
+  `customer_no` are accepted; unknown enum values are carried
+  (`RecordType::Other`, `RenewalMode::Other`, `ContactType::Other`);
   scalars are accepted as numbers *or* strings, because INWX is not consistent
   between methods (record ids are `token255` and arrive as strings, `avail` is an
   int, `transferLock` shows up as `1`/`true`).
@@ -126,8 +143,10 @@ and worked down in order - the list below is the backlog, not a boundary:
 
 - `domain.log`, `domain.stats`, `domain.getRules`, `domain.getTldGroups` - [#14](https://github.com/floffel/inwx-client/issues/14)
 - automatic pagination for the list endpoints - [#15](https://github.com/floffel/inwx-client/issues/15)
-- reseller/partner objects (`application.*`, `authinfo2.*`, `customer.*`, `document.*`, `host.*`,
-  `message.*`, `news.*`, `nichandle.*`, `pdf.*`) - [#22](https://github.com/floffel/inwx-client/issues/22)
+
+The reseller/partner objects (`application.*`, `authinfo2.*`, `customer.*`, `document.*`, `host.*`,
+`message.*`, `news.*`, `nichandle.*`, `pdf.*`) are implemented; their parameter names still need a
+pass against the live documentation pages (see *Unverified* below).
 
 Two items are genuinely outside the crate, and here is why rather than a label:
 
@@ -157,6 +176,7 @@ documentation does not state:
 | `tag.list` `count.domain` nesting | **unverified** — the table's indentation is ambiguous; both shapes are tolerated. |
 | `dyndnssubscription.cancel` id semantics | **unverified** — Table 2.161 types `id` as "the customer's subscription id", while `create` uses the same name for the plan id; the crate takes two separate parameters so the two cannot be confused. |
 | Every 0.2.0 write against a live endpoint | **unverified** — no credentials in CI; method names, parameters and datatypes come from the tables in `docs/contracts.md`. |
+| Reseller/partner parameter names and `Table 2.NNN` anchors | **unverified** — issue #22 was implemented without network access, so the chapter 2 §2.3/§2.4/§2.7/§2.12/§2.14/§2.17/§2.18/§2.19/§2.21 pages could not be re-read. Method names are certain (they are in the issue); the parameter keys, the identifier spelling (`applicationId` follows `certificateId`) and the table numbers are reconstructed and pinned down in `docs/contracts.md`. `InwxClient::call` stays the escape hatch while they are checked. |
 | Unicode → punycode | UTS-46 mapping via `idna`, so emoji become punycode and characters the mapping deletes disappear. The ACE form (`DomainName::as_str`) is what is sent, logged and compared. |
 
 Two methods the predecessor implementation called do **not** exist in the
@@ -178,20 +198,26 @@ documented API and were replaced: `domain.cancel` (use `domain.delete` or
   characters, so a value cannot smuggle a second header; the same check guards
   record content and update fields.
 * `AuthCode` (the EPP transfer code) prints `<redacted>` in `Debug` and
-  `Display`; `DynDnsAccount` redacts its password. A certificate CSR is refused
-  if it contains a private key — the field takes a signing request only.
+  `Display`; `DynDnsAccount` redacts its password, and `AuthInfo2Code` prints
+  `<redacted>` too — the value only leaves through `expose()`. A certificate CSR
+  is refused if it contains a private key — the field takes a signing request
+  only.
+* Sizes are checked before allocation: a document upload or download is bounded
+  at 8 MiB against the input length, and a caller-supplied parameter name has to
+  be a plain ASCII identifier.
 * Retries are bounded and only apply to transient failures, so a rejected
   registration cannot be submitted three times.
 
 ## Testing
 
 ```bash
-cargo test                        # unit + integration + 657 doctests, no network
+cargo test                        # unit + integration + 877 doctests, no network
 cargo test --no-default-features  # the same, without reqwest/tokio
 cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --no-deps --all-features
 cargo llvm-cov --no-default-features --summary-only --fail-under-lines 95
 cargo +nightly fuzz run parse_response
+cargo +nightly fuzz run parse_types
 ```
 
 * **Unit** — permissive scalars, cookie collection, retry backoff, record and
@@ -204,7 +230,9 @@ cargo +nightly fuzz run parse_response
   truncated error bodies) and a 32-task concurrency test.
   Every 0.2.0 method has its own recording test asserting the method name and the
   exact parameters (`tests/zones.rs`, `tests/ownership.rs`, `tests/services.rs`,
-  `tests/certificates.rs`); `tests/limits.rs` is the boundary matrix (63/64-byte
+  `tests/certificates.rs`), and so has every reseller/partner method
+  (`tests/reseller.rs`, `tests/reseller_accounts.rs`), each with the boundary
+  pair next to it; `tests/limits.rs` is the boundary matrix (63/64-byte
   label, 253/254-byte name, empty label, TTL bounds, IDN form, per-type record
   values, CSR size, auth-code and email shapes) and `tests/coverage.rs` calls the
   `Display`/`FromStr`/serde impls and error branches that doctests exercise —
@@ -214,11 +242,23 @@ cargo +nightly fuzz run parse_response
   emails and timestamps round-trip; zone params survive a JSON round trip;
   `RecordSet` never accepts an apex CNAME; an `Irreversible` acknowledgement only
   builds the request whose action it names.
-* **Coverage** — 98.6 % lines / 99.6 % functions without the `http` feature. CI
-  gates at 95 %; the reqwest adapter is the only code that needs a socket.
+* **Coverage** — 98.8 % lines / 99.5 % functions without the `http` feature, with
+  every reseller/partner module at 100 % of its lines. CI gates at 95 %; the
+  reqwest adapter is the only code that needs a socket.
 * **Fuzz** — `fuzz/fuzz_targets/parse_response.rs` feeds arbitrary bytes through
-  the JSON-RPC parser and every typed decoder on `resData`; seeded with success,
+  the JSON-RPC parser and every typed decoder on `resData`, including the
+  reseller objects and their base64 document/pdf bodies; seeded with success,
   pending, error and hostile-shape bodies.
+  `fuzz/fuzz_targets/parse_types.rs` feeds every byte string to all four
+  hand-rolled value parsers at once — `Period`, `RenewalMode`, `ContactType` and
+  `PriceType` — and asserts their contract: never a panic, only
+  `Error::Validation` on the documented field, and a wire form that parses back
+  unchanged. Its curated seeds (`fuzz/corpus/parse_types`: valid values and case
+  variants, empty and whitespace-only input including unicode spaces, NUL bytes,
+  invalid UTF-8, and the just-outside `0Y`, `2M`, `4M`, `11Y`) are replayed by
+  `tests/fuzz_fixtures.rs` against their exact expected outcome, so CI pins
+  behaviour rather than only the absence of a panic; the same file holds the
+  boundary pairs and the `proptest` oracles.
 
 ## License
 

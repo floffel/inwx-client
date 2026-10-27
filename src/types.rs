@@ -1223,6 +1223,59 @@ pub fn parse_ip(text: &str) -> Result<std::net::IpAddr> {
         .map_err(|_| Error::validation("ip", format!("{text:?} is not an IP address")))
 }
 
+/// The answer to a `*.check` command (`application.check`, `host.check`).
+///
+/// A check is a question, not an order: the API answers whether the object
+/// could be created and, when it cannot, why. Both fields are optional because
+/// the answer carries the reason in `msg` for some object types and in the
+/// payload for others; unknown fields are kept in [`CheckOutcome::rest`] instead
+/// of being dropped.
+///
+/// ```
+/// use inwx_client::CheckOutcome;
+///
+/// let free: CheckOutcome = serde_json::from_str(r#"{"available":1,"note":"free"}"#)?;
+/// assert_eq!(free.is_available(), Some(true));
+/// assert_eq!(free.note.as_deref(), Some("free"));
+///
+/// let taken: CheckOutcome = serde_json::from_str(r#"{"available":"0","policy":"X"}"#)?;
+/// assert_eq!(taken.is_available(), Some(false));
+/// assert_eq!(taken.rest["policy"], "X");
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct CheckOutcome {
+    /// Whether the object is free to create; absent when the API only answered
+    /// with a message.
+    #[serde(default, alias = "free", deserialize_with = "de::opt_bool")]
+    pub available: Option<bool>,
+    /// Explanation the API put in the payload, when it put one there.
+    #[serde(default, deserialize_with = "de::opt_string")]
+    pub note: Option<String>,
+    /// Fields this crate does not model, kept verbatim.
+    #[serde(flatten)]
+    pub rest: serde_json::Map<String, serde_json::Value>,
+}
+
+impl CheckOutcome {
+    /// Whether the API reports the object as available.
+    ///
+    /// ```
+    /// use inwx_client::CheckOutcome;
+    ///
+    /// assert_eq!(
+    ///     serde_json::from_str::<CheckOutcome>(r#"{"available":true}"#)?.is_available(),
+    ///     Some(true)
+    /// );
+    /// assert_eq!(serde_json::from_str::<CheckOutcome>(r#"{}"#)?.is_available(), None);
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
+    #[must_use]
+    pub fn is_available(&self) -> Option<bool> {
+        self.available
+    }
+}
+
 /// Permissive deserialisers.
 ///
 /// INWX is not consistent about scalar types: ids and booleans arrive as JSON

@@ -10,5 +10,8 @@ doc-valid-idents = [
     "TLS",
     "IPv4",
     "IPv6",
+    "AuthInfo2",
+    "NicHandle",
+    "GDPR",
     "..",
 ]

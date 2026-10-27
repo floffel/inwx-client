@@ -343,3 +343,90 @@ proptest! {
         prop_assert_eq!(params["pagelimit"].as_u64().unwrap(), u64::from(limit));
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// A document payload survives the base64 round trip, whatever it holds, and
+    /// the byte count is the decoded length — never the encoded one.
+    #[test]
+    fn document_payloads_round_trip(bytes in proptest::collection::vec(any::<u8>(), 1..200)) {
+        let upload = inwx_client::DocumentUpload::new("blob.bin", &bytes).unwrap();
+        prop_assert_eq!(upload.byte_len(), bytes.len());
+
+        let encoded = upload.params()["data"].as_str().unwrap().to_owned();
+        let download: inwx_client::DocumentDownload =
+            serde_json::from_value(serde_json::json!({ "data": encoded })).unwrap();
+        prop_assert_eq!(&download.bytes().unwrap(), &bytes);
+    }
+
+    /// An empty payload never builds, and a hostile base64 string is an error
+    /// rather than a panic or a silent empty file.
+    #[test]
+    fn document_decoders_never_panic(body in any_text()) {
+        let upload = inwx_client::DocumentUpload::from_base64("blob.bin", &body);
+        if let Ok(upload) = upload {
+            let download: inwx_client::DocumentDownload = serde_json::from_value(
+                upload.params(),
+            )
+            .unwrap();
+            let _ = download.bytes();
+        }
+    }
+
+    /// A hash is accepted exactly when it is a `token255` without control
+    /// characters — the shape the crate puts into a parameter.
+    #[test]
+    fn pdf_hash_accepts_only_tokens(text in "\\PC{0,300}") {
+        let trimmed = text.trim();
+        let accepted = !trimmed.is_empty()
+            && trimmed.chars().count() <= 255
+            && !trimmed.chars().any(char::is_control);
+        prop_assert_eq!(inwx_client::PdfHash::new(&text).is_ok(), accepted);
+        if accepted {
+            let hash = inwx_client::PdfHash::new(&text).unwrap();
+            prop_assert_eq!(hash.as_str(), trimmed);
+        }
+    }
+
+    /// Paging is accepted exactly inside 1..=1000, and the page is clamped to 1.
+    #[test]
+    fn reseller_paging_boundaries(page in 0u32..4000, limit in 0u32..1100) {
+        let query = inwx_client::DocumentQuery::new().with_page(page, limit);
+        prop_assert_eq!(query.is_ok(), (1..=1000).contains(&limit));
+        if let Ok(query) = query {
+            let params = query.params();
+            prop_assert_eq!(params["page"].as_u64().unwrap(), u64::from(page.max(1)));
+            prop_assert_eq!(params["pagelimit"].as_u64().unwrap(), u64::from(limit));
+        }
+    }
+
+    /// A hand-written parameter name is accepted exactly when it is a plain
+    /// ASCII identifier, and never overwrites a key the builder owns.
+    #[test]
+    fn extra_parameter_names_are_identifiers(key in "[A-Za-z_]{0,3}[ .@a-z0-9]{0,6}") {
+        let valid = !key.is_empty()
+            && key.len() <= 64
+            && key.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        let result = inwx_client::NewsQuery::new().with_field(&key, 1);
+        prop_assert_eq!(result.is_ok(), valid);
+
+        // A reserved key is refused whether or not it is a valid identifier.
+        let reserved = inwx_client::NewsQuery::new().with_field("customer", 1);
+        prop_assert!(reserved.is_err());
+    }
+
+    /// A reseller update that changes nothing is refused, and one field is enough.
+    #[test]
+    fn reseller_updates_need_one_change(value in "\\PC{1,40}") {
+        let trimmed_ok = !value.trim().is_empty() && value.chars().count() <= 255;
+        let update = inwx_client::ApplicationUpdate::new(1).unwrap().with_comment(&value);
+        prop_assert_eq!(update.is_ok(), trimmed_ok);
+        prop_assert!(inwx_client::ApplicationUpdate::new(1).unwrap().params().is_err());
+        if let Ok(update) = update {
+            let params = update.params().unwrap();
+            prop_assert_eq!(&params["applicationId"], &serde_json::json!(1));
+        }
+    }
+}
