@@ -9,14 +9,18 @@ mod common;
 
 use common::{client, MockTransport};
 use inwx_client::{
-    parse_ip, AccountBalance, AddDnsKeyRequest, AuthCode, Certificate, CertificateLogEntry,
-    CertificateOrder, CertificateProduct, CertificateProductQuery, CertificateQuery,
-    CertificateUpdate, CertificateValidationMethod, DnsKey, DnssecAlgorithm, DnssecDigestType,
-    DnssecDomainStatus, DnssecFlag, DnssecKeyQuery, DnssecKeyStatus, Document, DocumentFormat,
-    DomainName, DsRecord, DynDnsAccount, DynDnsAccountRef, DynDnsRecord, Email, Handle,
-    HostingOrder, HostingPeriod, Hostname, Irreversible, NameserverSet, NameserverSetType,
-    NameserverSetUpdate, PostalDelivery, RecordSet, RecordSpec, RefundRequest, StatementQuery,
-    TagUpdate, Timestamp, TransferAnswer, UrlRedirectType, ZoneCreate, ZoneType, ZoneUpdate,
+    parse_ip, AccountBalance, AddDnsKeyRequest, ApplicationCheck, ApplicationCreate,
+    ApplicationQuery, ApplicationType, ApplicationUpdate, AuthCode, AuthInfo2, Certificate,
+    CertificateLogEntry, CertificateOrder, CertificateProduct, CertificateProductQuery,
+    CertificateQuery, CertificateUpdate, CertificateValidationMethod, ContactVerificationSettings,
+    ContactVerificationSettingsUpdate, CustomerUpdate, DataExport, DnsKey, DnssecAlgorithm,
+    DnssecDigestType, DnssecDomainStatus, DnssecFlag, DnssecKeyQuery, DnssecKeyStatus, Document,
+    DocumentFormat, DocumentQuery, DocumentUpload, DomainName, DownloadedDocument, DsRecord,
+    DynDnsAccount, DynDnsAccountRef, DynDnsRecord, Email, Handle, HostCheck, HostCreate,
+    HostUpdate, HostingOrder, HostingPeriod, Hostname, Irreversible, NameserverSet,
+    NameserverSetType, NameserverSetUpdate, NewsItem, NicHandle, NicHandleQuery, PdfFile,
+    PdfRender, PostalDelivery, RecordSet, RecordSpec, RefundRequest, StatementQuery, TagUpdate,
+    Timestamp, TransferAnswer, UrlRedirectType, ZoneCreate, ZoneType, ZoneUpdate,
 };
 use serde_json::json;
 
@@ -753,4 +757,276 @@ fn listing_helpers_report_empty_and_full_pages() {
             .unwrap();
     assert_eq!(full.len(), 2);
     assert!(full.has_more());
+}
+
+// ------------------------------------------------------------ reseller #22 --
+
+#[test]
+fn reseller_value_types_run_their_trait_impls() {
+    // `ApplicationType`: `Display`, `Debug`, `FromStr`, `Serialize`, `Deserialize`.
+    let application_type: ApplicationType = "domain-transfer".parse().unwrap();
+    assert_eq!(application_type.to_string(), "DOMAIN-TRANSFER");
+    assert_eq!(
+        format!("{application_type:?}"),
+        "ApplicationType(\"DOMAIN-TRANSFER\")"
+    );
+    assert_eq!(
+        serde_json::to_string(&application_type).unwrap(),
+        "\"DOMAIN-TRANSFER\""
+    );
+    let carried: ApplicationType = serde_json::from_str("\"whatever else\"").unwrap();
+    assert_eq!(carried.as_str(), "WHATEVER ELSE");
+
+    // `AuthInfo2`: parsing, serde, and the non-ASCII branch.
+    let secret: AuthInfo2 = "aB3-xY9".parse().unwrap();
+    assert_eq!(serde_json::to_string(&secret).unwrap(), "\"aB3-xY9\"");
+    let round: AuthInfo2 = serde_json::from_str("\"aB3-xY9\"").unwrap();
+    assert_eq!(round, secret);
+    assert!(serde_json::from_str::<AuthInfo2>("\"\"").is_err());
+    let err = AuthInfo2::new("geheim\u{e4}").unwrap_err();
+    assert!(err.is_validation());
+
+    // The read helpers of the small answer types.
+    let news: NewsItem = serde_json::from_str(r#"{"id":1,"read":1}"#).unwrap();
+    assert_eq!(news.is_read(), Some(true));
+    let handle: NicHandle = serde_json::from_str(r#"{"nicId":1,"deleted":0}"#).unwrap();
+    assert_eq!(handle.is_deleted(), Some(false));
+    let settings: ContactVerificationSettings =
+        serde_json::from_str(r#"{"verified":"1"}"#).unwrap();
+    assert_eq!(settings.is_verified(), Some(true));
+    let export: DataExport = serde_json::from_str(r#"{"status":"PENDING"}"#).unwrap();
+    assert!(export.is_pending());
+
+    // A downloaded document is a PDF by name, by magic bytes, or not at all.
+    let by_name: DownloadedDocument =
+        serde_json::from_str(r#"{"filename":"X.PDF","content":"aGk="}"#).unwrap();
+    assert!(by_name.is_pdf());
+    let by_magic: DownloadedDocument =
+        serde_json::from_str(r#"{"filename":"x.bin","content":"JVBERi0xLjc="}"#).unwrap();
+    assert!(by_magic.is_pdf());
+    let text: DownloadedDocument =
+        serde_json::from_str(r#"{"filename":"x.txt","content":"aGk="}"#).unwrap();
+    assert!(!text.is_pdf());
+    assert!(DownloadedDocument::default().bytes().is_err());
+    assert!(PdfFile::default().bytes().is_err());
+}
+
+#[test]
+fn reseller_builders_send_every_field_they_carry() {
+    let domain = DomainName::parse("example.com").unwrap();
+    let renew = ApplicationType::parse("renew").unwrap();
+
+    // `application.check`: every selector at once.
+    let check = ApplicationCheck::new()
+        .with_id(7)
+        .unwrap()
+        .with_type(renew.clone())
+        .with_name("example.com")
+        .unwrap()
+        .with_domain(domain.clone())
+        .with_country_code("de")
+        .unwrap();
+    let params = check.params().unwrap();
+    assert_eq!(params["applicationId"], 7);
+    assert_eq!(params["type"], "RENEW");
+    assert_eq!(params["cc"], "DE");
+
+    // `application.create`: domain, comment and dry run.
+    let create = ApplicationCreate::new(renew.clone(), "example.com")
+        .unwrap()
+        .with_domain(domain.clone())
+        .with_customer_number(123_456)
+        .unwrap()
+        .with_comment("urgent")
+        .unwrap()
+        .with_testing(true);
+    let params = create.params();
+    assert_eq!(params["domainName"], "example.com");
+    assert_eq!(params["comment"], "urgent");
+    assert_eq!(params["testing"], true);
+
+    // `application.list`: every filter.
+    let query = ApplicationQuery::new()
+        .with_id(3)
+        .unwrap()
+        .with_type(renew.clone())
+        .with_customer_number(9)
+        .unwrap()
+        .with_status("pending")
+        .unwrap()
+        .with_page(2, 10)
+        .unwrap();
+    let params = query.params().unwrap();
+    assert_eq!(params["applicationId"], 3);
+    assert_eq!(params["type"], "RENEW");
+    assert_eq!(params["status"], "PENDING");
+    assert_eq!(params["page"], 2);
+
+    // `application.update`: every changed field.
+    let update = ApplicationUpdate::new(11)
+        .unwrap()
+        .with_name("example.net")
+        .unwrap()
+        .with_domain(domain.clone())
+        .with_customer_number(123_456)
+        .unwrap()
+        .with_comment("note")
+        .unwrap()
+        .with_testing(true);
+    let params = update.params().unwrap();
+    assert_eq!(params["name"], "example.net");
+    assert_eq!(params["domainName"], "example.com");
+    assert_eq!(params["customerNumber"], 123_456);
+    assert_eq!(params["testing"], true);
+
+    // `customer.update`: the address fields no other test touched.
+    let customer = CustomerUpdate::new(123_456)
+        .unwrap()
+        .with_company("ACME GmbH")
+        .unwrap()
+        .with_street("Hauptstr. 1")
+        .unwrap()
+        .with_city("Leipzig")
+        .unwrap()
+        .with_zip("04109")
+        .unwrap()
+        .with_country_code("de")
+        .unwrap()
+        .with_phone("+49341000000")
+        .unwrap()
+        .with_fax("+49341000001")
+        .unwrap()
+        .with_vat("DE1234567890")
+        .unwrap()
+        .with_comment("moved")
+        .unwrap()
+        .with_testing(true);
+    let params = customer.params().unwrap();
+    assert_eq!(params["company"], "ACME GmbH");
+    assert_eq!(params["street"], "Hauptstr. 1");
+    assert_eq!(params["phone"], "+49341000000");
+    assert_eq!(params["fax"], "+49341000001");
+    assert_eq!(params["vat"], "DE1234567890");
+    assert_eq!(params["testing"], true);
+
+    // `customer.contactverificationsettingsupdate`.
+    let settings = ContactVerificationSettingsUpdate::new(123_456)
+        .unwrap()
+        .with_verification_type("email")
+        .unwrap()
+        .with_verified(true)
+        .with_testing(true);
+    let params = settings.params().unwrap();
+    assert_eq!(params["type"], "EMAIL");
+    assert_eq!(params["verified"], true);
+    assert_eq!(params["testing"], true);
+}
+
+#[test]
+fn reseller_documents_and_pdfs_fill_their_parameters() {
+    let domain = DomainName::parse("example.com").unwrap();
+
+    let upload = DocumentUpload::new("mandate.pdf", b"%PDF-1.7")
+        .unwrap()
+        .with_document_type("mandate")
+        .unwrap()
+        .with_customer_number(123_456)
+        .unwrap()
+        .with_domain(domain.clone())
+        .with_comment("signed")
+        .unwrap()
+        .with_testing(true);
+    let params = upload.params();
+    assert_eq!(params["domainName"], "example.com");
+    assert_eq!(params["comment"], "signed");
+    assert_eq!(params["testing"], true);
+
+    let query = DocumentQuery::new()
+        .with_document_type("mandate")
+        .unwrap()
+        .with_customer_number(123_456)
+        .unwrap()
+        .with_domain(domain.clone())
+        .with_filename("mandate.pdf")
+        .unwrap()
+        .with_page(1, 5)
+        .unwrap();
+    let params = query.params().unwrap();
+    assert_eq!(params["type"], "MANDATE");
+    assert_eq!(params["customerNumber"], 123_456);
+    assert_eq!(params["domainName"], "example.com");
+    assert_eq!(params["filename"], "mandate.pdf");
+    assert_eq!(params["pagelimit"], 5);
+
+    let render = PdfRender::new("invoice", 4711)
+        .unwrap()
+        .with_customer_number(123_456)
+        .unwrap()
+        .with_format(DocumentFormat::Raw)
+        .unwrap()
+        .with_from(Timestamp::parse("2026-01-01T00:00:00").unwrap())
+        .with_to(Timestamp::parse("2026-02-01T00:00:00").unwrap())
+        .with_testing(true);
+    let params = render.params().unwrap();
+    assert_eq!(params["customerNumber"], 123_456);
+    assert_eq!(params["format"], "RAW");
+    assert_eq!(params["testing"], true);
+
+    let handles = NicHandleQuery::new()
+        .with_handle("H-1")
+        .unwrap()
+        .with_name("Max Mustermann")
+        .unwrap()
+        .with_email("max@example.com")
+        .unwrap()
+        .with_customer_number(123_456)
+        .unwrap()
+        .with_type("person")
+        .unwrap()
+        .with_page(1, 3)
+        .unwrap();
+    let params = handles.params().unwrap();
+    assert_eq!(params["name"], "Max Mustermann");
+    assert_eq!(params["email"], "max@example.com");
+    assert_eq!(params["customerNumber"], 123_456);
+    assert_eq!(params["type"], "PERSON");
+}
+
+#[test]
+fn reseller_hosts_cover_the_testing_and_rename_fields() {
+    let domain = DomainName::parse("example.com").unwrap();
+    let address = parse_ip("198.51.100.1").unwrap();
+
+    let create = HostCreate::new(domain.clone(), Hostname::parse("ns1").unwrap(), &[address])
+        .unwrap()
+        .with_testing(true);
+    assert_eq!(create.params().unwrap()["testing"], true);
+
+    let update = HostUpdate::new(3001)
+        .unwrap()
+        .with_name(Hostname::parse("ns2").unwrap())
+        .unwrap()
+        .with_addresses(&[address])
+        .unwrap()
+        .with_testing(true);
+    let params = update.params().unwrap();
+    assert_eq!(params["name"], "ns2");
+    assert_eq!(params["testing"], true);
+
+    // A single label below a long domain must still fit in 253 characters:
+    // 57 + 1 + 195 is the last name that does.
+    let long_domain = format!(
+        "{}.{}.{}.com",
+        "a".repeat(63),
+        "b".repeat(63),
+        "c".repeat(63)
+    );
+    let long_domain = DomainName::parse(&long_domain).unwrap();
+    assert_eq!(long_domain.as_str().len(), 195);
+    assert!(HostCheck::new(
+        long_domain.clone(),
+        Hostname::parse(&"n".repeat(57)).unwrap()
+    )
+    .is_ok());
+    assert!(HostCheck::new(long_domain, Hostname::parse(&"n".repeat(58)).unwrap()).is_err());
 }

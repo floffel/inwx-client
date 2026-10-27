@@ -343,3 +343,172 @@ proptest! {
         prop_assert_eq!(params["pagelimit"].as_u64().unwrap(), u64::from(limit));
     }
 }
+
+// --------------------------------------------------- reseller objects (#22)
+
+use inwx_client::{
+    Application, ApplicationCheckResult, ApplicationQuery, ApplicationType, AuthInfo2PriceQuote,
+    AuthInfo2Record, ContactVerificationSettings, Customer, CustomerDownload,
+    CustomerDownloadQuery, CustomerUpdate, DataExport, DocumentEntry, DocumentQuery,
+    DocumentUpload, DownloadedDocument, HostCheckResult, HostCreate, HostQuery, HostRecord,
+    HostUpdate, Message, MessageAck, NicHandle, NicHandleQuery, PdfFile, PdfHandle, PdfRender,
+    PolledMessage, MAX_HOST_ADDRESSES,
+};
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// An application type is a validated token: upper-cased, reparseable, and
+    /// an unknown one is carried rather than refused. The strategy stops one
+    /// character short so the property can add the last accepted character and
+    /// the first rejected one.
+    #[test]
+    fn application_type_tokens_stop_at_sixty_four_characters(token in "[A-Za-z0-9_.-]{1,63}") {
+        let inside = format!("{token}x");
+        let outside = format!("{token}xx");
+        let parsed = ApplicationType::parse(&inside).unwrap();
+        prop_assert_eq!(parsed.as_str(), inside.to_ascii_uppercase());
+        prop_assert_eq!(ApplicationType::parse(parsed.as_str()).unwrap(), parsed.clone());
+        prop_assert_eq!(parsed.to_string(), parsed.as_str());
+        prop_assert_eq!(
+            ApplicationType::parse(&outside).is_ok(),
+            outside.chars().count() <= 64
+        );
+    }
+
+    /// A document file name is a name: never empty, never a dot pair.
+    #[test]
+    fn document_file_names_are_names_never_paths(name in "[A-Za-z0-9 ._-]{0,10}") {
+        let trimmed = name.trim();
+        let expected = !trimmed.is_empty() && trimmed != "." && trimmed != "..";
+        prop_assert_eq!(DocumentUpload::new(&name, b"x").is_ok(), expected);
+    }
+
+    /// Whatever body is uploaded arrives base64-encoded and decodes back
+    /// unchanged; the empty body is the documented rejection.
+    #[test]
+    fn document_bodies_round_trip_through_base64(body in any_text()) {
+        let upload = DocumentUpload::new("note.txt", body.as_bytes());
+        if body.is_empty() {
+            prop_assert!(upload.unwrap_err().is_validation());
+            return Ok(());
+        }
+        let encoded = upload.unwrap().params()["content"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let downloaded = DownloadedDocument {
+            content: Some(encoded),
+            ..DownloadedDocument::default()
+        };
+        prop_assert_eq!(downloaded.bytes().unwrap(), body.as_bytes());
+    }
+
+    /// A host carries at least one and at most `MAX_HOST_ADDRESSES` addresses;
+    /// both outside values are refused before the wire.
+    #[test]
+    fn host_address_counts_are_bounded(count in 0usize..=16) {
+        let addresses: Vec<std::net::IpAddr> = (0..count)
+            .map(|index| format!("198.51.100.{index}").parse().unwrap())
+            .collect();
+        let created = HostCreate::new(
+            DomainName::parse("example.com").unwrap(),
+            Hostname::parse("ns1").unwrap(),
+            &addresses,
+        )
+        .is_ok();
+        prop_assert_eq!(created, (1..=MAX_HOST_ADDRESSES).contains(&count));
+    }
+
+    /// Every reseller id parameter accepts exactly the positive numbers.
+    #[test]
+    fn reseller_ids_must_be_positive(id in i64::MIN..2i64) {
+        prop_assert_eq!(MessageAck::new(id).is_ok(), id > 0);
+        prop_assert_eq!(HostUpdate::new(id).is_ok(), id > 0);
+        prop_assert_eq!(CustomerUpdate::new(id).is_ok(), id > 0);
+        prop_assert_eq!(CustomerDownloadQuery::new(id).is_ok(), id > 0);
+        prop_assert_eq!(PdfRender::new("invoice", id).is_ok(), id > 0);
+        prop_assert_eq!(
+            ApplicationQuery::new().with_id(id).is_ok(),
+            id > 0
+        );
+        prop_assert_eq!(
+            NicHandleQuery::new().with_customer_number(id).is_ok(),
+            id > 0
+        );
+    }
+
+    /// The reseller list queries keep the paging contract: the page is
+    /// one-based, the limit is sent as given, and a limit of zero is refused.
+    #[test]
+    fn reseller_queries_keep_paging(page in 0u32..10, limit in 1u32..100) {
+        let host = HostQuery::new().with_page(page, limit).unwrap().params().unwrap();
+        prop_assert_eq!(host["page"].as_u64().unwrap(), u64::from(page.max(1)));
+        prop_assert_eq!(host["pagelimit"].as_u64().unwrap(), u64::from(limit));
+
+        let handles = NicHandleQuery::new().with_page(page, limit).unwrap().params().unwrap();
+        prop_assert_eq!(handles["page"].as_u64().unwrap(), u64::from(page.max(1)));
+
+        let documents = DocumentQuery::new().with_page(page, limit).unwrap().params().unwrap();
+        prop_assert_eq!(documents["pagelimit"].as_u64().unwrap(), u64::from(limit));
+
+        let applications = ApplicationQuery::new().with_page(page, limit).unwrap().params().unwrap();
+        prop_assert_eq!(applications["page"].as_u64().unwrap(), u64::from(page.max(1)));
+
+        let downloads = CustomerDownloadQuery::new(1)
+            .unwrap()
+            .with_page(page, limit)
+            .unwrap()
+            .params()
+            .unwrap();
+        prop_assert_eq!(downloads["pagelimit"].as_u64().unwrap(), u64::from(limit));
+
+        prop_assert!(HostQuery::new().with_page(1, 0).is_err());
+        prop_assert!(DocumentQuery::new().with_page(1, 0).is_err());
+        prop_assert!(ApplicationQuery::new().with_page(1, 0).is_err());
+        prop_assert!(NicHandleQuery::new().with_page(1, 0).is_err());
+        prop_assert!(CustomerDownloadQuery::new(1).unwrap().with_page(1, 0).is_err());
+    }
+
+    /// Every reseller decoder either yields a value or reports an error — a
+    /// payload from the wire never panics and never unwraps.
+    #[test]
+    fn reseller_decoders_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..256)) {
+        if let Ok(payload) = serde_json::from_str::<Value>(&String::from_utf8_lossy(&bytes)) {
+            decode_every_reseller_row(&payload);
+        }
+    }
+}
+
+/// Runs every reseller decoder over one payload. The point is that none of them
+/// panics, so the results are dropped.
+fn decode_every_reseller_row(payload: &Value) {
+    let _ = serde_json::from_value::<Application>(payload.clone());
+    let _ = serde_json::from_value::<Vec<Application>>(payload.clone());
+    let _ = serde_json::from_value::<ApplicationCheckResult>(payload.clone())
+        .map(|check| check.is_available());
+    let _ = serde_json::from_value::<AuthInfo2PriceQuote>(payload.clone());
+    let _ = serde_json::from_value::<AuthInfo2Record>(payload.clone());
+    let _ = serde_json::from_value::<ContactVerificationSettings>(payload.clone())
+        .map(|settings| settings.is_verified());
+    let _ = serde_json::from_value::<Customer>(payload.clone());
+    let _ = serde_json::from_value::<Vec<Customer>>(payload.clone());
+    let _ = serde_json::from_value::<CustomerDownload>(payload.clone());
+    let _ = serde_json::from_value::<DataExport>(payload.clone()).map(|export| export.is_pending());
+    let _ = serde_json::from_value::<DocumentEntry>(payload.clone());
+    let _ = serde_json::from_value::<DownloadedDocument>(payload.clone()).map(|doc| {
+        let _ = doc.bytes();
+        doc.is_pdf()
+    });
+    let _ = serde_json::from_value::<HostCheckResult>(payload.clone())
+        .map(|check| check.is_available());
+    let _ = serde_json::from_value::<HostRecord>(payload.clone());
+    let _ = serde_json::from_value::<Message>(payload.clone()).map(|message| message.message_id());
+    let _ = serde_json::from_value::<PolledMessage>(payload.clone())
+        .map(|message| message.message_id());
+    let _ =
+        serde_json::from_value::<inwx_client::NewsItem>(payload.clone()).map(|item| item.is_read());
+    let _ = serde_json::from_value::<NicHandle>(payload.clone()).map(|handle| handle.is_deleted());
+    let _ = serde_json::from_value::<PdfHandle>(payload.clone());
+    let _ = serde_json::from_value::<PdfFile>(payload.clone()).map(|file| file.bytes());
+}

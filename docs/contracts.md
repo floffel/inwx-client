@@ -263,6 +263,174 @@ decodes them with the `base64` crate and refuses invalid input rather than writi
 a corrupt file. `accounting.refund` moves money and therefore requires the same
 `Irreversible` acknowledgement as the ownership commands.
 
+## Reseller/partner objects (issue #22)
+
+Chapter 2 also documents the objects of the reseller/partner product. They are
+modelled here with the same rules as the 0.2.0 surface: a typed request builder
+per command, validation before the wire, permissive decoding of the answer.
+
+**Provenance of the table numbers in this section.** They are *derived*, not
+read: the run that added these objects had no network access, so the pages
+`ch02s03/04/07/12/14/17/18/19/21` could not be fetched. Each number is computed
+from the contiguous `Table 2.NNN` numbering that the sections above already pin
+down — `certificate` starts at 2.50, `hosting` at 2.177, `nameserver` at 2.193,
+`tag` at 2.229 — and is marked *(derived)* below. A maintainer with the pages
+open should confirm them; the method names, parameter names and datatypes are
+the part that still has to be checked against the documentation, and every row
+of the Unverified table that belongs to this section says so.
+
+### `application.*` (`src/application.rs`)
+
+Source: <https://account.inwx.com/en/help/apidoc/f/ch02s03.html>
+
+| Method | Wrapper | Input table | Output table |
+| --- | --- | --- | --- |
+| `application.check` | `ApplicationCheck` → `check_application` | 2.36 (derived) | 2.37 (derived) |
+| `application.create` | `ApplicationCreate` → `create_application` | 2.38 (derived) | 2.39 (derived) |
+| `application.delete` | `delete_application` | 2.40 (derived) | — |
+| `application.info` | `application_info` | 2.41 (derived) | 2.42 (derived) |
+| `application.list` | `ApplicationQuery` → `list_applications` | 2.43 (derived) | 2.44 (derived) |
+| `application.update` | `ApplicationUpdate` → `update_application` | 2.45 (derived) | — |
+
+The section ends where `authinfo2` begins, which is where `certificate` starts
+at 2.50 — that is the anchor the derivation rests on.
+
+Local checks: ids positive, `name` a `token0255`, comment ≤ 4096 characters, a
+check needs at least one selector, an update needs at least one changed field,
+`pagelimit` ≥ 1. The application type is not a frozen vocabulary — the list is
+per-account — so it is a validated `[A-Z0-9_.-]` token (`ApplicationType`) that
+upper-cases on the way in and carries anything on the way out.
+
+### `authinfo2.*` (`src/authinfo2.rs`)
+
+Source: <https://account.inwx.com/en/help/apidoc/f/ch02s04.html>
+
+| Method | Wrapper | Input table | Output table |
+| --- | --- | --- | --- |
+| `authinfo2.create` | `create_auth_info2` | 2.46 (derived) | 2.47 (derived) |
+| `authinfo2.getprice` | `auth_info2_price` | 2.48 (derived) | 2.49 (derived) |
+
+The value is a secret: `AuthInfo2` prints `<redacted>` in `Debug` and `Display`
+like `AuthCode`, refuses an empty value, and an unusable value in an answer
+degrades to `None` instead of failing the record.
+
+### `customer.*` (`src/customer.rs`)
+
+Source: <https://account.inwx.com/en/help/apidoc/f/ch02s07.html>
+
+| Method | Wrapper | Input table | Output table |
+| --- | --- | --- | --- |
+| `customer.contactverificationsettingsinfo` | `contact_verification_settings` | 2.80 (derived) | 2.81 (derived) |
+| `customer.contactverificationsettingsupdate` | `ContactVerificationSettingsUpdate` → `update_contact_verification_settings` | 2.82 (derived) | — |
+| `customer.delete` | `delete_customer` | 2.83 (derived) | — |
+| `customer.info` | `customer_info` | 2.84 (derived) | 2.85 (derived) |
+| `customer.listdownloads` | `CustomerDownloadQuery` → `list_customer_downloads` | 2.86 (derived) | 2.87 (derived) |
+| `customer.requestdataexport` | `request_customer_data_export` | 2.88 (derived) | 2.89 (derived) |
+| `customer.update` | `CustomerUpdate` → `update_customer` | 2.90 (derived) | — |
+
+Seven methods, eleven tables, ending where `dnssec` demonstrably starts at
+2.91 — that anchor is what fixes the block at 2.80–2.90, and it implies
+`contact` (2.73–2.79) has seven tables. `contact`'s table count is the weakest
+link in that chain, so the whole block shifts by one if a contact method has an
+extra table.
+
+There is **no `customer.list`** in this section: the documented method list is
+the seven above, so the crate does not offer one, and an undocumented
+`customer.*` stays on `InwxClient::call` until a page says otherwise.
+
+Local checks: customer number positive, e-mail through `Email::parse`, country a
+two-letter ISO code, address fields `token0255`, comment ≤ 4096 characters, an
+update needs at least one changed field, verification settings need at least one
+changed setting.
+
+### `host.*` (`src/host.rs`)
+
+Source: <https://account.inwx.com/en/help/apidoc/f/ch02s12.html>
+
+| Method | Wrapper | Input table | Output table |
+| --- | --- | --- | --- |
+| `host.check` | `HostCheck` → `check_host` | 2.167 (derived) | 2.168 (derived) |
+| `host.create` | `HostCreate` → `create_host` | 2.169 (derived) | 2.170 (derived) |
+| `host.delete` | `delete_host` | 2.171 (derived) | — |
+| `host.info` | `host_info` | 2.172 (derived) | 2.173 (derived) |
+| `host.list` | `HostQuery` → `list_hosts` | 2.174 (derived) | 2.175 (derived) |
+| `host.update` | `HostUpdate` → `update_host` | 2.176 (derived) | — |
+
+Anchored: `hosting` starts at 2.177, and the ten tables of this section are what
+lies between `dyndnssubscription` (ends 2.166) and it.
+
+Datatypes: `name` is a host name (a single label is the usual spelling), the
+address list is `ip`. Two rules the registry enforces are checked locally: a
+fully qualified name must end in its own domain (anything else is a lame
+delegation), and a host carries 1 to `MAX_HOST_ADDRESSES` = 13 addresses, the
+number of address slots the host protocol reserves, without duplicates.
+
+### `message.*` (`src/message.rs`)
+
+Source: <https://account.inwx.com/en/help/apidoc/f/ch02s14.html>
+
+| Method | Wrapper | Input table | Output table |
+| --- | --- | --- | --- |
+| `message.poll` | `poll_message` → `PolledMessage` | 2.189 (derived) | 2.190 (derived) |
+| `message.ack` | `MessageAck` → `ack_message` | 2.191 (derived) | 2.192 (derived) |
+
+Anchored between `hosting` (ends 2.188) and `nameserver` (starts 2.193).
+
+`poll_message` accepts all three shapes the answer can take: the message flat in
+`resData`, the message nested under `message`, and an empty mailbox as an empty
+object (`PolledMessage::message == None`). An empty mailbox is not an error;
+`message_id()` on it is.
+
+### `news.list` (`src/news.rs`)
+
+Source: <https://account.inwx.com/en/help/apidoc/f/ch02s17.html>
+
+| Method | Wrapper | Input table | Output table |
+| --- | --- | --- | --- |
+| `news.list` | `list_news` | 2.221 (derived) | 2.222 (derived) |
+
+### `nichandle.list` (`src/nichandle.rs`)
+
+Source: <https://account.inwx.com/en/help/apidoc/f/ch02s18.html>
+
+| Method | Wrapper | Input table | Output table |
+| --- | --- | --- | --- |
+| `nichandle.list` | `NicHandleQuery` → `list_nichandles` | 2.223 (derived) | 2.224 (derived) |
+
+### `pdf.*` (`src/pdf.rs`)
+
+Source: <https://account.inwx.com/en/help/apidoc/f/ch02s19.html>
+
+| Method | Wrapper | Input table | Output table |
+| --- | --- | --- | --- |
+| `pdf.document` | `PdfRender` → `render_pdf` | 2.225 (derived) | 2.226 (derived) |
+| `pdf.get` | `fetch_pdf` → `PdfFile` | 2.227 (derived) | 2.228 (derived) |
+
+Anchored: `tag` starts at 2.229. `format` reuses `DocumentFormat` and refuses
+`CSV`, which belongs to the zone exports; `dateFrom`/`dateTo` are `timestamp`
+(ch03) and are rejected when inverted; the base64 body of `pdf.get` is size
+checked before it is decoded.
+
+### `document.*` (`src/document.rs`)
+
+Source: <https://account.inwx.com/en/help/apidoc/f/ch02s21.html>
+
+| Method | Wrapper | Input table | Output table |
+| --- | --- | --- | --- |
+| `document.delete` | `delete_document` | 2.238 (derived) | — |
+| `document.download` | `download_document` → `DownloadedDocument` | 2.239 (derived) | 2.240 (derived) |
+| `document.list` | `DocumentQuery` → `list_documents` | 2.241 (derived) | 2.242 (derived) |
+| `document.upload` | `DocumentUpload` → `upload_document` | 2.243 (derived) | 2.244 (derived) |
+
+The last section of chapter 2, after `tag` (ends 2.237).
+
+Uploads are the risky direction, so they are checked hardest: the file name is
+never a path (no separator, no `.`/`..`, no control characters, ≤ 255
+characters), the body is neither empty nor larger than `MAX_DOCUMENT_BYTES`
+(16 MiB) — checked on the caller's bytes, before base64 makes them a third
+bigger again — and the body is absent from `Debug`, because these documents are
+mandates and ID copies.
+
 ## Unverified
 
 Points the documentation does not settle. Each is modelled as documented and
@@ -278,14 +446,19 @@ flagged here; none is a guess about an endpoint's existence.
 | `nameserver.exportlist` "export as file" | **unverified** | Table 2.203/2.204 promises a document but documents a `count`+`domains` payload; the crate parses the documented payload. |
 | `tag.list` `count` nesting | **unverified** | Table 2.235 shows `count` → `domain` with an ambiguous indentation; parsed as `{"count": {"domain": N}}` with a scalar `count` also tolerated. |
 | Live-endpoint behaviour for every 0.2.0 method | **unverified** | No credentials in CI; every test is offline against fixtures. Method names, parameters and datatypes are from the tables above. |
+| Table numbers of the reseller sections | **derived, not read** | The run that added them had no network access; the numbers follow from the anchors `certificate` 2.50, `hosting` 2.177, `nameserver` 2.193 and `tag` 2.229. Confirm against the pages before quoting them. |
+| Parameter names of the reseller objects | **unverified** | `applicationId`, `customerNumber`, `hostId`, `documentId`, `messageId`, `pdfId`, `domainName`, `cc`, `ip` and the `type`/`status`/`state` fields are the spellings the rest of the API uses, applied to the objects of chapter 2 §2.3–§2.21. Every response field is `Option`, ignores unknown keys and accepts snake_case as well as camelCase, so a spelling that turns out to be different costs a `None`, not a failed parse — but the *request* keys must be checked against the live pages. |
+| `application.*` object shape | **unverified** | Chapter 2 §2.3 is the only description; which `type` values exist is account-specific, so the crate models the type as a validated token instead of an enum and never invents a vocabulary. |
+| `message.ack` state parameter | **unverified** | Whether `message.ack` takes a completion state at all is not settled by the documentation. `MessageAck::with_state` is optional and off by default, so the default request carries only the message id. |
+| `customer.requestdataexport` answer | **unverified** | Modelled as `{downloadId, status, filename}` because `customer.listdownloads` lists downloads; the crate carries any of them as `None`. |
+| `host.create` address parameter | **unverified** | The address list is sent as `ip`, an array of address strings, matching `masterIp`/`ipAddress` elsewhere in the API; a single string is accepted on the way back. The 13-address limit is the registry host protocol, not the INWX page. |
 | `extData` per-TLD keys | **documented, not enumerated** | ch03 §3.49 lists the generic keys and then a long TLD-specific list; `ExtData::set` carries any upper-case token. |
 
 ## Deliberately not modelled
 
 - **API-key authentication** — marketed by INWX but absent from the public API
   documentation; the crate implements password login only (see README).
-- **`application.*`, `authinfo2.*`, `customer.*`, `document.*`, `host.*`,
-  `message.*`, `news.list`, `nichandle.list`, `pdf.*`** — separate API objects for
-  the reseller/partner product, not part of the registrar surface this crate
-  claims. They are reachable through `InwxClient::call`, and the gap is tracked
-  as an issue rather than presented as a boundary.
+- Nothing else. The reseller/partner objects that used to be listed here
+  (`application.*`, `authinfo2.*`, `customer.*`, `document.*`, `host.*`,
+  `message.*`, `news.list`, `nichandle.list`, `pdf.*`) are modelled since
+  issue #22; see the sections above for what is still unverified about them.

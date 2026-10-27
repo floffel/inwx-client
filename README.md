@@ -2,7 +2,9 @@
 
 Typed Rust client for the [INWX](https://www.inwx.com) DomRobot JSON-RPC API —
 zones and DNS records, domain transfers and ownership changes, certificates,
-hosting, DNSSEC, tags, nameserver sets, DynDNS, accounting, contacts and prices.
+hosting, DNSSEC, tags, nameserver sets, DynDNS, accounting, contacts, prices and
+the reseller/partner objects (applications, customers, documents, hosts,
+messages, PDFs).
 
 INWX is a German registrar and DNS provider. One endpoint
 (`https://api.domrobot.com/jsonrpc/`, sandbox: `https://api.ote.domrobot.com/jsonrpc/`)
@@ -80,6 +82,11 @@ Every method below is implemented against the published INWX API documentation
 | Accounting | `accounting.accountBalance`, `creditLogById`, `getInvoice`, `getPreviewInvoice`, `getReceipt`, `getstatement`, `listInvoices`, `lockedFunds`, `log`, `refund`, `sendbypost` | PDFs decoded from base64 (`Document::pdf_bytes`); `refund` needs the acknowledgement |
 | Contacts | `contact.create`, `contact.info`, `contact.list`, `contact.update`, `contact.delete` | documented field lengths and country codes enforced |
 | Prices | `domain.getPrices`, `domain.getdomainprice` | `f64` quotes, not amounts to sum |
+| Reseller: applications | `application.check`, `create`, `delete`, `info`, `list`, `update` | types are validated tokens, not a frozen enum; a check needs a selector, an update needs a change |
+| Reseller: customers | `customer.info`, `update`, `delete`, `contactverificationsettingsinfo`, `contactverificationsettingsupdate`, `listdownloads`, `requestdataexport` | e-mail, country code and address lengths checked; the data export is what copies personal data out |
+| Reseller: hosts | `host.check`, `create`, `delete`, `info`, `list`, `update` | a glue record must sit inside its own domain, 1–13 addresses, no duplicates |
+| Reseller: documents | `document.upload`, `list`, `download`, `delete` | file name is never a path, size checked before base64, the body stays out of `Debug` |
+| Reseller: messages, news, handles, PDFs | `message.poll`, `message.ack`, `news.list`, `nichandle.list`, `pdf.document`, `pdf.get` | an empty mailbox is `None`, not an error; the AuthInfo2 value (`authinfo2.create`, `authinfo2.getprice`) is redacted in `Debug` |
 | Anything else | `InwxClient::call(method, params)` | login, cookies, retries and error envelopes still apply |
 
 ### Design
@@ -126,8 +133,6 @@ and worked down in order - the list below is the backlog, not a boundary:
 
 - `domain.log`, `domain.stats`, `domain.getRules`, `domain.getTldGroups` - [#14](https://github.com/floffel/inwx-client/issues/14)
 - automatic pagination for the list endpoints - [#15](https://github.com/floffel/inwx-client/issues/15)
-- reseller/partner objects (`application.*`, `authinfo2.*`, `customer.*`, `document.*`, `host.*`,
-  `message.*`, `news.*`, `nichandle.*`, `pdf.*`) - [#22](https://github.com/floffel/inwx-client/issues/22)
 
 Two items are genuinely outside the crate, and here is why rather than a label:
 
@@ -157,6 +162,7 @@ documentation does not state:
 | `tag.list` `count.domain` nesting | **unverified** — the table's indentation is ambiguous; both shapes are tolerated. |
 | `dyndnssubscription.cancel` id semantics | **unverified** — Table 2.161 types `id` as "the customer's subscription id", while `create` uses the same name for the plan id; the crate takes two separate parameters so the two cannot be confused. |
 | Every 0.2.0 write against a live endpoint | **unverified** — no credentials in CI; method names, parameters and datatypes come from the tables in `docs/contracts.md`. |
+| The reseller/partner objects (`application.*`, `authinfo2.*`, `customer.*`, `document.*`, `host.*`, `message.*`, `news.list`, `nichandle.list`, `pdf.*`) | **unverified** — added without network access, so chapter 2 §2.3–§2.21 could not be re-read. Request keys follow the spellings the rest of the API uses; every response field is optional and tolerant, so a wrong key costs a `None`. The `Table 2.NNN` numbers in `docs/contracts.md` are derived from the anchors of the earlier sections, not read from the pages. |
 | Unicode → punycode | UTS-46 mapping via `idna`, so emoji become punycode and characters the mapping deletes disappear. The ACE form (`DomainName::as_str`) is what is sent, logged and compared. |
 
 Two methods the predecessor implementation called do **not** exist in the
@@ -186,7 +192,7 @@ documented API and were replaced: `domain.cancel` (use `domain.delete` or
 ## Testing
 
 ```bash
-cargo test                        # unit + integration + 657 doctests, no network
+cargo test                        # unit + integration + 846 doctests, no network
 cargo test --no-default-features  # the same, without reqwest/tokio
 cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --no-deps --all-features
@@ -204,8 +210,9 @@ cargo +nightly fuzz run parse_response
   truncated error bodies) and a 32-task concurrency test.
   Every 0.2.0 method has its own recording test asserting the method name and the
   exact parameters (`tests/zones.rs`, `tests/ownership.rs`, `tests/services.rs`,
-  `tests/certificates.rs`); `tests/limits.rs` is the boundary matrix (63/64-byte
-  label, 253/254-byte name, empty label, TTL bounds, IDN form, per-type record
+  `tests/certificates.rs`, `tests/reseller.rs`); `tests/limits.rs` is the boundary
+  matrix (63/64-byte label, 253/254-byte name, empty label, TTL bounds, IDN form,
+  per-type record
   values, CSR size, auth-code and email shapes) and `tests/coverage.rs` calls the
   `Display`/`FromStr`/serde impls and error branches that doctests exercise —
   `cargo llvm-cov` does not count doctests.
@@ -214,11 +221,18 @@ cargo +nightly fuzz run parse_response
   emails and timestamps round-trip; zone params survive a JSON round trip;
   `RecordSet` never accepts an apex CNAME; an `Irreversible` acknowledgement only
   builds the request whose action it names.
-* **Coverage** — 98.6 % lines / 99.6 % functions without the `http` feature. CI
+  The reseller objects add their own invariants: an application type is a token
+  that upper-cases and reparses up to exactly 64 characters, a document file name
+  is never a path or an empty string, an uploaded body survives base64, a host
+  takes 1 to 13 addresses, ids are positive and paging stays one-based.
+* **Coverage** — 98.5 % lines / 99.4 % functions without the `http` feature. CI
   gates at 95 %; the reqwest adapter is the only code that needs a socket.
 * **Fuzz** — `fuzz/fuzz_targets/parse_response.rs` feeds arbitrary bytes through
   the JSON-RPC parser and every typed decoder on `resData`; seeded with success,
   pending, error and hostile-shape bodies.
+  Since issue #22 that list includes the reseller decoders and the three
+  user-input parsers they rely on (`ApplicationType`, `AuthInfo2`,
+  `DocumentUpload`).
 
 ## License
 

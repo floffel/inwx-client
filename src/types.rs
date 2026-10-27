@@ -8,8 +8,10 @@
 use std::fmt;
 use std::str::FromStr;
 
+use base64::Engine as _;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
 
 use crate::{Error, Result};
 
@@ -1221,6 +1223,133 @@ pub fn parse_ip(text: &str) -> Result<std::net::IpAddr> {
     text.trim()
         .parse()
         .map_err(|_| Error::validation("ip", format!("{text:?} is not an IP address")))
+}
+
+/// A positive object id.
+///
+/// The reseller objects (`application`, `customer`, `document`, `host`,
+/// `message`, `pdf`) all take a numeric id; `0` and negatives only come back as
+/// `2303 Object does not exist` after the round trip, so they are refused here.
+pub(crate) fn validate_id(field: &'static str, id: i64) -> Result<i64> {
+    if id <= 0 {
+        return Err(Error::validation(
+            field,
+            format!("must be a positive id, got {id}"),
+        ));
+    }
+    Ok(id)
+}
+
+/// A page size: the API pages from one and rejects a limit of zero.
+pub(crate) fn validate_page_limit(limit: u32) -> Result<u32> {
+    if limit == 0 {
+        return Err(Error::validation("pagelimit", "must be at least 1"));
+    }
+    Ok(limit)
+}
+
+/// An upper-case code token such as a document type or a verification mode:
+/// `[A-Z0-9_.-]`, 1 to `max` characters. Input is trimmed and upper-cased, so a
+/// caller can write `"invoice"` and get `INVOICE` on the wire.
+pub(crate) fn validate_upper_token(field: &'static str, value: &str, max: usize) -> Result<String> {
+    let upper = value.trim().to_ascii_uppercase();
+    if upper.is_empty() {
+        return Err(Error::validation(field, "must not be empty"));
+    }
+    if upper.chars().count() > max {
+        return Err(Error::validation(
+            field,
+            format!(
+                "must be at most {max} characters, got {}",
+                upper.chars().count()
+            ),
+        ));
+    }
+    if !upper
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c))
+    {
+        return Err(Error::validation(
+            field,
+            format!("{value:?} may only contain letters, digits and _.-"),
+        ));
+    }
+    Ok(upper)
+}
+
+/// A file name for an upload: no path, no control characters, at most 255
+/// characters. A name with a slash in it would be a path, not a file name.
+pub(crate) fn validate_filename(field: &'static str, value: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        return Err(Error::validation(field, "must be a file name"));
+    }
+    if trimmed.chars().count() > 255 {
+        return Err(Error::validation(field, "must be at most 255 characters"));
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err(Error::validation(
+            field,
+            "must not contain a path separator",
+        ));
+    }
+    reject_control_chars(field, trimmed)?;
+    Ok(trimmed.to_owned())
+}
+
+/// A two-letter ISO-3166 country code, upper-cased.
+pub(crate) fn validate_country_code(field: &'static str, value: &str) -> Result<String> {
+    let trimmed = value.trim().to_ascii_uppercase();
+    if trimmed.len() != 2 || !trimmed.chars().all(|c| c.is_ascii_alphabetic()) {
+        return Err(Error::validation(
+            field,
+            format!("{value:?} is not a two-letter ISO country code"),
+        ));
+    }
+    Ok(trimmed)
+}
+
+/// Base64 with the standard alphabet and padding, which is what the API uses for
+/// document bodies.
+pub(crate) fn encode_base64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// Decodes a base64 document body, refusing anything that is not base64 instead
+/// of handing the caller a truncated file.
+pub(crate) fn decode_base64(field: &'static str, encoded: &str) -> Result<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim().as_bytes())
+        .map_err(|error| Error::validation(field, format!("is not valid base64: {error}")))
+}
+
+/// An integer read straight from a `Value`: a number, or a numeric string.
+pub(crate) fn opt_i64_value(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(number) => number.as_i64(),
+        Value::String(text) => text.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+/// The rows of a list answer under `key`: an array is used as it arrives, a
+/// single object becomes a one-row list (INWX drops the array when exactly one
+/// object matches), anything else yields no rows.
+pub(crate) fn list_rows(data: &Value, key: &str) -> Vec<Value> {
+    match data.get(key) {
+        Some(Value::Array(rows)) => rows.clone(),
+        Some(single @ Value::Object(_)) => vec![single.clone()],
+        _ => Vec::new(),
+    }
+}
+
+/// Parses every row of a list answer, skipping the ones that do not fit the
+/// model rather than failing the whole page.
+pub(crate) fn parse_rows<T: serde::de::DeserializeOwned>(data: &Value, key: &str) -> Vec<T> {
+    list_rows(data, key)
+        .into_iter()
+        .filter_map(|row| serde_json::from_value(row).ok())
+        .collect()
 }
 
 /// Permissive deserialisers.
