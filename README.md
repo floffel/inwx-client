@@ -103,9 +103,12 @@ Every method below is implemented against the published INWX API documentation
   it, and on `2200`/`2201`/`2202` (or HTTP 401/403) it logs in once more before
   giving up. Concurrent first calls may each open a session — harmless, and the
   alternative (holding a lock across an await) buys nothing here.
-* **Bounded retries.** Three attempts, exponential backoff from 500 ms to 8 s,
-  only for transport failures, HTTP 429/5xx and result code `2300` (object pending
-  transfer). A rejected command is never repeated.
+* **Bounded retries, never blind replays.** Three attempts, exponential backoff
+  from 500 ms to 8 s, for failures known to precede command execution, HTTP 429,
+  idempotent 5xx/transport failures and result code `2300` (object pending
+  transfer). A mutating command whose outcome is unknown after a timeout or 5xx
+  returns `Error::Ambiguous` rather than risking a duplicate registration, record
+  change or refund.
 
 ## Feature flags
 
@@ -180,13 +183,13 @@ documented API and were replaced: `domain.cancel` (use `domain.delete` or
 * `AuthCode` (the EPP transfer code) prints `<redacted>` in `Debug` and
   `Display`; `DynDnsAccount` redacts its password. A certificate CSR is refused
   if it contains a private key — the field takes a signing request only.
-* Retries are bounded and only apply to transient failures, so a rejected
-  registration cannot be submitted three times.
+* Retries are bounded and only replay commands known to be safe, so a rejected or
+  uncertain mutation is never submitted twice.
 
 ## Testing
 
 ```bash
-cargo test                        # unit + integration + 657 doctests, no network
+cargo test                        # unit + integration + 660 doctests, no network
 cargo test --no-default-features  # the same, without reqwest/tokio
 cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --no-deps --all-features

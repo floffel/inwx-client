@@ -469,6 +469,12 @@ fn error_helpers_cover_every_branch() {
     };
     assert!(!transport.is_retryable());
 
+    let ambiguous = Error::ambiguous("HTTP 504 after sending a command");
+    assert!(ambiguous.is_ambiguous());
+    assert!(!ambiguous.is_retryable());
+    assert!(ambiguous.to_string().contains("504"));
+    assert!(!Error::transport("refused").is_ambiguous());
+
     let missing = Error::MissingField {
         method: "domain.info",
         field: "resData.id",
