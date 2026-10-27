@@ -163,9 +163,10 @@ impl fmt::Debug for Credentials {
 /// How many times a retryable failure is retried, and how long to wait.
 ///
 /// Backoff is exponential from [`DEFAULT_BASE_DELAY`] and clamped to
-/// [`DEFAULT_MAX_DELAY`]. Only transport failures, HTTP 429/5xx and API code
-/// `2300` (object pending transfer) are retried; everything else is terminal —
-/// retrying a rejected command would just duplicate the rejection.
+/// [`DEFAULT_MAX_DELAY`]. Failures known to have happened before a command ran,
+/// HTTP 429, idempotent HTTP 5xx, idempotent uncertain transport failures and
+/// API code `2300` (object pending transfer) are retried. A mutating command is
+/// never replayed after a timeout or 5xx; that outcome is [`Error::Ambiguous`].
 ///
 /// ```
 /// use std::time::Duration;
@@ -658,8 +659,9 @@ impl<T: Transport> InwxClient<T> {
     /// # Errors
     ///
     /// [`Error::NotAuthenticated`] without credentials, [`Error::Api`] when the
-    /// API rejects the login, [`Error::Authentication`] when it accepts the
-    /// login but sends no cookie.
+    /// API rejects the login, [`Error::Ambiguous`] when a timeout or 5xx leaves
+    /// it unknown whether the login ran, [`Error::Authentication`] when it
+    /// accepts the login but sends no cookie.
     pub async fn login(&self) -> Result<()> {
         let credentials = self.credentials.as_ref().ok_or(Error::NotAuthenticated)?;
         let mut params = Map::new();
@@ -674,6 +676,12 @@ impl<T: Transport> InwxClient<T> {
         self.add_language(&mut params);
 
         let response = self.send("account.login", params).await?;
+        if is_server_error(response.status()) {
+            return Err(Error::ambiguous(format!(
+                "HTTP {} after sending `account.login`; the login may have succeeded",
+                response.status()
+            )));
+        }
         let envelope = RpcResponse::parse(response.body())?;
         envelope.into_result()?;
 
@@ -751,6 +759,11 @@ impl<T: Transport> InwxClient<T> {
     /// model (accounting, certificates, hosting, `DynDNS`, DNSSEC, tags). It still
     /// handles login, cookies, retries and error envelopes.
     ///
+    /// Recognised read-only methods are treated as idempotent and may be retried
+    /// after a 5xx or an uncertain transport failure. Unknown methods are
+    /// treated as mutating: a 5xx or uncertain transport failure then returns
+    /// [`Error::Ambiguous`] instead of risking a second execution.
+    ///
     /// ```
     /// # use inwx_client::{InwxClient, transport::{Request, Response, Transport}, Result};
     /// # use std::sync::{Arc, Mutex};
@@ -777,11 +790,12 @@ impl<T: Transport> InwxClient<T> {
     /// # Errors
     ///
     /// [`Error::NotAuthenticated`], [`Error::Api`], [`Error::Transport`],
-    /// [`Error::Json`] or [`Error::Http`].
+    /// [`Error::Ambiguous`], [`Error::Json`] or [`Error::Http`].
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
         if !is_public_method(method) {
             self.ensure_session().await?;
         }
+        let idempotent = is_idempotent_method(method);
         let mut relogged_in = false;
         let mut attempt = 1u32;
 
@@ -810,8 +824,10 @@ impl<T: Transport> InwxClient<T> {
                     return envelope.into_result();
                 }
                 Ok(response) => {
-                    // HTTP 401/403 means the session died; 429 and 5xx are
-                    // worth another try; anything else is terminal.
+                    // HTTP 401/403 means the session died; 429 is safe to retry
+                    // for every method. A 5xx on a mutating method is ambiguous
+                    // because the command may have run before the response was
+                    // lost.
                     let status = response.status();
                     if matches!(status, 401 | 403) && !relogged_in && self.credentials.is_some() {
                         relogged_in = true;
@@ -819,12 +835,17 @@ impl<T: Transport> InwxClient<T> {
                         self.login().await?;
                         continue;
                     }
-                    if is_retryable_status(status) {
+                    if is_retryable_status(status, idempotent) {
                         if let Some(delay) = self.policy.delay(attempt) {
                             sleep_for(delay).await;
                             attempt += 1;
                             continue;
                         }
+                    }
+                    if !idempotent && is_server_error(status) {
+                        return Err(Error::ambiguous(format!(
+                            "HTTP {status} after sending `{method}`; the command may have run"
+                        )));
                     }
                     return match RpcResponse::parse(response.body()) {
                         Ok(envelope) => envelope.into_result(),
@@ -837,7 +858,7 @@ impl<T: Transport> InwxClient<T> {
                         }),
                     };
                 }
-                Err(error) if error.is_retryable() => {
+                Err(error) if error.is_retryable() || (idempotent && error.is_ambiguous()) => {
                     if let Some(delay) = self.policy.delay(attempt) {
                         sleep_for(delay).await;
                         attempt += 1;
@@ -900,9 +921,77 @@ fn is_public_method(method: &str) -> bool {
     matches!(method, "account.login" | "account.logout" | "account.check")
 }
 
-/// HTTP statuses worth another attempt.
-fn is_retryable_status(status: u16) -> bool {
-    status == 429 || (500..600).contains(&status)
+/// Methods whose response can be fetched again without changing remote state.
+///
+/// Anything not listed here is deliberately treated as mutating: a retry after
+/// an uncertain outcome could duplicate a registration, record change, transfer,
+/// or refund.
+fn is_idempotent_method(method: &str) -> bool {
+    matches!(
+        method,
+        "account.check"
+            | "account.info"
+            | "accounting.accountBalance"
+            | "accounting.creditLogById"
+            | "accounting.getInvoice"
+            | "accounting.getPreviewInvoice"
+            | "accounting.getReceipt"
+            | "accounting.getstatement"
+            | "accounting.listInvoices"
+            | "accounting.lockedFunds"
+            | "accounting.log"
+            | "certificate.getProduct"
+            | "certificate.info"
+            | "certificate.list"
+            | "certificate.listProducts"
+            | "certificate.listRemainingNeededData"
+            | "certificate.log"
+            | "contact.info"
+            | "contact.list"
+            | "dnssec.info"
+            | "dnssec.listkeys"
+            | "domain.check"
+            | "domain.getPrices"
+            | "domain.getRules"
+            | "domain.getTldGroups"
+            | "domain.getdomainprice"
+            | "domain.info"
+            | "domain.list"
+            | "domain.log"
+            | "domain.stats"
+            | "domain.whois"
+            | "dyndns.check"
+            | "dyndns.info"
+            | "dyndns.list"
+            | "dyndns.log"
+            | "dyndnssubscription.list"
+            | "dyndnssubscription.listProducts"
+            | "hosting.controlPanel"
+            | "hosting.getPrices"
+            | "hosting.issuspended"
+            | "hosting.list"
+            | "nameserver.check"
+            | "nameserver.export"
+            | "nameserver.exportlist"
+            | "nameserver.exportrecords"
+            | "nameserver.info"
+            | "nameserver.list"
+            | "nameserverset.info"
+            | "nameserverset.list"
+            | "tag.info"
+            | "tag.list"
+    )
+}
+
+/// HTTP 5xx statuses mean the server may have processed the command before it
+/// failed.
+fn is_server_error(status: u16) -> bool {
+    (500..600).contains(&status)
+}
+
+/// HTTP statuses worth another attempt for a request of the given idempotency.
+fn is_retryable_status(status: u16, idempotent: bool) -> bool {
+    status == 429 || (idempotent && is_server_error(status))
 }
 
 /// Collects every `Set-Cookie` header into a single `Cookie` value.
@@ -966,6 +1055,7 @@ impl<T> fmt::Debug for InwxClient<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn credentials_debug_redacts_password() {
@@ -1015,11 +1105,136 @@ mod tests {
 
     #[test]
     fn retryable_status_classification() {
-        for status in [429, 500, 502, 503, 504] {
-            assert!(is_retryable_status(status), "{status}");
+        assert!(is_retryable_status(429, false));
+        for status in [500, 502, 503, 504, 599] {
+            assert!(is_retryable_status(status, true), "{status}");
+            assert!(!is_retryable_status(status, false), "{status}");
         }
-        for status in [200, 400, 401, 404, 422] {
-            assert!(!is_retryable_status(status), "{status}");
+        for status in [200, 400, 401, 404, 422, 428, 430, 499, 600] {
+            assert!(!is_retryable_status(status, true), "{status}");
+            assert!(!is_retryable_status(status, false), "{status}");
+        }
+    }
+
+    #[test]
+    fn read_only_methods_are_explicitly_idempotent() {
+        for method in [
+            "account.check",
+            "account.info",
+            "accounting.accountBalance",
+            "accounting.creditLogById",
+            "accounting.getInvoice",
+            "accounting.getPreviewInvoice",
+            "accounting.getReceipt",
+            "accounting.getstatement",
+            "accounting.listInvoices",
+            "accounting.lockedFunds",
+            "accounting.log",
+            "certificate.getProduct",
+            "certificate.info",
+            "certificate.list",
+            "certificate.listProducts",
+            "certificate.listRemainingNeededData",
+            "certificate.log",
+            "contact.info",
+            "contact.list",
+            "dnssec.info",
+            "dnssec.listkeys",
+            "domain.check",
+            "domain.getPrices",
+            "domain.getRules",
+            "domain.getTldGroups",
+            "domain.getdomainprice",
+            "domain.info",
+            "domain.list",
+            "domain.log",
+            "domain.stats",
+            "domain.whois",
+            "dyndns.check",
+            "dyndns.info",
+            "dyndns.list",
+            "dyndns.log",
+            "dyndnssubscription.list",
+            "dyndnssubscription.listProducts",
+            "hosting.controlPanel",
+            "hosting.getPrices",
+            "hosting.issuspended",
+            "hosting.list",
+            "nameserver.check",
+            "nameserver.export",
+            "nameserver.exportlist",
+            "nameserver.exportrecords",
+            "nameserver.info",
+            "nameserver.list",
+            "nameserverset.info",
+            "nameserverset.list",
+            "tag.info",
+            "tag.list",
+        ] {
+            assert!(is_idempotent_method(method), "{method}");
+        }
+    }
+
+    #[test]
+    fn mutating_methods_are_never_treated_as_idempotent() {
+        for method in [
+            "account.login",
+            "account.logout",
+            "accounting.refund",
+            "accounting.sendbypost",
+            "certificate.cancel",
+            "certificate.create",
+            "certificate.reissue",
+            "certificate.renew",
+            "certificate.setAutorenew",
+            "certificate.setresendapproval",
+            "certificate.updateOrder",
+            "contact.create",
+            "contact.delete",
+            "contact.update",
+            "dnssec.adddnskey",
+            "dnssec.deleteall",
+            "dnssec.deletednskey",
+            "dnssec.disablednssec",
+            "dnssec.enablednssec",
+            "domain.create",
+            "domain.delete",
+            "domain.push",
+            "domain.renew",
+            "domain.restore",
+            "domain.trade",
+            "domain.transfer",
+            "domain.transferOut",
+            "domain.transfercancel",
+            "domain.update",
+            "dyndns.changepassword",
+            "dyndns.create",
+            "dyndns.delete",
+            "dyndns.updateRecord",
+            "dyndnssubscription.cancel",
+            "dyndnssubscription.create",
+            "hosting.cancel",
+            "hosting.create",
+            "hosting.reinstate",
+            "hosting.unsuspend",
+            "hosting.updatePeriod",
+            "nameserver.clone",
+            "nameserver.create",
+            "nameserver.createRecord",
+            "nameserver.delete",
+            "nameserver.deleteRecord",
+            "nameserver.update",
+            "nameserver.updateRecord",
+            "nameserverset.create",
+            "nameserverset.delete",
+            "nameserverset.update",
+            "tag.create",
+            "tag.delete",
+            "tag.update",
+            "unmodelled.command",
+            "UNKNOWN",
+        ] {
+            assert!(!is_idempotent_method(method), "{method}");
         }
     }
 
@@ -1033,5 +1248,18 @@ mod tests {
     fn public_methods_need_no_session() {
         assert!(is_public_method("account.login"));
         assert!(!is_public_method("domain.list"));
+    }
+
+    proptest! {
+        #[test]
+        fn retry_status_classification_is_consistent(status in any::<u16>()) {
+            let server_error = is_server_error(status);
+            prop_assert_eq!(server_error, (500..600).contains(&status));
+            prop_assert_eq!(
+                is_retryable_status(status, true),
+                status == 429 || server_error
+            );
+            prop_assert_eq!(is_retryable_status(status, false), status == 429);
+        }
     }
 }

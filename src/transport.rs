@@ -260,7 +260,10 @@ impl Response {
 /// * send exactly the headers in [`Request::headers`] (including `Cookie`),
 /// * return the raw status, headers and body even for non-2xx (the client
 ///   decides what is retryable),
-/// * classify connection failures as [`Error::transport`],
+/// * classify failures that happened before the request was sent as
+///   [`Error::transport`],
+/// * classify timeouts and failures after sending as [`Error::ambiguous`],
+///   because the command may already have run,
 /// * never log the body of a `account.login` call: it carries the password.
 ///
 /// ```
@@ -286,7 +289,10 @@ pub trait Transport {
     ///
     /// # Errors
     ///
-    /// [`Error::Transport`] when no response could be obtained.
+    /// [`Error::Transport`] when the request definitely was not sent, or
+    /// [`Error::Ambiguous`] when it may have reached the API and the outcome was
+    /// lost. The client retries safe transport failures, but never replays a
+    /// mutating command after an ambiguous outcome.
     fn execute(&self, request: Request<'_>) -> impl std::future::Future<Output = Result<Response>>;
 }
 
@@ -341,7 +347,7 @@ impl Transport for ReqwestTransport {
             .body(request.body.to_vec())
             .send()
             .await
-            .map_err(|error| describe_reqwest_error(&error))?;
+            .map_err(|error| describe_reqwest_send_error(&error))?;
         let status = response.status().as_u16();
         let headers = response
             .headers()
@@ -356,28 +362,66 @@ impl Transport for ReqwestTransport {
         let body = response
             .bytes()
             .await
-            .map_err(|error| describe_reqwest_error(&error))?
+            .map_err(|error| describe_reqwest_body_error(&error))?
             .to_vec();
 
         Ok(Response::new(status, headers, body))
     }
 }
 
-/// Maps a `reqwest` failure to a retryable transport error without echoing
-/// headers (the cookie header must never reach a log line).
+/// Maps a failure while sending. A connection that was never established is
+/// safe to retry; a timeout or any later failure may follow a sent command and
+/// is therefore ambiguous. The rendering never includes request headers, so the
+/// cookie cannot reach a log line.
 #[cfg(feature = "http")]
-fn describe_reqwest_error(error: &reqwest::Error) -> Error {
-    let kind = if error.is_timeout() {
-        "timeout"
-    } else if error.is_connect() {
-        "connect"
-    } else if error.is_body() || error.is_decode() {
-        "body"
-    } else {
-        "request"
-    };
+fn describe_reqwest_send_error(error: &reqwest::Error) -> Error {
+    describe_send_failure(
+        error,
+        error.is_timeout(),
+        error.is_builder(),
+        error.is_connect(),
+    )
+}
+
+/// Classifies a send failure from the properties a transport can observe.
+#[cfg(feature = "http")]
+fn describe_send_failure(
+    error: &(impl std::fmt::Display + ?Sized),
+    is_timeout: bool,
+    is_builder: bool,
+    is_connect: bool,
+) -> Error {
+    if is_timeout {
+        // A connection timeout is also reported as a timeout. Since reqwest does
+        // not expose whether bytes left the host, fail closed rather than risk a
+        // duplicate command.
+        return Error::ambiguous(format!("timeout: {error}"));
+    }
+    if is_builder {
+        return Error::Transport {
+            message: format!("request setup: {error}"),
+            retryable: false,
+        };
+    }
+    if is_connect {
+        return Error::transport(format!("connect: {error}"));
+    }
     // `reqwest::Error` renders the URL but never request headers.
-    Error::transport(format!("{kind}: {error}"))
+    Error::ambiguous(format!("request: {error}"))
+}
+
+/// Once response bytes are being read, the server has necessarily received the
+/// command. Any failure here leaves its outcome unknown.
+#[cfg(feature = "http")]
+fn describe_reqwest_body_error(error: &reqwest::Error) -> Error {
+    describe_body_failure(error)
+}
+
+/// A failure after response bytes started arriving leaves the command outcome
+/// unknown regardless of the concrete transport error type.
+#[cfg(feature = "http")]
+fn describe_body_failure(error: &(impl std::fmt::Display + ?Sized)) -> Error {
+    Error::ambiguous(format!("response body: {error}"))
 }
 
 #[cfg(test)]
@@ -411,5 +455,49 @@ mod tests {
     fn whitespace_only_body_is_null() {
         let response = Response::new(200, std::iter::empty(), b"  \n\t".to_vec());
         assert!(response.json().unwrap().is_null());
+    }
+
+    #[cfg(feature = "http")]
+    #[tokio::test]
+    async fn request_setup_errors_are_terminal() {
+        let error = ReqwestTransport::new()
+            .execute(Request::post_json("not a url", b"{}"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::Transport {
+                retryable: false,
+                ..
+            }
+        ));
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn send_failure_classification_is_fail_closed() {
+        assert!(describe_send_failure("timeout", true, true, true).is_ambiguous());
+
+        let setup = describe_send_failure("bad header", false, true, true);
+        assert!(matches!(
+            setup,
+            Error::Transport {
+                retryable: false,
+                ..
+            }
+        ));
+
+        let connect = describe_send_failure("refused", false, false, true);
+        assert!(connect.is_retryable());
+        assert!(!connect.is_ambiguous());
+
+        assert!(describe_send_failure("reset", false, false, false).is_ambiguous());
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn a_failure_while_reading_the_body_is_ambiguous() {
+        assert!(describe_body_failure("connection reset").is_ambiguous());
     }
 }
