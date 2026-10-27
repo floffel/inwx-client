@@ -14,9 +14,45 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::{Error, Result};
 
 /// Longest legal DNS name in presentation form, without the trailing root dot.
+///
+/// The limit is applied to the ASCII (punycode) form, after UTS-46 conversion.
+///
+/// ```
+/// use inwx_client::{DomainName, MAX_DOMAIN_LEN};
+///
+/// let at_limit = format!(
+///     "{}.{}.{}.{}",
+///     "a".repeat(63),
+///     "b".repeat(63),
+///     "c".repeat(63),
+///     "d".repeat(61)
+/// );
+/// assert_eq!(at_limit.len(), MAX_DOMAIN_LEN);
+/// assert!(DomainName::parse(&at_limit).is_ok());
+///
+/// let over_limit = format!(
+///     "{}.{}.{}.{}",
+///     "a".repeat(63),
+///     "b".repeat(63),
+///     "c".repeat(63),
+///     "d".repeat(62)
+/// );
+/// assert_eq!(over_limit.len(), MAX_DOMAIN_LEN + 1);
+/// assert!(DomainName::parse(&over_limit).is_err());
+/// ```
 pub const MAX_DOMAIN_LEN: usize = 253;
 
 /// Longest legal single DNS label.
+///
+/// ```
+/// use inwx_client::{DomainName, MAX_LABEL_LEN};
+///
+/// let at_limit = format!("{}.com", "a".repeat(MAX_LABEL_LEN));
+/// assert!(DomainName::parse(&at_limit).is_ok());
+///
+/// let over_limit = format!("{}.com", "a".repeat(MAX_LABEL_LEN + 1));
+/// assert!(DomainName::parse(&over_limit).is_err());
+/// ```
 pub const MAX_LABEL_LEN: usize = 63;
 
 /// A domain name, validated and converted to its ASCII (punycode) form.
@@ -1362,11 +1398,53 @@ mod tests {
     }
 
     #[test]
-    fn domain_rejects_overlong_names() {
-        let long_label = "a".repeat(64);
-        assert!(DomainName::parse(&format!("{long_label}.com")).is_err());
-        let long_name = format!("{}.com", "a".repeat(250));
-        assert!(DomainName::parse(&long_name).is_err());
+    fn domain_enforces_label_and_total_length_limits() {
+        let max_label = "a".repeat(MAX_LABEL_LEN);
+        assert!(DomainName::parse(&format!("{max_label}.com")).is_ok());
+
+        let long_label = "a".repeat(MAX_LABEL_LEN + 1);
+        assert!(matches!(
+            DomainName::parse(&format!("{long_label}.com")),
+            Err(Error::Validation { field: "domain", ref message })
+                if message.contains("exceeds 63 characters")
+        ));
+
+        // 253 characters: 63 + 1 + 63 + 1 + 63 + 1 + 61. All labels are in
+        // range, so only the total-name check can reject the 254-byte value.
+        let last_label_len = MAX_DOMAIN_LEN - (3 * MAX_LABEL_LEN + 3);
+        let at_limit = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(MAX_LABEL_LEN),
+            "b".repeat(MAX_LABEL_LEN),
+            "c".repeat(MAX_LABEL_LEN),
+            "d".repeat(last_label_len)
+        );
+        assert_eq!(at_limit.len(), MAX_DOMAIN_LEN);
+        assert_eq!(
+            DomainName::parse(&at_limit)
+                .ok()
+                .as_ref()
+                .map(DomainName::as_str),
+            Some(at_limit.as_str())
+        );
+
+        let over_limit = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(MAX_LABEL_LEN),
+            "b".repeat(MAX_LABEL_LEN),
+            "c".repeat(MAX_LABEL_LEN),
+            "d".repeat(last_label_len + 1)
+        );
+        assert_eq!(over_limit.len(), MAX_DOMAIN_LEN + 1);
+        let expected = format!(
+            "must be at most {MAX_DOMAIN_LEN} characters, got {}",
+            over_limit.len()
+        );
+        assert!(matches!(
+            DomainName::parse(&over_limit),
+            Err(Error::Validation { field: "domain", ref message })
+                if message == &expected
+        ));
     }
 
     #[test]

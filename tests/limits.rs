@@ -3,9 +3,9 @@
 
 use inwx_client::{
     parse_ip, AuthCode, CertificateId, CertificateOrder, CertificateTerm, CertificateUpdate,
-    DnsKey, DnssecKeyQuery, DomainName, DsRecord, Email, Handle, HostingPeriod, Hostname,
+    DnsKey, DnssecKeyQuery, DomainName, DsRecord, Email, Error, Handle, HostingPeriod, Hostname,
     NameserverSetCreate, NameserverSetType, PostalDelivery, RefundRequest, StatementQuery,
-    TagUpdate, Timestamp, ZoneCreate, ZoneUpdate,
+    TagUpdate, Timestamp, ZoneCreate, ZoneUpdate, MAX_DOMAIN_LEN,
 };
 
 fn domain(name: &str) -> DomainName {
@@ -30,19 +30,52 @@ fn a_label_of_63_bytes_is_accepted_and_64_is_not() {
 #[test]
 fn a_name_of_253_bytes_is_accepted_and_254_is_not() {
     // 253 characters: 63 + 1 + 63 + 1 + 63 + 1 + 61 = 253.
-    let name = format!(
+    let at_limit = format!(
         "{}.{}.{}.{}",
         "a".repeat(63),
         "b".repeat(63),
         "c".repeat(63),
         "d".repeat(61)
     );
-    assert_eq!(name.len(), 253);
-    assert!(DomainName::parse(&name).is_ok());
+    assert_eq!(at_limit.len(), MAX_DOMAIN_LEN);
+    assert_eq!(
+        DomainName::parse(&at_limit)
+            .ok()
+            .as_ref()
+            .map(DomainName::as_str),
+        Some(at_limit.as_str())
+    );
+    assert_eq!(
+        Hostname::parse(&at_limit)
+            .ok()
+            .as_ref()
+            .map(Hostname::as_str),
+        Some(at_limit.as_str())
+    );
 
-    let too_long = format!("{name}e");
-    assert_eq!(too_long.len(), 254);
-    assert!(DomainName::parse(&too_long).is_err());
+    // Every label is still at most 63 bytes, so only the total limit rejects it.
+    let over_limit = format!(
+        "{}.{}.{}.{}",
+        "a".repeat(63),
+        "b".repeat(63),
+        "c".repeat(63),
+        "d".repeat(62)
+    );
+    assert_eq!(over_limit.len(), MAX_DOMAIN_LEN + 1);
+    let expected = format!(
+        "must be at most {MAX_DOMAIN_LEN} characters, got {}",
+        over_limit.len()
+    );
+    assert!(matches!(
+        DomainName::parse(&over_limit),
+        Err(Error::Validation { field: "domain", ref message })
+            if message == &expected
+    ));
+    assert!(matches!(
+        Hostname::parse(&over_limit),
+        Err(Error::Validation { field: "hostname", ref message })
+            if message == &expected
+    ));
 }
 
 #[test]
