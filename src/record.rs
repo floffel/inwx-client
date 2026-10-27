@@ -1262,7 +1262,8 @@ impl<T: Transport> InwxClient<T> {
     /// # Errors
     ///
     /// [`Error::Api`] for a rejected command, [`Error::Transport`] when the
-    /// request never completed, [`Error::Json`] for an unparseable answer.
+    /// request never completed, [`Error::Ambiguous`] when its outcome is
+    /// unknown, [`Error::Json`] for an unparseable answer.
     pub async fn list_records(&self, zone: &DomainName) -> Result<Vec<DnsRecord>> {
         let data = self
             .call("nameserver.info", json!({ "domain": zone.as_str() }))

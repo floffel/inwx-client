@@ -80,6 +80,8 @@
 //! * Credentials and session cookies are redacted in `Debug` — [`Credentials`]
 //!   prints `<redacted>` for the password, [`InwxClient`] prints only whether a
 //!   session exists.
+//! * Stored passwords cannot be cloned, are zeroed when dropped and are compared
+//!   in constant time.
 //! * The password is only ever sent in the `account.login` body, never in a URL
 //!   or a header; afterwards the opaque session cookie is the only credential on
 //!   the wire.
@@ -89,9 +91,11 @@
 //!   `Display`; the DynDNS account type redacts its password.
 //! * A certificate CSR is refused if it contains a private key: the field takes a
 //!   signing request, and anything else would upload a secret to a third party.
-//! * Retries are bounded (three attempts, exponential backoff) and only apply to
-//!   transport failures, 429/5xx and `2300` (pending transfer) — a rejected
-//!   command is never repeated.
+//! * Retries are bounded (three attempts, exponential backoff). Failures known
+//!   to precede command execution, 429, idempotent 5xx/transport failures and
+//!   `2300` (pending transfer) are repeated. A mutating call whose outcome is
+//!   unknown after a timeout or 5xx returns [`Error::Ambiguous`] instead of
+//!   risking a duplicate registration, record change or refund.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -113,6 +117,7 @@ pub mod nameserverset;
 pub mod price;
 pub mod record;
 pub mod rpc;
+mod secret;
 pub mod tag;
 pub mod transfer;
 pub mod transport;

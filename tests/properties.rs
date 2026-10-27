@@ -4,7 +4,8 @@
 mod common;
 
 use inwx_client::{
-    DomainName, Hostname, Period, RecordId, RecordSpec, RecordType, RpcResponse, MAX_TTL,
+    Credentials, DomainName, Hostname, Period, RecordId, RecordSpec, RecordType, RpcResponse,
+    MAX_TTL,
 };
 use proptest::prelude::*;
 use serde_json::Value;
@@ -19,8 +20,29 @@ fn any_text() -> impl Strategy<Value = String> {
     "\\PC{0,40}"
 }
 
+/// Non-empty printable ASCII passwords.
+fn password_text() -> impl Strategy<Value = String> {
+    "[ -~]{1,128}"
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// Credential equality tracks both values without requiring `Clone`.
+    #[test]
+    fn credentials_compare_by_value(
+        password in password_text(),
+        other_password in password_text(),
+    ) {
+        let credentials = Credentials::new("user", &password).unwrap();
+        let duplicate = Credentials::new("user", &password).unwrap();
+        prop_assert_eq!(&credentials, &duplicate);
+
+        if password != other_password {
+            let different = Credentials::new("user", &other_password).unwrap();
+            prop_assert_ne!(&credentials, &different);
+        }
+    }
 
     /// Display and parse are inverses for every known type.
     #[test]

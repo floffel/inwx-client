@@ -3,13 +3,49 @@
 
 use inwx_client::{
     parse_ip, AuthCode, CertificateId, CertificateOrder, CertificateTerm, CertificateUpdate,
-    DnsKey, DnssecKeyQuery, DomainName, DsRecord, Email, Handle, HostingPeriod, Hostname,
-    NameserverSetCreate, NameserverSetType, PostalDelivery, RefundRequest, StatementQuery,
-    TagUpdate, Timestamp, ZoneCreate, ZoneUpdate,
+    Credentials, DnsKey, DnssecKeyQuery, DomainName, DsRecord, DynDnsAccount, Email, Handle,
+    HostingPeriod, Hostname, NameserverSetCreate, NameserverSetType, PostalDelivery, RefundRequest,
+    StatementQuery, TagUpdate, Timestamp, ZoneCreate, ZoneUpdate,
 };
 
 fn domain(name: &str) -> DomainName {
     DomainName::parse(name).unwrap()
+}
+
+// ------------------------------------------------------------- credentials --
+
+#[test]
+fn credential_password_minimum_boundary() {
+    assert!(Credentials::new("user", "").is_err());
+    assert!(Credentials::new("user", "p").is_ok());
+
+    let one = Credentials::new("user", "p").unwrap();
+    let same = Credentials::new("user", "p").unwrap();
+    let different = Credentials::new("user", "q").unwrap();
+    assert_eq!(one, same);
+    assert_ne!(one, different);
+}
+
+#[test]
+fn dyndns_password_boundaries() {
+    let host = Hostname::parse("home.example.net").unwrap();
+    let create =
+        |password: &str| DynDnsAccount::create("tenant-42", password, std::slice::from_ref(&host));
+
+    assert!(create("").is_err());
+    assert!(create("p").is_ok());
+    assert!(create(&"p".repeat(64)).is_ok());
+    assert!(create(&"p".repeat(65)).is_err());
+
+    // The limit counts characters, not UTF-8 bytes.
+    assert!(create(&"ü".repeat(64)).is_ok());
+    assert!(create(&"ü".repeat(65)).is_err());
+
+    let one = create("p").unwrap();
+    let same = create("p").unwrap();
+    let different = create("q").unwrap();
+    assert_eq!(one, same);
+    assert_ne!(one, different);
 }
 
 // ------------------------------------------------------------------ labels --
