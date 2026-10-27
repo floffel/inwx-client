@@ -163,9 +163,10 @@ impl fmt::Debug for Credentials {
 /// How many times a retryable failure is retried, and how long to wait.
 ///
 /// Backoff is exponential from [`DEFAULT_BASE_DELAY`] and clamped to
-/// [`DEFAULT_MAX_DELAY`]. Only transport failures, HTTP 429/5xx and API code
-/// `2300` (object pending transfer) are retried; everything else is terminal —
-/// retrying a rejected command would just duplicate the rejection.
+/// [`DEFAULT_MAX_DELAY`]. Failures known to have happened before a command ran,
+/// HTTP 429, idempotent HTTP 5xx, idempotent uncertain transport failures and
+/// API code `2300` (object pending transfer) are retried. A mutating command is
+/// never replayed after a timeout or 5xx; that outcome is [`Error::Ambiguous`].
 ///
 /// ```
 /// use std::time::Duration;
@@ -658,8 +659,9 @@ impl<T: Transport> InwxClient<T> {
     /// # Errors
     ///
     /// [`Error::NotAuthenticated`] without credentials, [`Error::Api`] when the
-    /// API rejects the login, [`Error::Authentication`] when it accepts the
-    /// login but sends no cookie.
+    /// API rejects the login, [`Error::Ambiguous`] when a timeout or 5xx leaves
+    /// it unknown whether the login ran, [`Error::Authentication`] when it
+    /// accepts the login but sends no cookie.
     pub async fn login(&self) -> Result<()> {
         let credentials = self.credentials.as_ref().ok_or(Error::NotAuthenticated)?;
         let mut params = Map::new();
@@ -674,6 +676,12 @@ impl<T: Transport> InwxClient<T> {
         self.add_language(&mut params);
 
         let response = self.send("account.login", params).await?;
+        if is_server_error(response.status()) {
+            return Err(Error::ambiguous(format!(
+                "HTTP {} after sending `account.login`; the login may have succeeded",
+                response.status()
+            )));
+        }
         let envelope = RpcResponse::parse(response.body())?;
         envelope.into_result()?;
 

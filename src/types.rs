@@ -786,6 +786,20 @@ impl<'de> Deserialize<'de> for Handle {
 /// use inwx_client::Email;
 ///
 /// assert_eq!(Email::parse("Hostmaster@Example.COM")?.as_str(), "Hostmaster@Example.COM");
+///
+/// let local_64 = format!("{}@example.com", "a".repeat(64));
+/// assert_eq!(Email::parse(&local_64)?.as_str(), local_64);
+/// assert!(Email::parse(&format!("{}@example.com", "a".repeat(65))).is_err());
+///
+/// let domain_190 = format!("{}.{}.{}", "b".repeat(63), "c".repeat(63), "d".repeat(62));
+/// let address_255 = format!("{}@{domain_190}", "a".repeat(64));
+/// assert_eq!(address_255.len(), 255);
+/// assert!(Email::parse(&address_255).is_ok());
+/// let domain_191 = format!("{}.{}.{}", "b".repeat(63), "c".repeat(63), "d".repeat(63));
+/// let address_256 = format!("{}@{domain_191}", "a".repeat(64));
+/// assert_eq!(address_256.len(), 256);
+/// assert!(Email::parse(&address_256).is_err());
+///
 /// for bad in ["", "hostmaster", "a@b", "a b@example.com", "@example.com", "a@"] {
 ///     assert!(Email::parse(bad).is_err(), "{bad:?}");
 /// }
@@ -799,8 +813,9 @@ impl Email {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the address is empty, longer than 255
-    /// characters, has no single `@`, or either side is unusable.
+    /// [`Error::Validation`] when the address is empty, longer than 255 bytes,
+    /// has no single `@`, has a local part longer than 64 bytes, or either side
+    /// is unusable.
     pub fn parse(input: &str) -> Result<Self> {
         let trimmed = input.trim();
         if trimmed.is_empty() {

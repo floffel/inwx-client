@@ -66,18 +66,56 @@ pub enum Error {
         source: serde_json::Error,
     },
 
-    /// The HTTP call never produced a usable response: DNS, TLS, timeout,
-    /// connection reset.
+    /// The request definitely was not sent: DNS failure, refused connection,
+    /// or a failed TLS handshake before any bytes reached the API.
     ///
     /// `retryable` is `true` for everything except local configuration
     /// mistakes, so callers can decide whether to hand the request back to
-    /// [`RetryPolicy`](crate::RetryPolicy) themselves.
+    /// [`RetryPolicy`](crate::RetryPolicy) themselves. A timeout or a failure
+    /// after the request was sent is [`Error::Ambiguous`] instead: the command
+    /// may already have run.
+    ///
+    /// ```
+    /// use inwx_client::Error;
+    ///
+    /// let error = Error::Transport {
+    ///     message: "connection refused".into(),
+    ///     retryable: true,
+    /// };
+    /// assert!(error.is_retryable());
+    /// assert!(!error.is_ambiguous());
+    /// ```
     #[error("transport error: {message}")]
     Transport {
         /// Description from the transport.
         message: String,
         /// `true` when another attempt could plausibly succeed.
         retryable: bool,
+    },
+
+    /// The request may have reached the API, but no usable outcome was
+    /// received.
+    ///
+    /// This covers timeouts, a connection dropping while the response was being
+    /// read, and an HTTP 5xx answer to a mutating command. The command may
+    /// already have been executed, so the client never retries it
+    /// automatically when it is not idempotent: doing so could create a second
+    /// domain, record, transfer, or refund. Inspect the remote state before
+    /// deciding to repeat the call.
+    ///
+    /// ```
+    /// use inwx_client::Error;
+    ///
+    /// let error = Error::Ambiguous {
+    ///     message: "request timed out after it was sent".into(),
+    /// };
+    /// assert!(error.is_ambiguous());
+    /// assert!(!error.is_retryable());
+    /// ```
+    #[error("ambiguous request outcome: {message}")]
+    Ambiguous {
+        /// Description of the uncertain failure.
+        message: String,
     },
 
     /// The API rejected the session (`2200`, `2201`, `2202`) and the client
@@ -115,6 +153,9 @@ pub enum Error {
 
     /// The server answered with a non-2xx status and a body that is not an
     /// INWX error envelope.
+    ///
+    /// A 5xx on a mutating call is [`Error::Ambiguous`] instead, because the
+    /// command may have run before the server failed.
     #[error("http {status}: {body}")]
     Http {
         /// HTTP status code.
@@ -142,17 +183,34 @@ impl Error {
         }
     }
 
-    /// Builds a retryable transport error.
+    /// Builds a retryable transport error for a request known not to have been
+    /// sent.
     ///
     /// ```
     /// use inwx_client::Error;
-    /// assert!(Error::transport("connection reset").is_retryable());
+    /// assert!(Error::transport("connection refused").is_retryable());
     /// ```
     #[must_use]
     pub fn transport(message: impl Into<String>) -> Self {
         Self::Transport {
             message: message.into(),
             retryable: true,
+        }
+    }
+
+    /// Builds an ambiguous-outcome error for a transport that cannot know
+    /// whether the command ran.
+    ///
+    /// ```
+    /// use inwx_client::Error;
+    ///
+    /// let error = Error::ambiguous("response body timed out");
+    /// assert!(error.is_ambiguous());
+    /// ```
+    #[must_use]
+    pub fn ambiguous(message: impl Into<String>) -> Self {
+        Self::Ambiguous {
+            message: message.into(),
         }
     }
 
@@ -182,7 +240,8 @@ impl Error {
     ///
     /// Transport failures carry their own flag; an API error is retryable only
     /// for `2300` (object pending transfer), everything else is terminal.
-    /// Validation, decoding and authentication errors are never retryable.
+    /// Validation, decoding, authentication and ambiguous-outcome errors are
+    /// never retryable without the caller reconciling the remote state first.
     ///
     /// ```
     /// use inwx_client::{Error, RetryPolicy};
@@ -198,6 +257,22 @@ impl Error {
             Self::Api { code, .. } => *code == 2300,
             _ => false,
         }
+    }
+
+    /// Whether the outcome is unknown because the request may already have run.
+    ///
+    /// Ambiguous outcomes are never retried automatically for mutating calls.
+    /// Check the remote state before repeating such a call.
+    ///
+    /// ```
+    /// use inwx_client::Error;
+    ///
+    /// assert!(Error::ambiguous("timeout").is_ambiguous());
+    /// assert!(!Error::transport("connection refused").is_ambiguous());
+    /// ```
+    #[must_use]
+    pub fn is_ambiguous(&self) -> bool {
+        matches!(self, Self::Ambiguous { .. })
     }
 
     /// Whether this is a rejected session rather than a rejected command.
