@@ -980,8 +980,14 @@ mod tests {
 
     #[test]
     fn lengths_are_enforced() {
-        let long = complete().with_postcode("1".repeat(11));
-        assert!(long.validate().is_err());
+        // `text10` postcode: 10 characters are the last valid value, 11 are rejected.
+        let max_postcode = complete().with_postcode("1".repeat(10));
+        assert!(max_postcode.validate().is_ok());
+        let long_postcode = complete().with_postcode("1".repeat(11));
+        assert!(long_postcode.validate().is_err());
+        // `text64` street: 64 characters are the last valid value, 65 are rejected.
+        let max_street = complete().with_street("x".repeat(64));
+        assert!(max_street.validate().is_ok());
         let long_street = complete().with_street("x".repeat(65));
         assert!(long_street.validate().is_err());
     }
