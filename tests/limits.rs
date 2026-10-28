@@ -3,9 +3,9 @@
 
 use inwx_client::{
     parse_ip, AuthCode, CertificateId, CertificateOrder, CertificateTerm, CertificateUpdate,
-    DnsKey, DnssecKeyQuery, DomainName, DsRecord, Email, Handle, HostingPeriod, Hostname,
+    DnsKey, DnssecKeyQuery, DomainName, DsRecord, Email, Error, Handle, HostingPeriod, Hostname,
     NameserverSetCreate, NameserverSetType, PostalDelivery, RefundRequest, StatementQuery,
-    TagUpdate, Timestamp, ZoneCreate, ZoneUpdate,
+    TagUpdate, Timestamp, ZoneCreate, ZoneUpdate, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
 };
 
 fn domain(name: &str) -> DomainName {
@@ -29,7 +29,11 @@ fn a_label_of_63_bytes_is_accepted_and_64_is_not() {
 
 #[test]
 fn a_name_of_253_bytes_is_accepted_and_254_is_not() {
-    // 253 characters: 63 + 1 + 63 + 1 + 63 + 1 + 61 = 253.
+    assert_eq!(MAX_DOMAIN_LEN, 253);
+    assert_eq!(MAX_LABEL_LEN, 63);
+
+    // 253 characters: 63 + 1 + 63 + 1 + 63 + 1 + 61 = 253. Every label is legal
+    // on its own, so only the total-name limit can decide these outcomes.
     let name = format!(
         "{}.{}.{}.{}",
         "a".repeat(63),
@@ -37,12 +41,33 @@ fn a_name_of_253_bytes_is_accepted_and_254_is_not() {
         "c".repeat(63),
         "d".repeat(61)
     );
-    assert_eq!(name.len(), 253);
-    assert!(DomainName::parse(&name).is_ok());
+    assert_eq!(name.len(), MAX_DOMAIN_LEN);
+    assert!(name.split('.').all(|label| label.len() <= MAX_LABEL_LEN));
+    assert_eq!(DomainName::parse(&name).unwrap().as_str(), name);
+    assert_eq!(Hostname::parse(&name).unwrap().as_str(), name);
 
+    // One byte more, added to a label that stays within 63 characters.
     let too_long = format!("{name}e");
-    assert_eq!(too_long.len(), 254);
-    assert!(DomainName::parse(&too_long).is_err());
+    assert_eq!(too_long.len(), MAX_DOMAIN_LEN + 1);
+    assert!(too_long
+        .split('.')
+        .all(|label| label.len() <= MAX_LABEL_LEN));
+    for (expected_field, error) in [
+        ("domain", DomainName::parse(&too_long).unwrap_err()),
+        ("hostname", Hostname::parse(&too_long).unwrap_err()),
+    ] {
+        let Error::Validation { field, message } = error else {
+            panic!("expected a validation error, got {error}");
+        };
+        assert_eq!(field, expected_field);
+        assert_eq!(
+            message,
+            format!(
+                "must be at most {MAX_DOMAIN_LEN} characters, got {}",
+                too_long.len()
+            )
+        );
+    }
 }
 
 #[test]
