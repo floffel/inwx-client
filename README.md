@@ -80,6 +80,7 @@ Every method below is implemented against the published INWX API documentation
 | Accounting | `accounting.accountBalance`, `creditLogById`, `getInvoice`, `getPreviewInvoice`, `getReceipt`, `getstatement`, `listInvoices`, `lockedFunds`, `log`, `refund`, `sendbypost` | PDFs decoded from base64 (`Document::pdf_bytes`); `refund` needs the acknowledgement |
 | Contacts | `contact.create`, `contact.info`, `contact.list`, `contact.update`, `contact.delete` | documented field lengths and country codes enforced |
 | Prices | `domain.getPrices`, `domain.getdomainprice` | `f64` quotes, not amounts to sum |
+| Diagnostics | `domain.log`, `domain.stats`, `domain.getRules`, `domain.getTldGroups` | read-only: why an action was rejected and what a `TLD` requires; both the list and the flat answer shape are read |
 | Anything else | `InwxClient::call(method, params)` | login, cookies, retries and error envelopes still apply |
 
 ### Design
@@ -124,7 +125,6 @@ Every method below is implemented against the published INWX API documentation
 Everything the INWX API documents is in scope. What is not implemented yet is tracked as an issue
 and worked down in order - the list below is the backlog, not a boundary:
 
-- `domain.log`, `domain.stats`, `domain.getRules`, `domain.getTldGroups` - [#14](https://github.com/floffel/inwx-client/issues/14)
 - automatic pagination for the list endpoints - [#15](https://github.com/floffel/inwx-client/issues/15)
 - reseller/partner objects (`application.*`, `authinfo2.*`, `customer.*`, `document.*`, `host.*`,
   `message.*`, `news.*`, `nichandle.*`, `pdf.*`) - [#22](https://github.com/floffel/inwx-client/issues/22)
@@ -155,6 +155,9 @@ documentation does not state:
 | `hosting.getPrices` price fields | **unverified** — Table 2.181 lists only `id` and `product`, so no price is modelled. |
 | `certificate.log` answer wrapper | **unverified** — flat fields documented; the parser accepts an array or a single object. |
 | `tag.list` `count.domain` nesting | **unverified** — the table's indentation is ambiguous; both shapes are tolerated. |
+| `domain.log`, `domain.stats`, `domain.getRules`, `domain.getTldGroups` response shapes | **unverified** — no table anchor was recorded for their `resData` and no live call was available; every field is optional, and an array, a one-entry indexed object or a flat object are all accepted. |
+| `domain.stats` counter shape | **unverified** — the counters may arrive as a list or as one flat object keyed by counter name; `counter`/`amount_for`/`text_for` read both, so the caller does not have to know which arrived. |
+| `domain.log` `pagelimit` maximum | **not published** — `pagelimit` is a plain `int` with no recorded upper bound; `MAX_PAGE_LIMIT` (1 000) is the crate's own limit, so a mistyped `100_000` fails locally instead of asking for a huge page. |
 | `dyndnssubscription.cancel` id semantics | **unverified** — Table 2.161 types `id` as "the customer's subscription id", while `create` uses the same name for the plan id; the crate takes two separate parameters so the two cannot be confused. |
 | Every 0.2.0 write against a live endpoint | **unverified** — no credentials in CI; method names, parameters and datatypes come from the tables in `docs/contracts.md`. |
 | Unicode → punycode | UTS-46 mapping via `idna`, so emoji become punycode and characters the mapping deletes disappear. The ACE form (`DomainName::as_str`) is what is sent, logged and compared. |
@@ -186,7 +189,7 @@ documented API and were replaced: `domain.cancel` (use `domain.delete` or
 ## Testing
 
 ```bash
-cargo test                        # unit + integration + 657 doctests, no network
+cargo test                        # unit + integration + 703 doctests, no network
 cargo test --no-default-features  # the same, without reqwest/tokio
 cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --no-deps --all-features

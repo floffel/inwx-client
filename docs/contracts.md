@@ -263,6 +263,42 @@ decodes them with the `base64` crate and refuses invalid input rather than writi
 a corrupt file. `accounting.refund` moves money and therefore requires the same
 `Irreversible` acknowledgement as the ownership commands.
 
+## 0.2.x — diagnostics (`src/diagnostics.rs`)
+
+Source: <https://account.inwx.com/en/help/apidoc/f/ch02s09.html> — ch02 §2.9,
+the `domain` object, the same page as `domain.create` and `domain.info`.
+
+| Method | Wrapper | Parameters sent | Output table |
+| --- | --- | --- | --- |
+| `domain.log` | `DomainLogQuery` → `domain_log` | `domain` (required), `page` (int, starts at 1), `pagelimit` (int), `dateFrom`/`dateTo` (datetime) | not recorded |
+| `domain.stats` | `domain_stats` | `domain` (optional; omit it for the whole account) | not recorded |
+| `domain.getRules` | `tld_rules` | `tld` (one label, punycode, no leading dot) | not recorded |
+| `domain.getTldGroups` | `tld_groups` | — | not recorded |
+
+"not recorded" is literal: the `resData` field lists of these four methods were
+not written down here with a `Table 2.NNN` anchor, and there is no live call to
+check them against, so no number is invented. The consequence lives in the types
+rather than in a comment: every response field is optional, a result set arrives
+either as a JSON array or as the numerically keyed object INWX produces for a
+one-entry set, `domain.stats` additionally answers with a flat object that puts
+each counter under its own key, and unknown fields are kept in `extra` instead
+of being dropped.
+
+Validation before the wire: `domain` is a `DomainName` (punycode, 253/63 label
+rules, no control characters), the `TLD` of `domain.getRules` goes through the
+same normalisation and is refused above `MAX_LABEL_LEN` (63) bytes or when it
+contains a dot, `page` must be at least 1, and `pagelimit` must be between 1 and
+`MAX_PAGE_LIMIT`. `MAX_PAGE_LIMIT` (1 000) is the crate's own bound, not a
+documented one — `pagelimit` is a plain `int` and no maximum is recorded for it
+here — and the cap keeps a mistyped `100_000` from asking for a response nobody
+can hold.
+`dateTo` must be strictly after `dateFrom` — an empty window is a mistake, not
+a query.
+
+These four are read-only, so they sit outside the `Irreversible` acknowledgement
+that the write commands require, and they are idempotent, so they are retried on
+a transient failure like any other read.
+
 ## Unverified
 
 Points the documentation does not settle. Each is modelled as documented and
@@ -279,6 +315,11 @@ flagged here; none is a guess about an endpoint's existence.
 | `tag.list` `count` nesting | **unverified** | Table 2.235 shows `count` → `domain` with an ambiguous indentation; parsed as `{"count": {"domain": N}}` with a scalar `count` also tolerated. |
 | Live-endpoint behaviour for every 0.2.0 method | **unverified** | No credentials in CI; every test is offline against fixtures. Method names, parameters and datatypes are from the tables above. |
 | `extData` per-TLD keys | **documented, not enumerated** | ch03 §3.49 lists the generic keys and then a long TLD-specific list; `ExtData::set` carries any upper-case token. |
+| `domain.log` / `domain.stats` / `domain.getRules` / `domain.getTldGroups` output shapes | **unverified** | No `Table 2.NNN` anchor was recorded for the `resData` of these four and no live call was available; field names (`logs`, `stats`, `rules`, `tldGroup`, `count`, `date`, `action`, `text`, `user`, `ip`, `name`/`value`/`description`, `roId`, `tldGroup`, `tld`) are the spellings the crate decodes, each as an alias among several accepted ones. Array, one-entry indexed object and flat object are all accepted. |
+| `domain.log` `pagelimit` maximum | **not published** | The parameter is a plain `int` and no upper bound is recorded here. `MAX_PAGE_LIMIT` (1 000) is the crate's own limit, and a larger value the API dislikes still answers `2004 Parameter value range error`. |
+| `domain.stats` answer shape | **unverified** | Account-wide and per-domain calls are documented; whether the counters arrive as a list or as one flat object per counter is not shown. `counter`/`amount_for`/`text_for` read both, so the caller does not have to know which arrived. |
+| `domain.getRules` rule names | **documented, not enumerated** | The rule names a `TLD` answers with (e.g. a period range, a required `extData` key) are not listed as a closed set; names are carried verbatim and looked up case-insensitively, and unknown ones keep their raw `value`. |
+| `domain.getTldGroups` group contents | **unverified** | Group id, name and member `TLD`s are modelled; which groups an account sees depends on the account, so no name is treated as fixed. |
 
 ## Deliberately not modelled
 

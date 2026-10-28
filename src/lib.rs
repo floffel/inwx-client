@@ -48,6 +48,7 @@
 //! | Accounting | `accounting.*` (11 methods) |
 //! | Contacts | `contact.create`, `info`, `list`, `update`, `delete` |
 //! | Prices | `domain.getPrices`, `domain.getdomainprice` |
+//! | Diagnostics | `domain.log`, `domain.stats`, `domain.getRules`, `domain.getTldGroups` |
 //!
 //! Unknown methods stay reachable through [`InwxClient::call`]; what is not
 //! modelled yet is tracked as an issue, not hidden as "out of scope".
@@ -102,6 +103,7 @@ pub mod accounting;
 pub mod certificate;
 pub mod client;
 pub mod contact;
+pub mod diagnostics;
 pub mod dnssec;
 pub mod domain;
 pub mod dyndns;
@@ -133,6 +135,10 @@ pub use client::{
     DEFAULT_BASE_DELAY, DEFAULT_BASE_URL, DEFAULT_MAX_DELAY, SANDBOX_BASE_URL,
 };
 pub use contact::{Contact, ContactListPage, ContactQuery, ContactRequest, ContactUpdate};
+pub use diagnostics::{
+    DomainLog, DomainLogEntry, DomainLogQuery, DomainRule, DomainStat, DomainStats, TldGroup,
+    TldGroupList, TldRules, MAX_PAGE_LIMIT,
+};
 pub use dnssec::{
     AddDnsKeyRequest, DnsKey, DnsKeyPair, DnssecAlgorithm, DnssecDigestType, DnssecDomainStatus,
     DnssecFlag, DnssecKey, DnssecKeyQuery, DnssecKeyStatus, DnssecState, DsRecord,
