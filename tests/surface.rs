@@ -364,7 +364,16 @@ fn contact_validation_covers_every_optional_length() {
     assert!(base().with_remarks("x".repeat(256)).validate().is_err());
     assert!(base().with_city("x".repeat(65)).validate().is_err());
     assert!(base().with_voice("x".repeat(65)).validate().is_err());
-    assert!(base().with_street("x".repeat(65)).validate().is_err());
+    // The street limit (`text64`) is proved from both sides.
+    assert!(base().with_street("x".repeat(64)).validate().is_ok());
+    let too_long = base().with_street("x".repeat(65)).validate().unwrap_err();
+    assert!(matches!(
+        too_long,
+        Error::Validation {
+            field: "contact.street",
+            ..
+        }
+    ));
 }
 
 #[test]

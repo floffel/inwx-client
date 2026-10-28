@@ -186,11 +186,22 @@ proptest! {
 use std::str::FromStr;
 
 use inwx_client::{
-    parse_ip, ActionKind, AuthCode, CertificateOrder, CertificateTerm, DnsKey, DnssecAlgorithm,
-    DnssecDigestType, DnssecDomainStatus, DnssecFlag, DnssecKeyQuery, DnssecKeyStatus,
-    DocumentFormat, Email, Handle, HostingPeriod, Irreversible, NameserverSetType, RecordSet,
-    Timestamp, TransferAnswer, UrlRedirectType, ZoneCreate, ZoneType,
+    parse_ip, ActionKind, AuthCode, CertificateOrder, CertificateTerm, ContactRequest, ContactType,
+    DnsKey, DnssecAlgorithm, DnssecDigestType, DnssecDomainStatus, DnssecFlag, DnssecKeyQuery,
+    DnssecKeyStatus, DocumentFormat, Email, Error, Handle, HostingPeriod, Irreversible,
+    NameserverSetType, RecordSet, Timestamp, TransferAnswer, UrlRedirectType, ZoneCreate, ZoneType,
 };
+
+/// A complete handle whose only field under test is the street.
+fn handle_with_street(street: String) -> ContactRequest {
+    ContactRequest::new(ContactType::Person, "Erika", "erika@example.com")
+        .unwrap()
+        .with_street(street)
+        .with_city("Berlin")
+        .with_postcode("10115")
+        .with_country("DE")
+        .with_voice("+49.891")
+}
 
 /// Arbitrary text for parsers that must never panic.
 fn arbitrary() -> impl Strategy<Value = String> {
@@ -341,5 +352,26 @@ proptest! {
         let params = query.params();
         prop_assert_eq!(params["page"].as_u64().unwrap(), u64::from(page.max(1)));
         prop_assert_eq!(params["pagelimit"].as_u64().unwrap(), u64::from(limit));
+    }
+
+    /// The street limit is exactly `text64`: every value of at most 64
+    /// characters — the maximum included — validates, and every longer one is
+    /// refused on `contact.street`. The fixed 63/64/65 cases live in the
+    /// `street_length_boundary_is_64_characters` unit test.
+    #[test]
+    fn a_street_validates_exactly_up_to_64_characters(street in "[xßä ]{0,80}") {
+        let request = handle_with_street(street.clone());
+        let length = street.chars().count();
+        let fits = length <= 64;
+        let accepted = request.validate().is_ok();
+        prop_assert_eq!(accepted, fits, "length {}", length);
+        if !fits {
+            let error = request.validate().unwrap_err();
+            let field = match error {
+                Error::Validation { field, .. } => Some(field),
+                _ => None,
+            };
+            prop_assert_eq!(field, Some("contact.street"));
+        }
     }
 }

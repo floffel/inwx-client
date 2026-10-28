@@ -107,13 +107,28 @@ impl ContactRequest {
         self
     }
 
-    /// Sets the street address.
+    /// Sets the street address (`text64`: at most 64 characters, checked by
+    /// [`ContactRequest::validate`]).
     ///
     /// ```
     /// use inwx_client::{ContactRequest, ContactType};
     ///
     /// let request = ContactRequest::new(ContactType::Person, "A", "a@b.test")?.with_street("Weg 2");
     /// assert_eq!(request.params()["street"], "Weg 2");
+    ///
+    /// // The documented maximum is accepted, one character more is not.
+    /// let address = |street: String| {
+    ///     ContactRequest::new(ContactType::Person, "A", "a@b.test").map(|request| {
+    ///         request
+    ///             .with_street(street)
+    ///             .with_city("Berlin")
+    ///             .with_postcode("10115")
+    ///             .with_country("DE")
+    ///             .with_voice("+49.891")
+    ///     })
+    /// };
+    /// assert!(address("x".repeat(64))?.validate().is_ok());
+    /// assert!(address("x".repeat(65))?.validate().is_err());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     #[must_use]
@@ -984,6 +999,40 @@ mod tests {
         assert!(long.validate().is_err());
         let long_street = complete().with_street("x".repeat(65));
         assert!(long_street.validate().is_err());
+    }
+
+    #[test]
+    fn street_length_boundary_is_64_characters() {
+        // `text64`: 64 characters is the documented maximum, so a plain value,
+        // the one just inside the limit and the maximum itself must all be
+        // accepted — and the value just outside must be refused.
+        for len in [5, 63, 64] {
+            let street = "x".repeat(len);
+            let request = complete().with_street(street.clone());
+            assert!(
+                request.validate().is_ok(),
+                "a street of {len} characters must be accepted"
+            );
+            assert_eq!(request.params()["street"], street);
+        }
+
+        // The limit counts characters, not bytes: 64 two-byte characters fit.
+        let unicode = "ß".repeat(64);
+        assert_eq!(unicode.len(), 128);
+        assert!(complete().with_street(unicode).validate().is_ok());
+
+        let error = complete()
+            .with_street("x".repeat(65))
+            .validate()
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Validation {
+                field: "contact.street",
+                ref message
+            } if message == "must be at most 64 characters"
+        ));
+        assert!(!error.is_retryable());
     }
 
     #[test]
