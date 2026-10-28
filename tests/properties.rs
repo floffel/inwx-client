@@ -123,6 +123,19 @@ proptest! {
         }
     }
 
+    /// Canonicalisation is idempotent: feeding an accepted name back in changes
+    /// nothing, so a name never drifts when it is stored and re-read.
+    #[test]
+    fn name_canonicalisation_is_idempotent(input in any_text()) {
+        let Ok(domain) = DomainName::parse(&input) else {
+            return Ok(());
+        };
+        let reparsed = DomainName::parse(domain.as_str()).unwrap();
+        prop_assert_eq!(&reparsed, &domain);
+        let host = Hostname::parse(domain.as_str()).unwrap();
+        prop_assert_eq!(&Hostname::parse(host.as_str()).unwrap(), &host);
+    }
+
     /// Response parsing never panics, whatever bytes arrive.
     #[test]
     fn response_parsing_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..512)) {

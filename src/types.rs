@@ -11,21 +11,33 @@ use std::str::FromStr;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use idna::uts46::{AsciiDenyList, DnsLength, Hyphens, Uts46};
+
 use crate::{Error, Result};
 
 /// Longest legal DNS name in presentation form, without the trailing root dot.
+///
+/// The limit itself is enforced by `idna`'s UTS-46 DNS length check; the
+/// constant is what an error message quotes.
 pub const MAX_DOMAIN_LEN: usize = 253;
 
 /// Longest legal single DNS label.
+///
+/// Like [`MAX_DOMAIN_LEN`], this mirrors the check `idna` performs.
 pub const MAX_LABEL_LEN: usize = 63;
 
 /// A domain name, validated and converted to its ASCII (punycode) form.
 ///
-/// `parse` trims surrounding whitespace and one trailing root dot, applies
-/// UTS-46 (`idna`) so unicode names become `xn--…`, lower-cases the result and
-/// then enforces the DNS length and label rules. The original unicode spelling
-/// is not kept: INWX stores and returns the ACE form, so keeping both invites
-/// mismatches.
+/// `parse` trims surrounding whitespace and one trailing root dot, then hands
+/// the name to `idna`'s UTS-46 implementation with the strict options: the STD3
+/// ASCII rules (an ASCII label may only hold letters, digits and hyphens), the
+/// hyphen-position rule and the DNS length check ([`MAX_DOMAIN_LEN`] characters
+/// in total, [`MAX_LABEL_LEN`] per label, no empty labels). Unicode names
+/// become `xn--…` and the result is lower-cased. On top of that a domain has to
+/// contain a dot, i.e. a TLD.
+///
+/// The original unicode spelling is not kept: INWX stores and returns the ACE
+/// form, so keeping both invites mismatches.
 ///
 /// ```
 /// use inwx_client::DomainName;
@@ -65,16 +77,16 @@ impl DomainName {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the name is not a syntactically valid domain.
+    /// [`Error::Validation`] when UTS-46 rejects the name, or when it has no
+    /// dot and therefore no TLD.
     pub fn parse(input: &str) -> Result<Self> {
-        let trimmed = input.trim().trim_end_matches('.');
-        let ascii = idna::domain_to_ascii(trimmed).map_err(|error| {
-            Error::validation(
+        let ascii = canonical_dns_name("domain", "domain name", input)?;
+        if !ascii.contains('.') {
+            return Err(Error::validation(
                 "domain",
-                format!("{input:?} is not a valid domain: {error}"),
-            )
-        })?;
-        validate_dns_name("domain", &ascii, true)?;
+                "must contain at least one dot (a TLD)",
+            ));
+        }
         Ok(Self(ascii))
     }
 
@@ -198,18 +210,11 @@ impl Hostname {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when a label is empty, too long, starts or ends
-    /// with a hyphen, or contains a character outside `[a-z0-9-]`.
+    /// [`Error::Validation`] when UTS-46 rejects the name: an empty or
+    /// over-long label, a label that starts or ends with a hyphen, or a
+    /// character outside `[a-z0-9-]`.
     pub fn parse(input: &str) -> Result<Self> {
-        let trimmed = input.trim().trim_end_matches('.');
-        let ascii = idna::domain_to_ascii(trimmed).map_err(|error| {
-            Error::validation(
-                "hostname",
-                format!("{input:?} is not a valid host name: {error}"),
-            )
-        })?;
-        validate_dns_name("hostname", &ascii, false)?;
-        Ok(Self(ascii))
+        Ok(Self(canonical_dns_name("hostname", "host name", input)?))
     }
 
     /// The ASCII form.
@@ -264,51 +269,52 @@ impl<'de> Deserialize<'de> for Hostname {
     }
 }
 
-/// Shared label validation for [`DomainName`] and [`Hostname`].
-fn validate_dns_name(field: &'static str, ascii: &str, require_dot: bool) -> Result<()> {
-    if ascii.is_empty() {
+/// Canonicalisation and shape check shared by [`DomainName`] and [`Hostname`].
+///
+/// Everything but the INWX-specific rules lives in `idna`: `AsciiDenyList::STD3`
+/// is the UTS-46 `UseSTD3ASCIIRules` flag, so an ASCII label may only contain
+/// letters, digits and hyphens; `Hyphens::CheckFirstLast` is the rule that a
+/// label must not start or end with a hyphen (the `xn--` prefix itself stays
+/// legal); `DnsLength::Verify` enforces [`MAX_DOMAIN_LEN`] characters in total
+/// and [`MAX_LABEL_LEN`] per label, with no empty labels.
+///
+/// `idna::Errors` carries no detail, so a rejected name is run a second time
+/// without the length check to work out what failed — a cost paid on the error
+/// path only.
+fn canonical_dns_name(field: &'static str, kind: &str, input: &str) -> Result<String> {
+    let trimmed = input.trim().trim_end_matches('.');
+    if trimmed.is_empty() {
         return Err(Error::validation(field, "must not be empty"));
     }
-    if ascii.len() > MAX_DOMAIN_LEN {
-        return Err(Error::validation(
-            field,
-            format!(
-                "must be at most {MAX_DOMAIN_LEN} characters, got {}",
-                ascii.len()
-            ),
-        ));
+    let uts46 = Uts46::new();
+    if let Ok(ascii) = uts46.to_ascii(
+        trimmed.as_bytes(),
+        AsciiDenyList::STD3,
+        Hyphens::CheckFirstLast,
+        DnsLength::Verify,
+    ) {
+        return Ok(ascii.into_owned());
     }
-    let labels = ascii.split('.').collect::<Vec<_>>();
-    if require_dot && labels.len() < 2 {
-        return Err(Error::validation(
-            field,
-            "must contain at least one dot (a TLD)",
-        ));
-    }
-    for label in labels {
-        if label.is_empty() {
-            return Err(Error::validation(field, "must not contain empty labels"));
+    let shape = uts46.to_ascii(
+        trimmed.as_bytes(),
+        AsciiDenyList::STD3,
+        Hyphens::CheckFirstLast,
+        DnsLength::Ignore,
+    );
+    let message = match shape {
+        Err(_) => format!(
+            "{input:?} is not a valid {kind}: UTS-46 rejected a character, a \
+             hyphen position or a punycode label"
+        ),
+        Ok(ascii) if ascii.split('.').any(str::is_empty) => {
+            format!("{input:?} must not contain empty labels")
         }
-        if label.len() > MAX_LABEL_LEN {
-            return Err(Error::validation(
-                field,
-                format!("label {label:?} exceeds {MAX_LABEL_LEN} characters"),
-            ));
-        }
-        if label.starts_with('-') || label.ends_with('-') {
-            return Err(Error::validation(
-                field,
-                format!("label {label:?} must not start or end with a hyphen"),
-            ));
-        }
-        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-            return Err(Error::validation(
-                field,
-                format!("label {label:?} contains a character outside [a-z0-9-]"),
-            ));
-        }
-    }
-    Ok(())
+        Ok(_) => format!(
+            "{input:?} is longer than a DNS name allows: {MAX_DOMAIN_LEN} \
+             characters in total, {MAX_LABEL_LEN} per label"
+        ),
+    };
+    Err(Error::validation(field, message))
 }
 
 /// A registration or renewal period, restricted to the values INWX documents

@@ -3,7 +3,7 @@
 
 use inwx_client::{
     parse_ip, AuthCode, CertificateId, CertificateOrder, CertificateTerm, CertificateUpdate,
-    DnsKey, DnssecKeyQuery, DomainName, DsRecord, Email, Handle, HostingPeriod, Hostname,
+    DnsKey, DnssecKeyQuery, DomainName, DsRecord, Email, Error, Handle, HostingPeriod, Hostname,
     NameserverSetCreate, NameserverSetType, PostalDelivery, RefundRequest, StatementQuery,
     TagUpdate, Timestamp, ZoneCreate, ZoneUpdate,
 };
@@ -55,6 +55,77 @@ fn an_empty_label_is_refused_everywhere() {
     assert!(ZoneCreate::master(domain("example.com")).is_ok());
 }
 
+#[test]
+fn a_hyphen_is_allowed_inside_a_label_but_not_at_its_edges() {
+    assert_eq!(domain("a-b.com").as_str(), "a-b.com");
+    // A doubled hyphen in the middle is legal — it is what an `xn--` label is
+    // made of — so the rule really is about the edges, not about hyphens.
+    assert_eq!(domain("aaa--bbb.de").as_str(), "aaa--bbb.de");
+    assert_eq!(domain("xn--bcher-kva.de").as_str(), "xn--bcher-kva.de");
+    for bad in [
+        "-ab.com",
+        "ab-.com",
+        "a.-b.com",
+        "a.b-.com",
+        "-localhost",
+        "localhost-",
+    ] {
+        assert!(DomainName::parse(bad).is_err(), "{bad:?}");
+        assert!(Hostname::parse(bad).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
+fn a_character_outside_the_std3_alphabet_is_refused() {
+    // Letters, digits and a hyphen in the middle: the whole legal alphabet, in
+    // one name.
+    assert_eq!(domain("a-1.com").as_str(), "a-1.com");
+    for bad in [
+        "a_b.com", "a+b.com", "a!b.com", "a%b.com", "a~b.com", "a b.com",
+    ] {
+        assert!(DomainName::parse(bad).is_err(), "{bad:?}");
+        assert!(Hostname::parse(bad).is_err(), "{bad:?}");
+    }
+    // U+FF3F FULLWIDTH LOW LINE maps onto `_` under UTS-46, so it trips the very
+    // same rule as a plain underscore.
+    assert!(DomainName::parse("a\u{FF3F}b.com").is_err());
+    assert!(Hostname::parse("a\u{FF3F}b.com").is_err());
+}
+
+#[test]
+fn a_rejected_name_says_which_rule_it_broke() {
+    let message = |input: &str| match DomainName::parse(input) {
+        Err(Error::Validation { field, message }) => {
+            assert_eq!(field, "domain");
+            message
+        }
+        other => panic!("expected a validation error for {input:?}, got {other:?}"),
+    };
+
+    assert_eq!(message(""), "must not be empty");
+    // Length: the message quotes both limits, a shape rejection must not.
+    let too_long = format!("{}.com", "a".repeat(250));
+    assert!(message(&too_long).contains("253"), "{}", message(&too_long));
+    let long_label = format!("{}.com", "a".repeat(64));
+    assert!(
+        message(&long_label).contains("63"),
+        "{}",
+        message(&long_label)
+    );
+    assert!(message("a..com").contains("empty labels"));
+    assert!(message("under_score.com").contains("not a valid domain name"));
+    assert!(!message("under_score.com").contains("253"));
+    assert!(message("localhost").contains("at least one dot"));
+
+    let host = match Hostname::parse("under_score.com") {
+        Err(Error::Validation { field, message }) => {
+            assert_eq!(field, "hostname");
+            message
+        }
+        other => panic!("expected a validation error, got {other:?}"),
+    };
+    assert!(host.contains("not a valid host name"), "{host}");
+}
 #[test]
 fn a_unicode_name_is_sent_in_its_idn_form() {
     let zone = ZoneCreate::master(domain("München.de")).unwrap();
