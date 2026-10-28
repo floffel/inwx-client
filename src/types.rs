@@ -1362,11 +1362,54 @@ mod tests {
     }
 
     #[test]
-    fn domain_rejects_overlong_names() {
-        let long_label = "a".repeat(64);
-        assert!(DomainName::parse(&format!("{long_label}.com")).is_err());
-        let long_name = format!("{}.com", "a".repeat(250));
-        assert!(DomainName::parse(&long_name).is_err());
+    fn domain_rejects_an_overlong_label() {
+        // 63 characters are legal, 64 are not — the per-label limit on its own.
+        let last_label = format!("{}.com", "a".repeat(63));
+        assert_eq!(DomainName::parse(&last_label).unwrap().as_str(), last_label);
+        let err = DomainName::parse(&format!("{}.com", "a".repeat(64))).unwrap_err();
+        assert!(
+            matches!(&err, Error::Validation { field, message }
+                if *field == "domain" && message.contains("63")),
+            "{err}"
+        );
+    }
+
+    /// The 253-character total limit, checked on a name whose every label is
+    /// legal. A single overlong label would trip the 63-character check first,
+    /// so this is the only shape that actually proves the total limit exists.
+    #[test]
+    fn domain_and_hostname_enforce_the_total_name_limit() {
+        // 63 + 1 + 63 + 1 + 63 + 1 + 61 = 253: just inside the limit.
+        let inside = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61)
+        );
+        assert_eq!(inside.len(), MAX_DOMAIN_LEN);
+        assert_eq!(DomainName::parse(&inside).unwrap().as_str(), inside);
+        assert_eq!(Hostname::parse(&inside).unwrap().as_str(), inside);
+
+        // One character more, on a label that is still legal by itself.
+        let outside = format!("{inside}e");
+        assert_eq!(outside.len(), MAX_DOMAIN_LEN + 1);
+        assert!(outside.split('.').all(|label| label.len() <= MAX_LABEL_LEN));
+        for (expected_field, error) in [
+            ("domain", DomainName::parse(&outside).unwrap_err()),
+            ("hostname", Hostname::parse(&outside).unwrap_err()),
+        ] {
+            // The rejection must be about the total length, not about a label.
+            match &error {
+                Error::Validation { field, message } => {
+                    assert_eq!(*field, expected_field);
+                    assert!(message.contains("at most 253"), "{message}");
+                    assert!(message.contains("got 254"), "{message}");
+                    assert!(!message.contains("label"), "{message}");
+                }
+                other => panic!("expected a validation error, got {other}"),
+            }
+        }
     }
 
     #[test]

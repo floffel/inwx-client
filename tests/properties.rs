@@ -123,6 +123,30 @@ proptest! {
         }
     }
 
+    /// For every length from 240 to 255 the decision is made by the total-name
+    /// limit alone: the name is built from four labels of at most 63
+    /// characters, so nothing else can reject it. Accepted up to exactly 253,
+    /// rejected from 254.
+    #[test]
+    fn the_total_name_limit_decides_long_names(total in 240usize..=255) {
+        // 63 + 1 + 63 + 1 + 63 + 1 = 192 characters before the last label.
+        let last = total - (inwx_client::MAX_LABEL_LEN * 3 + 3);
+        // The construction stays clear of the per-label limit on purpose.
+        prop_assert!((1..=inwx_client::MAX_LABEL_LEN).contains(&last));
+        let name = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(last)
+        );
+        prop_assert_eq!(name.len(), total);
+
+        let expected = total <= inwx_client::MAX_DOMAIN_LEN;
+        prop_assert_eq!(DomainName::parse(&name).is_ok(), expected, "len {}", total);
+        prop_assert_eq!(Hostname::parse(&name).is_ok(), expected, "len {}", total);
+    }
+
     /// Response parsing never panics, whatever bytes arrive.
     #[test]
     fn response_parsing_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..512)) {

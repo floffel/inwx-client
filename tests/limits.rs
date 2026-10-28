@@ -3,9 +3,9 @@
 
 use inwx_client::{
     parse_ip, AuthCode, CertificateId, CertificateOrder, CertificateTerm, CertificateUpdate,
-    DnsKey, DnssecKeyQuery, DomainName, DsRecord, Email, Handle, HostingPeriod, Hostname,
+    DnsKey, DnssecKeyQuery, DomainName, DsRecord, Email, Error, Handle, HostingPeriod, Hostname,
     NameserverSetCreate, NameserverSetType, PostalDelivery, RefundRequest, StatementQuery,
-    TagUpdate, Timestamp, ZoneCreate, ZoneUpdate,
+    TagUpdate, Timestamp, ZoneCreate, ZoneUpdate, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
 };
 
 fn domain(name: &str) -> DomainName {
@@ -29,7 +29,10 @@ fn a_label_of_63_bytes_is_accepted_and_64_is_not() {
 
 #[test]
 fn a_name_of_253_bytes_is_accepted_and_254_is_not() {
-    // 253 characters: 63 + 1 + 63 + 1 + 63 + 1 + 61 = 253.
+    // 253 characters: 63 + 1 + 63 + 1 + 63 + 1 + 61 = 253. Every label is legal
+    // on its own, so only the total-name limit can decide the outcome here — a
+    // single overlong label would trip the 63-character check instead and prove
+    // nothing about the 253.
     let name = format!(
         "{}.{}.{}.{}",
         "a".repeat(63),
@@ -37,12 +40,35 @@ fn a_name_of_253_bytes_is_accepted_and_254_is_not() {
         "c".repeat(63),
         "d".repeat(61)
     );
-    assert_eq!(name.len(), 253);
-    assert!(DomainName::parse(&name).is_ok());
+    assert_eq!(name.len(), MAX_DOMAIN_LEN);
+    assert!(name.split('.').all(|label| label.len() <= MAX_LABEL_LEN));
+    assert_eq!(DomainName::parse(&name).unwrap().as_str(), name);
+    assert_eq!(Hostname::parse(&name).unwrap().as_str(), name);
 
+    // One byte more, added to a label that stays within 63 characters.
     let too_long = format!("{name}e");
-    assert_eq!(too_long.len(), 254);
-    assert!(DomainName::parse(&too_long).is_err());
+    assert_eq!(too_long.len(), MAX_DOMAIN_LEN + 1);
+    assert!(too_long
+        .split('.')
+        .all(|label| label.len() <= MAX_LABEL_LEN));
+    for (field, error) in [
+        ("domain", DomainName::parse(&too_long).unwrap_err()),
+        ("hostname", Hostname::parse(&too_long).unwrap_err()),
+    ] {
+        match error {
+            // It has to be the total that was blamed, not a label.
+            Error::Validation {
+                field: got_field,
+                message,
+            } => {
+                assert_eq!(got_field, field);
+                assert!(message.contains("at most 253"), "{message}");
+                assert!(message.contains("got 254"), "{message}");
+                assert!(!message.contains("label"), "{message}");
+            }
+            other => panic!("expected a validation error, got {other:?}"),
+        }
+    }
 }
 
 #[test]
