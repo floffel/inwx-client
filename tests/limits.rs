@@ -3,9 +3,10 @@
 
 use inwx_client::{
     parse_ip, AuthCode, CertificateId, CertificateOrder, CertificateTerm, CertificateUpdate,
-    DnsKey, DnssecKeyQuery, DomainName, DsRecord, Email, Handle, HostingPeriod, Hostname,
-    NameserverSetCreate, NameserverSetType, PostalDelivery, RefundRequest, StatementQuery,
-    TagUpdate, Timestamp, ZoneCreate, ZoneUpdate,
+    DnsKey, DnssecKeyQuery, DomainLogQuery, DomainName, DsRecord, Email, Handle, HostingPeriod,
+    Hostname, NameserverSetCreate, NameserverSetType, PostalDelivery, RefundRequest,
+    StatementQuery, TagUpdate, Timestamp, TldGroup, TldRules, ZoneCreate, ZoneUpdate,
+    MAX_PAGE_LIMIT,
 };
 
 fn domain(name: &str) -> DomainName {
@@ -337,4 +338,71 @@ fn ip_parsing_covers_both_families() {
     ] {
         assert!(parse_ip(bad).is_err(), "{bad:?}");
     }
+}
+
+// ------------------------------------------------------------- diagnostics --
+
+#[test]
+fn a_pagelimit_of_1000_is_accepted_and_1001_is_not() {
+    // Just inside the upper bound, and one below it.
+    assert!(DomainLogQuery::new(domain("example.com"))
+        .with_page(1, MAX_PAGE_LIMIT)
+        .is_ok());
+    assert!(DomainLogQuery::new(domain("example.com"))
+        .with_page(1, MAX_PAGE_LIMIT - 1)
+        .is_ok());
+    // Just outside it, and the smallest legal value at the other end.
+    assert!(DomainLogQuery::new(domain("example.com"))
+        .with_page(1, MAX_PAGE_LIMIT + 1)
+        .is_err());
+    assert!(DomainLogQuery::new(domain("example.com"))
+        .with_page(1, 1)
+        .is_ok());
+    assert!(DomainLogQuery::new(domain("example.com"))
+        .with_page(1, 0)
+        .is_err());
+}
+
+#[test]
+fn log_pages_start_at_one() {
+    assert!(DomainLogQuery::new(domain("example.com"))
+        .with_page(1, 10)
+        .is_ok());
+    // One below the first page number is refused; the first page itself is not.
+    assert!(DomainLogQuery::new(domain("example.com"))
+        .with_page(0, 10)
+        .is_err());
+}
+
+#[test]
+fn a_log_range_needs_one_second_of_span() {
+    let start = Timestamp::parse("2026-01-01T00:00:00").unwrap();
+    let one_second_on = Timestamp::parse("2026-01-01T00:00:01").unwrap();
+    // The smallest legal range, then the one just outside it (empty), then the
+    // inverted one.
+    assert!(DomainLogQuery::new(domain("example.com"))
+        .with_range(start.clone(), one_second_on.clone())
+        .is_ok());
+    // Empty (equal endpoints) and inverted are both refused.
+    assert!(DomainLogQuery::new(domain("example.com"))
+        .with_range(start.clone(), start.clone())
+        .is_err());
+    assert!(DomainLogQuery::new(domain("example.com"))
+        .with_range(one_second_on, start)
+        .is_err());
+}
+
+#[test]
+fn a_tld_group_counts_its_tlds_without_losing_the_empty_case() {
+    let one: TldGroup = serde_json::from_str(r#"{"tld":"de"}"#).unwrap();
+    assert_eq!(one.tld_count(), 1);
+    assert!(!one.is_empty());
+    let none: TldGroup = serde_json::from_str(r#"{"tldGroup":"empty","tld":[]}"#).unwrap();
+    assert_eq!(none.tld_count(), 0);
+    assert!(none.is_empty());
+
+    let rules: TldRules =
+        serde_json::from_str(r#"{"count":2,"rules":[{"name":"A","value":"1"}]}"#).unwrap();
+    assert_eq!(rules.len(), 1);
+    assert!(rules.has_more());
 }

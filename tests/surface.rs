@@ -4,7 +4,7 @@
 //! keeps line coverage honest — a setter nobody calls is a setter nobody has
 //! tested.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::TryFrom;
 use std::str::FromStr;
 
@@ -12,10 +12,11 @@ use inwx_client::{
     rpc::{self, Detail, RpcRequest, RpcResponse},
     transport::{Request, Response},
     AccountInfo, Contact, ContactQuery, ContactRequest, ContactType, ContactUpdate, Credentials,
-    DnsRecord, DomainCheck, DomainCreate, DomainInfo, DomainListPage, DomainListQuery, DomainName,
-    DomainPriceQuote, DomainRenew, DomainUpdate, Error, Hostname, InwxClient, Language,
-    NameserverCheck, Period, PriceList, PriceType, RecordId, RecordSpec, RecordType, RecordUpdate,
-    RenewalMode, RetryPolicy, TldPrice, ZoneInfo, ZoneListPage, ZoneSummary,
+    DnsRecord, DomainCheck, DomainCreate, DomainInfo, DomainListPage, DomainListQuery, DomainLog,
+    DomainLogEntry, DomainLogQuery, DomainName, DomainPriceQuote, DomainRenew, DomainRule,
+    DomainStat, DomainStats, DomainUpdate, Error, Hostname, InwxClient, Language, NameserverCheck,
+    Period, PriceList, PriceType, RecordId, RecordSpec, RecordType, RecordUpdate, RenewalMode,
+    RetryPolicy, TldGroup, TldGroupList, TldPrice, TldRules, ZoneInfo, ZoneListPage, ZoneSummary,
 };
 use serde_json::json;
 
@@ -592,4 +593,103 @@ fn response_payload_types_are_constructible_and_comparable() {
     let contact = Contact::default();
     assert!(contact.handle().is_none());
     assert!(AccountInfo::default().account_id.is_none());
+}
+
+#[test]
+fn diagnostics_payload_types_are_constructible_and_comparable() {
+    let query = DomainLogQuery::new(domain("example.com"));
+    assert_eq!(query.domain().as_str(), "example.com");
+    assert_eq!(query.params(), json!({"domain": "example.com"}));
+    let paged = query.clone().with_page(2, 10).unwrap();
+    assert_eq!(paged.params()["page"], 2);
+    assert_eq!(query, query.clone());
+
+    let entry = DomainLogEntry {
+        date: Some("2026-10-26 08:00:00".into()),
+        action: Some("create".into()),
+        text: Some("registered".into()),
+        user: Some("u".into()),
+        ip: Some("203.0.113.7".into()),
+        extra: BTreeMap::default(),
+    };
+    assert_eq!(
+        entry.occurred_at().map(|at| at.to_string()).as_deref(),
+        Some("2026-10-26T08:00:00")
+    );
+    let log = DomainLog {
+        count: Some(2),
+        entries: vec![entry.clone()],
+        extra: BTreeMap::default(),
+    };
+    assert_eq!(log.len(), 1);
+    assert!(!log.is_empty());
+    assert!(log.has_more());
+    assert_eq!(entry, entry.clone());
+
+    let stat = DomainStat {
+        name: Some("de".into()),
+        count: Some(12),
+        amount: Some(108.5),
+        text: Some("registered".into()),
+        extra: BTreeMap::default(),
+    };
+    let stats = DomainStats {
+        count: Some(3),
+        stats: vec![stat.clone()],
+        extra: BTreeMap::default(),
+    };
+    assert_eq!(stats.len(), 1);
+    assert!(stats.has_more());
+    assert!(stats.find("DE").is_some());
+    assert_eq!(stats.counter("de"), Some(12));
+    assert_eq!(stats.amount_for("de"), Some(108.5));
+    assert_eq!(stats.text_for("de"), Some("registered"));
+    assert_eq!(stat, stat.clone());
+
+    let rule = DomainRule {
+        name: Some("MIN-PERIOD".into()),
+        value: Some("12".into()),
+        description: Some("minimum".into()),
+        rule_type: Some("int".into()),
+        extra: BTreeMap::default(),
+    };
+    assert_eq!(rule.integer(), Some(12));
+    assert_eq!(rule.number(), Some(12.0));
+    assert!(rule.flag().is_none());
+    let rules = TldRules {
+        tld: Some("de".into()),
+        count: Some(2),
+        rules: vec![rule.clone()],
+        extra: BTreeMap::default(),
+    };
+    assert_eq!(rules.len(), 1);
+    assert!(rules.has_more());
+    assert!(rules.find("min-period").is_some());
+    assert_eq!(rules.value_for("MIN-PERIOD"), Some("12"));
+    assert_eq!(rules.integer_for("MIN-PERIOD"), Some(12));
+    assert_eq!(rule, rule.clone());
+
+    let group = TldGroup {
+        id: Some(1),
+        name: Some("ccTLDs".into()),
+        description: Some("country codes".into()),
+        tlds: vec!["de".into(), "at".into()],
+        extra: BTreeMap::default(),
+    };
+    assert_eq!(group.tld_count(), 2);
+    assert!(!group.is_empty());
+    assert!(group.contains(".de"));
+    let groups = TldGroupList {
+        count: Some(2),
+        groups: vec![group.clone()],
+        extra: BTreeMap::default(),
+    };
+    assert_eq!(groups.len(), 1);
+    assert!(groups.has_more());
+    assert!(groups.find("CCTLDS").is_some());
+    assert_eq!(group, group.clone());
+    assert!(DomainLog::default().is_empty());
+    assert!(DomainStats::default().is_empty());
+    assert!(TldRules::default().is_empty());
+    assert!(TldGroupList::default().is_empty());
 }
