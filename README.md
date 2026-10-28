@@ -158,6 +158,7 @@ documentation does not state:
 | `dyndnssubscription.cancel` id semantics | **unverified** — Table 2.161 types `id` as "the customer's subscription id", while `create` uses the same name for the plan id; the crate takes two separate parameters so the two cannot be confused. |
 | Every 0.2.0 write against a live endpoint | **unverified** — no credentials in CI; method names, parameters and datatypes come from the tables in `docs/contracts.md`. |
 | Unicode → punycode | UTS-46 mapping via `idna`, so emoji become punycode and characters the mapping deletes disappear. The ACE form (`DomainName::as_str`) is what is sent, logged and compared. |
+| DNS name validation | delegated to `idna` as well: UTS-46 ToASCII with the STD3 ASCII rules, the hyphen-position rule and `VerifyDNSLength` (63 characters per label, 253 in total). The only rule this crate adds on top is the INWX-specific one — a domain needs a dot, i.e. a TLD. |
 
 Two methods the predecessor implementation called do **not** exist in the
 documented API and were replaced: `domain.cancel` (use `domain.delete` or
@@ -192,6 +193,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --no-deps --all-features
 cargo llvm-cov --no-default-features --summary-only --fail-under-lines 95
 cargo +nightly fuzz run parse_response
+cargo +nightly fuzz run parse_name
 ```
 
 * **Unit** — permissive scalars, cookie collection, retry backoff, record and
@@ -205,20 +207,28 @@ cargo +nightly fuzz run parse_response
   Every 0.2.0 method has its own recording test asserting the method name and the
   exact parameters (`tests/zones.rs`, `tests/ownership.rs`, `tests/services.rs`,
   `tests/certificates.rs`); `tests/limits.rs` is the boundary matrix (63/64-byte
-  label, 253/254-byte name, empty label, TTL bounds, IDN form, per-type record
-  values, CSR size, auth-code and email shapes) and `tests/coverage.rs` calls the
-  `Display`/`FromStr`/serde impls and error branches that doctests exercise —
+  label, 253/254-byte name, empty label, hyphen edges, STD3 alphabet, TTL bounds,
+  IDN form, per-type record values, CSR size, auth-code and email shapes) and
+  `tests/coverage.rs` calls the `Display`/`FromStr`/serde impls and error
+  branches that doctests exercise —
   `cargo llvm-cov` does not count doctests.
 * **Property** (`proptest`) — builders and parsers never panic over arbitrary
   input; accepted enum values round-trip through `Display`/`FromStr`; accepted
   emails and timestamps round-trip; zone params survive a JSON round trip;
   `RecordSet` never accepts an apex CNAME; an `Irreversible` acknowledgement only
   builds the request whose action it names.
+  Accepted domain names and host names are canonical on the first pass, so
+  re-parsing them is a no-op.
 * **Coverage** — 98.6 % lines / 99.6 % functions without the `http` feature. CI
   gates at 95 %; the reqwest adapter is the only code that needs a socket.
 * **Fuzz** — `fuzz/fuzz_targets/parse_response.rs` feeds arbitrary bytes through
   the JSON-RPC parser and every typed decoder on `resData`; seeded with success,
   pending, error and hostile-shape bodies.
+  `fuzz/fuzz_targets/parse_name.rs` feeds arbitrary bytes through the name
+  parsers: nothing may panic, and every accepted name must already be canonical
+  (ASCII, lower-case, in length, no empty label, no edge hyphen) and survive a
+  second pass unchanged, with `DomainName` and `Hostname` agreeing wherever the
+  canonical form has a TLD.
 
 ## License
 
