@@ -12,9 +12,58 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use inwx_client::transport::{Request, Response, Transport};
-use inwx_client::{Error, InwxClient, Result};
+use inwx_client::transport::{ChunkSource, Request, Response, Transport};
+use inwx_client::{read_capped_body, Error, InwxClient, Result};
 use serde_json::{json, Value};
+
+/// Size of the pieces a scripted body is delivered in, so a capped mock crosses
+/// a cap the way a socket does: mid-stream, chunk by chunk. Public because a
+/// test that asserts how far a capped read got needs the piece size.
+pub const CHUNK_LEN: usize = 48;
+
+/// An in-memory [`ChunkSource`] over a scripted body.
+pub struct BufferChunks {
+    bytes: Vec<u8>,
+    position: usize,
+}
+
+impl BufferChunks {
+    /// Wraps `bytes`.
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes, position: 0 }
+    }
+}
+
+impl ChunkSource for BufferChunks {
+    type Chunk = Vec<u8>;
+
+    fn next_chunk(&mut self) -> impl std::future::Future<Output = Result<Option<Vec<u8>>>> {
+        let end = (self.position + CHUNK_LEN).min(self.bytes.len());
+        let chunk = if self.position < self.bytes.len() {
+            Some(self.bytes[self.position..end].to_vec())
+        } else {
+            None
+        };
+        self.position = end;
+        std::future::ready(Ok(chunk))
+    }
+}
+
+/// Runs a scripted body through the crate's own cap check, so a mock configured
+/// with [`MockTransport::with_max_response_bytes`] answers the way a capped
+/// transport does: an over-cap body is an error, and none of it is returned.
+async fn enforce_cap(response: &Response, limit: Option<u64>) -> Result<()> {
+    let Some(limit) = limit else {
+        return Ok(());
+    };
+    let declared = response
+        .header("content-length")
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    let mut source = BufferChunks::new(response.body().to_vec());
+    read_capped_body(&mut source, declared, limit)
+        .await
+        .map(drop)
+}
 
 /// One recorded call.
 #[derive(Clone, Debug)]
@@ -73,12 +122,22 @@ pub struct MockTransport {
 struct State {
     calls: Vec<Call>,
     queue: VecDeque<Reply>,
+    max_response_bytes: Option<u64>,
 }
 
 impl MockTransport {
     /// An empty transport.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Answers as a transport with a response cap does: a scripted body larger
+    /// than `max_response_bytes` comes back as [`Error::ResponseTooLarge`]
+    /// instead of as a response.
+    #[must_use]
+    pub fn with_max_response_bytes(self, max_response_bytes: u64) -> Self {
+        self.state.lock().unwrap().max_response_bytes = Some(max_response_bytes);
+        self
     }
 
     /// Queues a reply.
@@ -181,27 +240,34 @@ impl Transport for MockTransport {
             state.queue.pop_front()
         };
 
-        match reply {
-            Some(Reply::Body(body)) => Ok(json_response(&body)),
-            Some(Reply::Login { cookie }) => Ok(Response::new(
+        let response = match reply {
+            Some(Reply::Body(body)) => json_response(&body),
+            Some(Reply::Login { cookie }) => Response::new(
                 200,
                 [(
                     "Set-Cookie".to_owned(),
                     format!("{cookie}; Path=/; HttpOnly; Secure"),
                 )],
                 br#"{"code":1000,"msg":"Login successful","resData":{"accountId":61140}}"#.to_vec(),
-            )),
-            Some(Reply::Response(response)) => Ok(response),
-            Some(Reply::Failure { message, retryable }) => Err(if retryable {
-                Error::transport(message)
-            } else {
-                Error::Transport {
-                    message,
-                    retryable: false,
-                }
-            }),
-            None => Ok(json_response(r#"{"code":1000,"msg":"ok"}"#)),
-        }
+            ),
+            Some(Reply::Response(response)) => response,
+            Some(Reply::Failure { message, retryable }) => {
+                return Err(if retryable {
+                    Error::transport(message)
+                } else {
+                    Error::Transport {
+                        message,
+                        retryable: false,
+                    }
+                })
+            }
+            None => json_response(r#"{"code":1000,"msg":"ok"}"#),
+        };
+
+        // Copy the limit out first: no lock is held across the await.
+        let limit = self.state.lock().unwrap().max_response_bytes;
+        enforce_cap(&response, limit).await?;
+        Ok(response)
     }
 }
 
