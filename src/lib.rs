@@ -35,7 +35,7 @@
 //! | Area | Methods |
 //! | --- | --- |
 //! | Session | `account.login`, `account.logout`, `account.check`, `account.info` |
-//! | Domains | `check`, `create`, `info`, `list`, `update`, `renew`, `delete`, `whois` |
+//! | Domains | `check`, `create`, `info`, `list`, `update`, `renew`, `delete`, `whois`, `setClientHold`, `removeClientHold` |
 //! | Ownership | `domain.transfer`, `domain.trade`, `domain.push`, `domain.restore`, `domain.transfercancel`, `domain.transferOut` |
 //! | DNS records | `nameserver.info` (read), `createRecord`, `updateRecord`, `deleteRecord` |
 //! | Zones | `nameserver.create`, `nameserver.update`, `nameserver.delete`, `nameserver.list`, `nameserver.info`, `nameserver.check`, `nameserver.clone`, `nameserver.export`, `nameserver.exportlist`, `nameserver.exportrecords` |
@@ -142,8 +142,8 @@ pub use dnssec::{
     DnssecFlag, DnssecKey, DnssecKeyQuery, DnssecKeyStatus, DnssecState, DsRecord,
 };
 pub use domain::{
-    DomainCheck, DomainCreate, DomainInfo, DomainListPage, DomainListQuery, DomainRenew,
-    DomainUpdate, Registration, RenewalResult,
+    ClientHoldResult, DomainCheck, DomainCreate, DomainInfo, DomainListPage, DomainListQuery,
+    DomainRenew, DomainUpdate, Registration, RemoveClientHold, RenewalResult, SetClientHold,
 };
 pub use dyndns::{
     DynDnsAccount, DynDnsAccountInfo, DynDnsAccountRef, DynDnsCheck, DynDnsCreated, DynDnsLog,

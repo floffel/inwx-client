@@ -6,8 +6,11 @@
 
 #![no_main]
 
+use inwx_client::{
+    ClientHoldResult, Contact, DnsRecord, DomainCheck, DomainInfo, RecordType, RpcResponse,
+    ZoneInfo,
+};
 use libfuzzer_sys::fuzz_target;
-use inwx_client::{Contact, DnsRecord, DomainCheck, DomainInfo, RecordType, RpcResponse, ZoneInfo};
 
 fuzz_target!(|data: &[u8]| {
     // The framing layer: any byte string either parses or returns a Json error.
@@ -27,6 +30,7 @@ fuzz_target!(|data: &[u8]| {
         let _ = serde_json::from_value::<DomainInfo>(payload.clone());
         let _ = serde_json::from_value::<DomainCheck>(payload.clone());
         let _ = serde_json::from_value::<Contact>(payload.clone());
+        let _ = serde_json::from_value::<ClientHoldResult>(payload.clone());
         let _ = serde_json::from_value::<Vec<DnsRecord>>(payload.clone());
         // A `domain.check` answer may be a single object or an array.
         if let Some(entries) = payload.get("domain").and_then(|value| value.as_array()) {

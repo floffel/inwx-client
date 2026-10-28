@@ -4,7 +4,8 @@
 mod common;
 
 use inwx_client::{
-    DomainName, Hostname, Period, RecordId, RecordSpec, RecordType, RpcResponse, MAX_TTL,
+    DomainName, Hostname, Period, RecordId, RecordSpec, RecordType, RemoveClientHold, RpcResponse,
+    SetClientHold, MAX_TTL,
 };
 use proptest::prelude::*;
 use serde_json::Value;
@@ -465,5 +466,27 @@ proptest! {
             stage == TransportStage::AfterSend
         );
         prop_assert!(error.to_string().contains(&message));
+    }
+
+    /// Whatever the name and the flag, a clientHold request body is exactly
+    /// `{"domain": …, "testing": …}` with the name verbatim — no dropped flag,
+    /// no extra field, for any valid input.
+    #[test]
+    fn client_hold_params_are_exactly_two_fields(
+        label in "[a-z][a-z0-9]{0,10}",
+        tld in "[a-z]{2,6}",
+        testing in proptest::bool::ANY,
+    ) {
+        let name = DomainName::parse(&format!("{label}.{tld}")).unwrap();
+        let set = SetClientHold::new(name.clone());
+        let remove = RemoveClientHold::new(name.clone());
+        let set = if testing { set.dry_run() } else { set };
+        let remove = if testing { remove.dry_run() } else { remove };
+        for params in [set.params(), remove.params()] {
+            let object = params.as_object().unwrap();
+            prop_assert_eq!(object.len(), 2, "{}", params);
+            prop_assert_eq!(&object["domain"], &Value::String(name.as_str().to_owned()));
+            prop_assert_eq!(&object["testing"], &Value::Bool(testing));
+        }
     }
 }

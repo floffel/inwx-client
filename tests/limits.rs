@@ -4,8 +4,9 @@
 use inwx_client::{
     parse_ip, AuthCode, CertificateId, CertificateOrder, CertificateTerm, CertificateUpdate,
     DnsKey, DnssecKeyQuery, DomainName, DsRecord, Email, Error, Handle, HostingPeriod, Hostname,
-    NameserverSetCreate, NameserverSetType, PostalDelivery, RefundRequest, StatementQuery,
-    TagUpdate, Timestamp, ZoneCreate, ZoneUpdate, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
+    NameserverSetCreate, NameserverSetType, PostalDelivery, RefundRequest, RemoveClientHold,
+    SetClientHold, StatementQuery, TagUpdate, Timestamp, ZoneCreate, ZoneUpdate, MAX_DOMAIN_LEN,
+    MAX_LABEL_LEN,
 };
 
 fn domain(name: &str) -> DomainName {
@@ -67,6 +68,43 @@ fn a_name_of_253_bytes_is_accepted_and_254_is_not() {
                 too_long.len()
             )
         );
+    }
+}
+
+/// The clientHold pair takes `domain` as `token255`, and the builders only
+/// accept an already validated [`DomainName`] — so the boundary is the name
+/// type's, and a request can never carry an oversized or empty name to the wire.
+#[test]
+fn a_client_hold_request_carries_the_longest_name_and_refuses_longer_ones() {
+    let name = format!(
+        "{}.{}.{}.{}",
+        "a".repeat(63),
+        "b".repeat(63),
+        "c".repeat(63),
+        "d".repeat(61)
+    );
+    assert_eq!(name.len(), MAX_DOMAIN_LEN);
+
+    // Just inside the limit: the name survives into both parameter bodies
+    // byte for byte.
+    let held = DomainName::parse(&name).unwrap();
+    for params in [
+        SetClientHold::new(held.clone()).params(),
+        RemoveClientHold::new(held.clone()).params(),
+    ] {
+        assert_eq!(params["domain"], name);
+        assert_eq!(params.as_object().unwrap().len(), 2);
+    }
+
+    // Just outside it, and empty: no request object can be built at all.
+    let too_long = format!("{name}e");
+    assert_eq!(too_long.len(), MAX_DOMAIN_LEN + 1);
+    for bad in [&too_long, ""] {
+        let error = DomainName::parse(bad).unwrap_err();
+        let Error::Validation { field, .. } = error else {
+            panic!("expected a validation error, got {error}");
+        };
+        assert_eq!(field, "domain");
     }
 }
 

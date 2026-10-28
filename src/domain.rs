@@ -963,6 +963,230 @@ pub struct RenewalResult {
     pub currency: Option<String>,
 }
 
+/// The parameters shared by `domain.setClientHold` and `domain.removeClientHold`.
+///
+/// Both take the same two fields, so the body is built in one place and the two
+/// request types cannot drift apart.
+fn client_hold_params(domain: &DomainName, testing: bool) -> Value {
+    let mut params = Map::new();
+    params.insert("domain".to_owned(), json!(domain));
+    params.insert("testing".to_owned(), json!(testing));
+    Value::Object(params)
+}
+
+/// Parses a clientHold answer, tolerating the empty `resData` INWX sends for a
+/// command that changed nothing measurable.
+fn parse_client_hold(data: Value) -> Result<ClientHoldResult> {
+    if data.is_null() {
+        return Ok(ClientHoldResult::default());
+    }
+    serde_json::from_value(data).map_err(Error::from)
+}
+
+/// A request to park a domain at the registry (`domain.setClientHold`).
+///
+/// `clientHold` is the ICANN status that pulls a domain out of the registry
+/// zone: it stops resolving, and it blocks most registry operations until
+/// [`RemoveClientHold`] lifts it again. Only the name is needed; the hold itself
+/// carries no parameters.
+///
+/// The command is idempotent in effect — holding a held domain is not an
+/// error — but it is still a mutation, so the client never replays it after an
+/// uncertain transport failure (see [`set_client_hold`](InwxClient::set_client_hold)).
+///
+/// ```
+/// use inwx_client::{DomainName, SetClientHold};
+///
+/// let request = SetClientHold::new(DomainName::parse("example.com")?);
+/// let params = request.params();
+/// assert_eq!(params["domain"], "example.com");
+/// assert_eq!(params["testing"], false);
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetClientHold {
+    domain: DomainName,
+    testing: bool,
+}
+
+impl SetClientHold {
+    /// A hold request for `domain`, sent for real unless [`Self::dry_run`] is
+    /// added.
+    ///
+    /// ```
+    /// use inwx_client::{DomainName, SetClientHold};
+    ///
+    /// let request = SetClientHold::new(DomainName::parse("example.com")?);
+    /// assert_eq!(request.domain().as_str(), "example.com");
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn new(domain: DomainName) -> Self {
+        Self {
+            domain,
+            testing: false,
+        }
+    }
+
+    /// The domain the hold applies to.
+    ///
+    /// ```
+    /// use inwx_client::{DomainName, SetClientHold};
+    ///
+    /// let request = SetClientHold::new(DomainName::parse("a.de")?);
+    /// assert_eq!(request.domain(), &DomainName::parse("a.de")?);
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn domain(&self) -> &DomainName {
+        &self.domain
+    }
+
+    /// Runs the command in testing mode (`testing=true`): the API validates but
+    /// holds nothing.
+    ///
+    /// ```
+    /// use inwx_client::{DomainName, SetClientHold};
+    ///
+    /// let request = SetClientHold::new(DomainName::parse("a.de")?).dry_run();
+    /// assert_eq!(request.params()["testing"], true);
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn dry_run(mut self) -> Self {
+        self.testing = true;
+        self
+    }
+
+    /// The `domain.setClientHold` parameters: `domain` plus the explicit
+    /// `testing` flag.
+    ///
+    /// ```
+    /// use inwx_client::{DomainName, SetClientHold};
+    ///
+    /// let params = SetClientHold::new(DomainName::parse("a.de")?).params();
+    /// assert_eq!(params["domain"], "a.de");
+    /// assert_eq!(params["testing"], false);
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn params(&self) -> Value {
+        client_hold_params(&self.domain, self.testing)
+    }
+}
+
+/// A request to lift a registry hold (`domain.removeClientHold`).
+///
+/// INWX documents that removal only succeeds when the hold was set by the same
+/// account — a hold placed by another registrar or by INWX support has to go
+/// through that party, and the API rejects the command otherwise.
+///
+/// ```
+/// use inwx_client::{DomainName, RemoveClientHold};
+///
+/// let request = RemoveClientHold::new(DomainName::parse("example.com")?).dry_run();
+/// let params = request.params();
+/// assert_eq!(params["domain"], "example.com");
+/// assert_eq!(params["testing"], true);
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoveClientHold {
+    domain: DomainName,
+    testing: bool,
+}
+
+impl RemoveClientHold {
+    /// A release request for `domain`, sent for real unless [`Self::dry_run`]
+    /// is added.
+    ///
+    /// ```
+    /// use inwx_client::{DomainName, RemoveClientHold};
+    ///
+    /// let request = RemoveClientHold::new(DomainName::parse("example.com")?);
+    /// assert_eq!(request.domain().as_str(), "example.com");
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn new(domain: DomainName) -> Self {
+        Self {
+            domain,
+            testing: false,
+        }
+    }
+
+    /// The domain the release applies to.
+    ///
+    /// ```
+    /// use inwx_client::{DomainName, RemoveClientHold};
+    ///
+    /// let request = RemoveClientHold::new(DomainName::parse("a.de")?);
+    /// assert_eq!(request.domain(), &DomainName::parse("a.de")?);
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn domain(&self) -> &DomainName {
+        &self.domain
+    }
+
+    /// Runs the command in testing mode (`testing=true`): the API validates but
+    /// releases nothing.
+    ///
+    /// ```
+    /// use inwx_client::{DomainName, RemoveClientHold};
+    ///
+    /// let request = RemoveClientHold::new(DomainName::parse("a.de")?).dry_run();
+    /// assert_eq!(request.params()["testing"], true);
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn dry_run(mut self) -> Self {
+        self.testing = true;
+        self
+    }
+
+    /// The `domain.removeClientHold` parameters: `domain` plus the explicit
+    /// `testing` flag.
+    ///
+    /// ```
+    /// use inwx_client::{DomainName, RemoveClientHold};
+    ///
+    /// let params = RemoveClientHold::new(DomainName::parse("a.de")?).params();
+    /// assert_eq!(params["domain"], "a.de");
+    /// assert_eq!(params["testing"], false);
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn params(&self) -> Value {
+        client_hold_params(&self.domain, self.testing)
+    }
+}
+
+/// What a `domain.setClientHold` / `domain.removeClientHold` call reports.
+///
+/// The documented answer is the repository object id of the domain. It is
+/// optional here because a no-op answer can carry an empty `resData`, and it is
+/// read permissively because INWX also sends ids as strings.
+///
+/// ```
+/// use inwx_client::ClientHoldResult;
+///
+/// let held: ClientHoldResult = serde_json::from_str(r#"{"roId":42,"brandNew":"field"}"#)?;
+/// assert_eq!(held.ro_id, Some(42));
+///
+/// // The same id as a string, and an answer that carries nothing at all.
+/// let stringy: ClientHoldResult = serde_json::from_str(r#"{"roId":"42"}"#)?;
+/// assert_eq!(stringy, held);
+/// assert_eq!(ClientHoldResult::default().ro_id, None);
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct ClientHoldResult {
+    /// Repository object id of the domain, when the API reports it.
+    #[serde(default, rename = "roId", deserialize_with = "de::opt_i64")]
+    pub ro_id: Option<i64>,
+}
+
 impl<T: Transport> InwxClient<T> {
     /// Checks one or more domains for availability (`domain.check`).
     ///
@@ -1240,6 +1464,76 @@ impl<T: Transport> InwxClient<T> {
             .await
     }
 
+    /// Puts the domain on registry hold (`domain.setClientHold`).
+    ///
+    /// The registry removes the domain from its zone, so it stops resolving and
+    /// most registry operations are blocked until
+    /// [`remove_client_hold`](Self::remove_client_hold) lifts the hold. `testing`
+    /// is off unless the request opts in with
+    /// [`SetClientHold::dry_run`], which validates without touching the domain.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use inwx_client::{DomainName, InwxClient, ReqwestTransport, SetClientHold};
+    ///
+    /// let client = InwxClient::new(ReqwestTransport::new())
+    ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
+    /// let held = client
+    ///     .set_client_hold(&SetClientHold::new(DomainName::parse("example.com")?))
+    ///     .await?;
+    /// println!("roId {:?}", held.ro_id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Never retried automatically: this is a mutating command, so an
+    /// [`Error::Uncertain`] transport failure (timeout, reset mid-response) is
+    /// handed back with exactly one attempt made, because the hold may already
+    /// be set. Check the current state with [`Self::domain_info`] before
+    /// retrying. On top of that, the usual transport, API and JSON errors —
+    /// `2303` when the domain is not in this account.
+    pub async fn set_client_hold(&self, request: &SetClientHold) -> Result<ClientHoldResult> {
+        let data = self.call("domain.setClientHold", request.params()).await?;
+        parse_client_hold(data)
+    }
+
+    /// Lifts a registry hold set by this account (`domain.removeClientHold`).
+    ///
+    /// INWX documents that removal only succeeds when the same account set the
+    /// hold; a hold placed by another registrar or by INWX support has to be
+    /// released by that party, and the API rejects the command otherwise.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use inwx_client::{DomainName, InwxClient, RemoveClientHold, ReqwestTransport};
+    ///
+    /// let client = InwxClient::new(ReqwestTransport::new())
+    ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
+    /// let released = client
+    ///     .remove_client_hold(&RemoveClientHold::new(DomainName::parse("example.com")?))
+    ///     .await?;
+    /// println!("roId {:?}", released.ro_id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Same policy as [`Self::set_client_hold`]: a mutating command is never
+    /// replayed, so [`Error::Uncertain`] comes back after a single attempt and
+    /// [`Self::domain_info`] decides whether the hold is already gone. Plus the
+    /// usual transport, API and JSON errors.
+    pub async fn remove_client_hold(&self, request: &RemoveClientHold) -> Result<ClientHoldResult> {
+        let data = self
+            .call("domain.removeClientHold", request.params())
+            .await?;
+        parse_client_hold(data)
+    }
+
     /// Reads the authorization code (`domain.info` with `wide=1`).
     ///
     /// ```no_run
@@ -1388,5 +1682,91 @@ mod tests {
             serde_json::from_str(r#"{"roId":"42","price":"8.90"}"#).unwrap();
         assert_eq!(registration.ro_id, 42);
         assert_eq!(registration.price, Some(8.9));
+    }
+
+    #[test]
+    fn client_hold_requests_always_carry_both_fields() {
+        let domain = DomainName::parse("a.de").unwrap();
+        for params in [
+            SetClientHold::new(domain.clone()).params(),
+            RemoveClientHold::new(domain.clone()).params(),
+        ] {
+            let object = params.as_object().unwrap();
+            assert_eq!(object.len(), 2, "{params}");
+            assert_eq!(object["domain"], json!("a.de"));
+            assert_eq!(object["testing"], json!(false));
+        }
+
+        // `testing` is sent explicitly even when it equals the API default, so
+        // a production call can never silently become a dry run (or the reverse)
+        // because the server default changed.
+        assert!(SetClientHold::new(domain).params().get("testing").is_some());
+    }
+
+    #[test]
+    fn dry_run_flips_only_the_testing_flag() {
+        let domain = DomainName::parse("a.de").unwrap();
+        // The two request types are deliberately distinct, so each pair is
+        // checked on its own.
+        let set = SetClientHold::new(domain.clone());
+        let set_dry = set.clone().dry_run();
+        assert_eq!(set.domain(), set_dry.domain());
+        assert_eq!(set.params()["domain"], set_dry.params()["domain"]);
+        assert_eq!(set.params()["testing"], json!(false));
+        assert_eq!(set_dry.params()["testing"], json!(true));
+        assert_ne!(set, set_dry);
+
+        let remove = RemoveClientHold::new(domain.clone());
+        let remove_dry = remove.clone().dry_run();
+        assert_eq!(remove.domain(), remove_dry.domain());
+        assert_eq!(remove.params()["domain"], remove_dry.params()["domain"]);
+        assert_eq!(remove.params()["testing"], json!(false));
+        assert_eq!(remove_dry.params()["testing"], json!(true));
+        assert_ne!(remove, remove_dry);
+
+        // Both methods send the same shape, so they cannot drift apart.
+        assert_eq!(set.params(), remove.params());
+    }
+
+    #[test]
+    fn client_hold_result_is_permissive() {
+        let numeric: ClientHoldResult =
+            serde_json::from_str(r#"{"roId":42,"brandNewField":[1,2]}"#).unwrap();
+        assert_eq!(numeric.ro_id, Some(42));
+
+        let stringy: ClientHoldResult = serde_json::from_str(r#"{"roId":" 42 "}"#).unwrap();
+        assert_eq!(stringy, numeric);
+
+        // Missing, null and unusable values all decode as "no id reported"
+        // rather than failing a command the registry already carried out.
+        for body in [
+            r"{}",
+            r#"{"roId":null}"#,
+            r#"{"roId":true}"#,
+            r#"{"roId":{"nested":1}}"#,
+            r#"{"roId":"not-a-number"}"#,
+        ] {
+            let parsed: ClientHoldResult = serde_json::from_str(body).unwrap();
+            assert_eq!(parsed.ro_id, None, "{body}");
+        }
+        assert_eq!(
+            ClientHoldResult::default(),
+            ClientHoldResult { ro_id: None }
+        );
+    }
+
+    #[test]
+    fn an_empty_client_hold_answer_is_the_default_result() {
+        assert_eq!(
+            parse_client_hold(Value::Null).unwrap(),
+            ClientHoldResult::default()
+        );
+        assert_eq!(
+            parse_client_hold(json!({"roId": "42", "extra": true})).unwrap(),
+            ClientHoldResult { ro_id: Some(42) }
+        );
+        // Something that is not an object at all is a decoding error, not a
+        // silently empty result.
+        assert!(parse_client_hold(json!("nope")).is_err());
     }
 }
