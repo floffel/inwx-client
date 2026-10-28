@@ -107,6 +107,12 @@ Every method below is implemented against the published INWX API documentation
   only for failures that happened *before* the request was written (DNS, connect,
   TLS), HTTP 429/5xx and result code `2300` (object pending transfer). A rejected
   command is never repeated.
+* **`is_retryable` classifies, it does not retry.** `Error::Http` reports `429`,
+  `502`, `503` and `504` as retryable and every other status (`400`, `401`, `403`,
+  `404`, `500`, …) as terminal, so callers keying their own backoff off the error
+  do not give up on a gateway hiccup. Whether a mutating command is actually
+  replayed stays with the idempotency rules above and
+  [issue #2](https://github.com/floffel/inwx-client/issues/2).
 * **Uncertain is not retried.** A timeout or a reset after the request was
   written is `Error::Uncertain`: the API may already have run the command. It is
   replayed only for a read-only method (`is_read_only_method`), never for a
