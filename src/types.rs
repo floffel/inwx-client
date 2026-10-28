@@ -1362,9 +1362,31 @@ mod tests {
     }
 
     #[test]
+    fn domain_label_length_boundary_is_proven() {
+        // The documented maximum is 63 characters, so a 63-character label must
+        // be accepted and a 64-character one rejected. Both sides are checked
+        // against the literal numbers, not against `MAX_LABEL_LEN`, so an
+        // off-by-one in either the constant or the check fails here.
+        assert_eq!(MAX_LABEL_LEN, 63);
+
+        let label_63 = "a".repeat(63);
+        let ok = format!("{label_63}.com");
+        assert_eq!(label_63.len(), 63);
+        assert_eq!(DomainName::parse(&ok).unwrap().as_str(), ok);
+        assert_eq!(Hostname::parse(&label_63).unwrap().as_str(), label_63);
+        // The limit is per label, so a nested label gets the same treatment.
+        let nested_ok = format!("www.{ok}");
+        assert_eq!(DomainName::parse(&nested_ok).unwrap().as_str(), nested_ok);
+
+        let label_64 = "a".repeat(64);
+        assert_eq!(label_64.len(), 64);
+        assert!(DomainName::parse(&format!("{label_64}.com")).is_err());
+        assert!(Hostname::parse(&label_64).is_err());
+        assert!(DomainName::parse(&format!("www.{label_64}.com")).is_err());
+    }
+
+    #[test]
     fn domain_rejects_overlong_names() {
-        let long_label = "a".repeat(64);
-        assert!(DomainName::parse(&format!("{long_label}.com")).is_err());
         let long_name = format!("{}.com", "a".repeat(250));
         assert!(DomainName::parse(&long_name).is_err());
     }
