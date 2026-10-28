@@ -58,6 +58,11 @@ pub enum Reply {
         /// Whether a retry could help.
         retryable: bool,
     },
+    /// The request was written and the answer never arrived.
+    Uncertain {
+        /// Message for [`Error::Uncertain`].
+        message: String,
+    },
 }
 
 /// Records calls and replays scripted replies.
@@ -140,6 +145,13 @@ impl MockTransport {
         });
     }
 
+    /// Queues a failure that happened after the request was written.
+    pub fn uncertain_failure(&self, message: &str) {
+        self.push(Reply::Uncertain {
+            message: message.to_owned(),
+        });
+    }
+
     /// Every recorded call.
     pub fn calls(&self) -> Vec<Call> {
         self.state.lock().unwrap().calls.clone()
@@ -200,6 +212,7 @@ impl Transport for MockTransport {
                     retryable: false,
                 }
             }),
+            Some(Reply::Uncertain { message }) => Err(Error::uncertain(message)),
             None => Ok(json_response(r#"{"code":1000,"msg":"ok"}"#)),
         }
     }

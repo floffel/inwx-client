@@ -9,8 +9,9 @@ use std::convert::TryFrom;
 use std::str::FromStr;
 
 use inwx_client::{
+    is_read_only_method,
     rpc::{self, Detail, RpcRequest, RpcResponse},
-    transport::{Request, Response},
+    transport::{Request, Response, TransportStage},
     AccountInfo, Contact, ContactQuery, ContactRequest, ContactType, ContactUpdate, Credentials,
     DnsRecord, DomainCheck, DomainCreate, DomainInfo, DomainListPage, DomainListQuery, DomainName,
     DomainPriceQuote, DomainRenew, DomainUpdate, Error, Hostname, InwxClient, Language,
@@ -468,6 +469,43 @@ fn error_helpers_cover_every_branch() {
         retryable: false,
     };
     assert!(!transport.is_retryable());
+    assert!(!transport.is_uncertain());
+
+    let uncertain = Error::Uncertain {
+        message: "timeout waiting for response".into(),
+    };
+    assert!(uncertain.is_uncertain());
+    assert!(!uncertain.is_retryable());
+    assert!(uncertain.to_string().contains("may have been executed"));
+    assert_eq!(uncertain.code(), None);
+
+    // The stage is what picks the variant, and the variant is what picks the retry.
+    for stage in [
+        TransportStage::BeforeSend,
+        TransportStage::AfterSend,
+        TransportStage::Local,
+    ] {
+        let built = Error::transport_at(stage, "boom");
+        assert_eq!(built.is_retryable(), stage.is_safe_to_retry());
+        assert_eq!(built.is_uncertain(), stage == TransportStage::AfterSend);
+        assert_eq!(
+            Error::transport_at(stage, String::from("boom")).to_string(),
+            built.to_string(),
+            "str and String must build the same error"
+        );
+    }
+    // Derived `Ord` follows the declaration order: never sent, then sent, then
+    // never built.
+    assert!(TransportStage::BeforeSend < TransportStage::AfterSend);
+    assert!(TransportStage::AfterSend < TransportStage::Local);
+    assert_eq!(format!("{:?}", TransportStage::Local), "Local");
+
+    // Unknown methods count as mutating; known ones match case- and space-insensitively.
+    assert!(is_read_only_method("domain.info"));
+    assert!(is_read_only_method("\tDOMAIN.LIST\n"));
+    assert!(!is_read_only_method("domain.create"));
+    assert!(!is_read_only_method(""));
+    assert!(!is_read_only_method("   "));
 
     let missing = Error::MissingField {
         method: "domain.info",

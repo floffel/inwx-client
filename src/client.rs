@@ -163,9 +163,15 @@ impl fmt::Debug for Credentials {
 /// How many times a retryable failure is retried, and how long to wait.
 ///
 /// Backoff is exponential from [`DEFAULT_BASE_DELAY`] and clamped to
-/// [`DEFAULT_MAX_DELAY`]. Only transport failures, HTTP 429/5xx and API code
-/// `2300` (object pending transfer) are retried; everything else is terminal —
-/// retrying a rejected command would just duplicate the rejection.
+/// [`DEFAULT_MAX_DELAY`]. Only failures that happened before the request was
+/// written, HTTP 429/5xx and API code `2300` (object pending transfer) are
+/// retried; everything else is terminal — retrying a rejected command would
+/// just duplicate the rejection.
+///
+/// An [`Error::Uncertain`] (a timeout, a reset mid-response) is out of reach
+/// here: the command may already have run, so it is replayed only for a
+/// read-only method, never for a mutating one. See
+/// [`is_read_only_method`].
 ///
 /// ```
 /// use std::time::Duration;
@@ -774,10 +780,16 @@ impl<T: Transport> InwxClient<T> {
     /// # }
     /// ```
     ///
+    /// Retries follow [`RetryPolicy`], with one extra rule: an
+    /// [`Error::Uncertain`] — the request was written and the answer never
+    /// arrived — is replayed only when [`is_read_only_method`] says the command
+    /// cannot have side effects. For a mutating method the error is returned
+    /// as-is, because a second attempt could register twice.
+    ///
     /// # Errors
     ///
     /// [`Error::NotAuthenticated`], [`Error::Api`], [`Error::Transport`],
-    /// [`Error::Json`] or [`Error::Http`].
+    /// [`Error::Uncertain`], [`Error::Json`] or [`Error::Http`].
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
         if !is_public_method(method) {
             self.ensure_session().await?;
@@ -837,7 +849,7 @@ impl<T: Transport> InwxClient<T> {
                         }),
                     };
                 }
-                Err(error) if error.is_retryable() => {
+                Err(error) if replay_allowed(&error, method) => {
                     if let Some(delay) = self.policy.delay(attempt) {
                         sleep_for(delay).await;
                         attempt += 1;
@@ -892,6 +904,102 @@ impl<T: Transport> InwxClient<T> {
                 .entry("lang".to_owned())
                 .or_insert_with(|| Value::String(language.as_str().to_owned()));
         }
+    }
+}
+
+/// Methods that only read: calling one twice cannot charge, create or delete
+/// anything.
+///
+/// Kept sorted and lowercase; [`is_read_only_method`] compares after trimming
+/// and ASCII folding. Everything that is not in here counts as mutating, which
+/// is the safe direction — an omission costs a missing retry, never a
+/// duplicated registration.
+const READ_ONLY_METHODS: &[&str] = &[
+    "account.check",
+    "account.info",
+    "accounting.accountbalance",
+    "accounting.creditlogbyid",
+    "accounting.getinvoice",
+    "accounting.getpreviewinvoice",
+    "accounting.getreceipt",
+    "accounting.getstatement",
+    "accounting.listinvoices",
+    "accounting.lockedfunds",
+    "accounting.log",
+    "certificate.getproduct",
+    "certificate.info",
+    "certificate.list",
+    "certificate.listproducts",
+    "certificate.listremainingneededdata",
+    "certificate.log",
+    "contact.info",
+    "contact.list",
+    "dnssec.info",
+    "dnssec.listkeys",
+    "domain.check",
+    "domain.getdomainprice",
+    "domain.getprices",
+    "domain.info",
+    "domain.list",
+    "domain.whois",
+    "dyndns.check",
+    "dyndns.info",
+    "dyndns.list",
+    "dyndns.log",
+    "dyndnssubscription.list",
+    "dyndnssubscription.listproducts",
+    "hosting.controlpanel",
+    "hosting.getprices",
+    "hosting.issuspended",
+    "hosting.list",
+    "nameserver.check",
+    "nameserver.export",
+    "nameserver.exportlist",
+    "nameserver.exportrecords",
+    "nameserver.info",
+    "nameserver.list",
+    "nameserverset.info",
+    "nameserverset.list",
+    "tag.info",
+    "tag.list",
+];
+
+/// Whether a method only reads, so replaying it after an
+/// [`Error::Uncertain`] cannot duplicate a mutation.
+///
+/// The comparison trims surrounding whitespace and folds ASCII case; the match
+/// itself is exact, so `domain.infos` is not `domain.info`. Everything unknown
+/// counts as mutating, including any method reached through
+/// [`InwxClient::call`] that this table does not cover — fail closed.
+///
+/// ```
+/// use inwx_client::is_read_only_method;
+///
+/// assert!(is_read_only_method("domain.info"));
+/// assert!(is_read_only_method("  DOMAIN.LIST  "));
+/// assert!(!is_read_only_method("domain.create"));
+/// // One character short of a known method is still unknown.
+/// assert!(!is_read_only_method("domain.inf"));
+/// ```
+#[must_use]
+pub fn is_read_only_method(method: &str) -> bool {
+    let trimmed = method.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let folded = trimmed.to_ascii_lowercase();
+    READ_ONLY_METHODS.binary_search(&folded.as_str()).is_ok()
+}
+
+/// Whether `error` may be answered with another attempt of `method`.
+///
+/// Everything known to happen before the request was written is retried as
+/// before. An [`Error::Uncertain`] happened afterwards, so it is only replayed
+/// when the command cannot have side effects.
+fn replay_allowed(error: &Error, method: &str) -> bool {
+    match error {
+        Error::Uncertain { .. } => is_read_only_method(method),
+        other => other.is_retryable(),
     }
 }
 
@@ -966,6 +1074,7 @@ impl<T> fmt::Debug for InwxClient<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::TransportStage;
 
     #[test]
     fn credentials_debug_redacts_password() {
@@ -1033,5 +1142,65 @@ mod tests {
     fn public_methods_need_no_session() {
         assert!(is_public_method("account.login"));
         assert!(!is_public_method("domain.list"));
+    }
+
+    #[test]
+    fn read_only_table_is_sorted_and_unique() {
+        // `is_read_only_method` binary-searches, which is only correct while
+        // the table is sorted and free of duplicates.
+        assert!(
+            READ_ONLY_METHODS.contains(&"domain.info"),
+            "the table must not be empty"
+        );
+        for pair in READ_ONLY_METHODS.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "out of order or duplicated: {:?} .. {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        for method in READ_ONLY_METHODS {
+            assert!(method.contains('.'), "{method} is not namespaced");
+            assert_eq!(*method, method.to_ascii_lowercase(), "{method}");
+        }
+    }
+
+    #[test]
+    fn read_only_lookup_sits_on_the_boundary() {
+        // In the table, just outside it by one character, and one character
+        // short of it.
+        assert!(is_read_only_method("domain.info"));
+        assert!(!is_read_only_method("domain.infos"));
+        assert!(is_read_only_method("tag.list"));
+        assert!(!is_read_only_method("tag.listx"));
+        assert!(!is_read_only_method("domain.inf"));
+        assert!(!is_read_only_method("tag.update"));
+        assert!(!is_read_only_method("domain.create"));
+
+        // Case and padding are folded away; a bare namespace is not a method.
+        assert!(is_read_only_method("  DOMAIN.INFO\t"));
+        assert!(!is_read_only_method(""));
+        assert!(!is_read_only_method("   "));
+        assert!(!is_read_only_method("list"));
+    }
+
+    #[test]
+    fn only_uncertain_failures_depends_on_the_method() {
+        let uncertain = Error::uncertain("timeout");
+        assert!(replay_allowed(&uncertain, "domain.info"));
+        assert!(!replay_allowed(&uncertain, "domain.create"));
+        assert!(!replay_allowed(&uncertain, "some.future.method"));
+
+        // Everything before the request was written is replayed regardless.
+        let connect = Error::transport_at(TransportStage::BeforeSend, "dns");
+        assert!(replay_allowed(&connect, "domain.create"));
+        let local = Error::transport_at(TransportStage::Local, "bad url");
+        assert!(!replay_allowed(&local, "domain.info"));
+
+        assert!(!replay_allowed(
+            &Error::validation("domain", "empty"),
+            "domain.info"
+        ));
     }
 }

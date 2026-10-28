@@ -287,6 +287,94 @@ async fn transport_failures_are_retried_and_terminal_ones_are_not() {
     assert_eq!(transport.call_count(), 1);
 }
 
+/// A timeout after `domain.create` may already have registered the domain, so
+/// the client must hand the ambiguity back instead of registering twice.
+#[tokio::test]
+async fn an_uncertain_failure_is_not_retried_for_a_mutating_command() {
+    let transport = MockTransport::new();
+    transport.uncertain_failure("timeout waiting for response");
+    transport.ok_empty();
+
+    let client = client(transport.clone());
+    let error = client
+        .call("domain.create", json!({"domain": "example.com"}))
+        .await
+        .unwrap_err();
+
+    assert!(error.is_uncertain());
+    assert!(!error.is_retryable());
+    assert!(error.to_string().contains("may have been executed"));
+    assert_eq!(transport.call_count(), 1);
+}
+
+/// The same failure on a command that only reads cannot duplicate anything, so
+/// the retry is free and worth taking.
+#[tokio::test]
+async fn an_uncertain_failure_is_retried_for_a_read_only_command() {
+    let transport = MockTransport::new();
+    transport.uncertain_failure("timeout waiting for response");
+    transport.ok(json!({"domain": []}));
+
+    let client = client(transport.clone());
+    client
+        .list_domains(&DomainListQuery::default())
+        .await
+        .unwrap();
+
+    assert_eq!(transport.call_count(), 2);
+}
+
+/// Replaying a read-only command still stops at the policy limit.
+#[tokio::test]
+async fn an_uncertain_read_only_failure_stops_at_the_policy_limit() {
+    let transport = MockTransport::new();
+    transport.uncertain_failure("timeout 1");
+    transport.uncertain_failure("timeout 2");
+    transport.uncertain_failure("timeout 3");
+
+    let client = client(transport.clone());
+    let error = client
+        .list_domains(&DomainListQuery::default())
+        .await
+        .unwrap_err();
+
+    assert!(error.is_uncertain());
+    assert_eq!(transport.call_count(), 3);
+}
+
+/// Just inside the read-only table is replayed; one character outside is not.
+#[tokio::test]
+async fn the_read_only_boundary_decides_the_replay() {
+    for (method, attempts) in [("domain.info", 2usize), ("domain.inf", 1)] {
+        let transport = MockTransport::new();
+        transport.uncertain_failure("timeout waiting for response");
+        transport.ok(json!({"domain": []}));
+
+        let client = client(transport.clone());
+        let _ = client.call(method, json!({})).await;
+
+        assert_eq!(transport.call_count(), attempts, "method `{method}`");
+    }
+}
+
+/// A failure before the request bytes were written cannot have reached the API,
+/// so even a mutation is replayed.
+#[tokio::test]
+async fn a_failure_before_the_request_was_written_is_retried_even_for_a_mutation() {
+    let transport = MockTransport::new();
+    transport.transport_failure("dns lookup failed");
+    transport.transport_failure("connect error");
+    transport.ok_empty();
+
+    let client = client(transport.clone());
+    client
+        .call("domain.create", json!({"domain": "example.com"}))
+        .await
+        .unwrap();
+
+    assert_eq!(transport.call_count(), 3);
+}
+
 #[tokio::test]
 async fn an_api_error_is_terminal() {
     let transport = MockTransport::new();

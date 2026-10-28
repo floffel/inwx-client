@@ -186,15 +186,54 @@ proptest! {
 use std::str::FromStr;
 
 use inwx_client::{
-    parse_ip, ActionKind, AuthCode, CertificateOrder, CertificateTerm, DnsKey, DnssecAlgorithm,
-    DnssecDigestType, DnssecDomainStatus, DnssecFlag, DnssecKeyQuery, DnssecKeyStatus,
-    DocumentFormat, Email, Handle, HostingPeriod, Irreversible, NameserverSetType, RecordSet,
-    Timestamp, TransferAnswer, UrlRedirectType, ZoneCreate, ZoneType,
+    is_read_only_method, parse_ip, ActionKind, AuthCode, CertificateOrder, CertificateTerm, DnsKey,
+    DnssecAlgorithm, DnssecDigestType, DnssecDomainStatus, DnssecFlag, DnssecKeyQuery,
+    DnssecKeyStatus, DocumentFormat, Email, Error, Handle, HostingPeriod, Irreversible,
+    NameserverSetType, RecordSet, Timestamp, TransferAnswer, TransportStage, UrlRedirectType,
+    ZoneCreate, ZoneType,
 };
 
 /// Arbitrary text for parsers that must never panic.
 fn arbitrary() -> impl Strategy<Value = String> {
     "\\PC{0,60}"
+}
+
+/// A plausible `namespace.action` method name.
+fn method_name() -> impl Strategy<Value = String> {
+    "[a-z]{1,12}\\.[a-z]{1,12}"
+}
+
+/// Names that really are in the read-only table — the "just inside" side of the
+/// lookup, as opposed to a name that merely looks plausible.
+fn known_read_only() -> impl Strategy<Value = String> {
+    prop_oneof![
+        Just(String::from("account.info")),
+        Just(String::from("contact.info")),
+        Just(String::from("domain.info")),
+        Just(String::from("domain.list")),
+        Just(String::from("nameserver.list")),
+        Just(String::from("tag.info")),
+    ]
+}
+
+/// A known method minus its last character — the "just outside" side. None of
+/// these is in the table, so the lookup must stay exact.
+fn almost_read_only() -> impl Strategy<Value = String> {
+    known_read_only().prop_map(|name| name[..name.len() - 1].to_owned())
+}
+
+/// Surrounding whitespace, which the read-only lookup has to ignore.
+fn padding() -> impl Strategy<Value = String> {
+    "[ \t\n\r]{0,3}"
+}
+
+/// Every stage, as a strategy.
+fn stage() -> impl Strategy<Value = TransportStage> {
+    prop_oneof![
+        Just(TransportStage::BeforeSend),
+        Just(TransportStage::AfterSend),
+        Just(TransportStage::Local),
+    ]
 }
 
 proptest! {
@@ -341,5 +380,68 @@ proptest! {
         let params = query.params();
         prop_assert_eq!(params["page"].as_u64().unwrap(), u64::from(page.max(1)));
         prop_assert_eq!(params["pagelimit"].as_u64().unwrap(), u64::from(limit));
+    }
+
+    /// The read-only lookup only folds case and trims: it never grows or shrinks
+    /// the set of methods it recognises.
+    #[test]
+    fn read_only_lookup_ignores_case_and_padding(
+        name in method_name(),
+        lead in padding(),
+        trail in padding(),
+    ) {
+        let plain = is_read_only_method(&name);
+        prop_assert_eq!(plain, is_read_only_method(&name.to_uppercase()));
+        let padded = format!("{lead}{name}{trail}");
+        prop_assert_eq!(plain, is_read_only_method(&padded));
+        // Only a dotted `namespace.action` can ever be known.
+        if plain {
+            prop_assert!(name.contains('.'));
+        }
+    }
+
+    /// Folding is idempotent: looking a name up twice, the second time already
+    /// trimmed and lower-cased, gives the same verdict for any input at all.
+    #[test]
+    fn read_only_verdict_survives_canonical_folding(input in arbitrary()) {
+        let folded = input.trim().to_ascii_lowercase();
+        prop_assert_eq!(is_read_only_method(&input), is_read_only_method(&folded));
+    }
+
+    /// Fail closed: without a dot there is no namespace, so nothing can match —
+    /// an unknown name is treated as mutating and never replayed.
+    #[test]
+    fn a_name_without_a_dot_is_never_read_only(input in "[a-z0-9_-]{0,24}") {
+        prop_assert!(!is_read_only_method(&input));
+    }
+
+    /// Boundary pair: a name in the table is read-only whatever the case or the
+    /// padding, and the same name one character shorter is not.
+    #[test]
+    fn read_only_boundary_is_exact(
+        inside in known_read_only(),
+        outside in almost_read_only(),
+        lead in padding(),
+        trail in padding(),
+    ) {
+        let padded = format!("{lead}{inside}{trail}");
+        prop_assert!(is_read_only_method(&padded));
+        prop_assert!(is_read_only_method(&inside.to_uppercase()));
+        prop_assert!(!is_read_only_method(&outside));
+        prop_assert!(!is_read_only_method(&outside.to_uppercase()));
+    }
+
+    /// The stage alone decides the error, and the error alone decides the retry.
+    #[test]
+    fn stage_decides_retryability_exactly(stage in stage(), message in arbitrary()) {
+        let error = Error::transport_at(stage, message.clone());
+        prop_assert_eq!(error.is_retryable(), stage.is_safe_to_retry());
+        prop_assert_eq!(error.is_uncertain(), stage == TransportStage::AfterSend);
+        // Only an after-send failure is ambiguous about the mutation.
+        prop_assert_eq!(
+            error.to_string().contains("may have been executed"),
+            stage == TransportStage::AfterSend
+        );
+        prop_assert!(error.to_string().contains(&message));
     }
 }
