@@ -593,3 +593,378 @@ fn response_payload_types_are_constructible_and_comparable() {
     assert!(contact.handle().is_none());
     assert!(AccountInfo::default().account_id.is_none());
 }
+
+/// The reseller/partner sweep (issue #22): every builder setter, accessor and
+/// list-page helper on the new objects, plus the traits they derive. Behaviour is
+/// pinned in `tests/reseller.rs`; this is the completeness pass that keeps a
+/// setter from going unexercised.
+mod reseller {
+    use inwx_client::{
+        Application, ApplicationCheck, ApplicationCreate, ApplicationListPage,
+        ApplicationListQuery, ApplicationUpdate, AuthInfo2, AuthInfo2Code, AuthInfo2Order,
+        AuthInfo2Price, CheckOutcome, ContactVerificationSettings,
+        ContactVerificationSettingsUpdate, Customer, CustomerDownload, CustomerDownloadPage,
+        CustomerDownloadQuery, CustomerUpdate, DataExport, DataExportRequest, DocumentDownload,
+        DocumentListPage, DocumentQuery, DocumentSummary, DocumentUpload, Host, HostCreate,
+        HostListPage, HostListQuery, HostUpdate, Message, MessageQueue, NewsItem, NewsListPage,
+        NewsQuery, NicHandle, NicHandleListPage, NicHandleQuery, PdfDocument, PdfHash, PdfRender,
+    };
+
+    #[test]
+    fn applications() {
+        let check = ApplicationCheck::new()
+            .unwrap()
+            .with_type("HOSTING")
+            .unwrap()
+            .with_name("shop.example.com")
+            .unwrap()
+            .with_customer(4711)
+            .unwrap()
+            .with_field("period", 12)
+            .unwrap();
+        assert_eq!(check.params().unwrap()["period"], 12);
+        assert_eq!(check.clone(), check);
+        assert!(format!("{check:?}").contains("HOSTING"));
+
+        let create = ApplicationCreate::new()
+            .unwrap()
+            .with_type("HOSTING")
+            .unwrap()
+            .with_name("shop.example.com")
+            .unwrap()
+            .with_customer(4711)
+            .unwrap()
+            .with_comment("upgrade")
+            .unwrap()
+            .with_field("period", 12)
+            .unwrap()
+            .dry_run();
+        assert_eq!(create.params().unwrap()["name"], "shop.example.com");
+
+        let update = ApplicationUpdate::new(12)
+            .unwrap()
+            .with_type("HOSTING")
+            .unwrap()
+            .with_name("shop.example.com")
+            .unwrap()
+            .with_customer(4711)
+            .unwrap()
+            .with_state("DONE")
+            .unwrap()
+            .with_comment("done")
+            .unwrap()
+            .with_field("reason", "ok")
+            .unwrap();
+        assert_eq!(update.params().unwrap()["reason"], "ok");
+
+        let query = ApplicationListQuery::new()
+            .with_type("HOSTING")
+            .unwrap()
+            .with_state("PENDING")
+            .unwrap()
+            .with_customer(4711)
+            .unwrap()
+            .with_page(2, 20)
+            .unwrap();
+        let params = query.params();
+        assert_eq!(params["type"], "HOSTING");
+        assert_eq!(params["customer"], 4711);
+
+        let page: ApplicationListPage =
+            serde_json::from_str(r#"{"application":[{"id":1}],"brandNew":1}"#).unwrap();
+        assert_eq!(page.len(), 1);
+        assert!(!page.is_empty());
+        let application: Application = serde_json::from_str(r#"{"id":1,"state":"DONE"}"#).unwrap();
+        assert_eq!(application.clone().state.as_deref(), Some("DONE"));
+        assert_eq!(ApplicationListPage::default().len(), 0);
+    }
+
+    #[test]
+    fn authinfo2_orders_and_codes() {
+        let order = AuthInfo2Order::new()
+            .unwrap()
+            .with_domain(&inwx_client::DomainName::parse("example.com").unwrap())
+            .with_quantity(2)
+            .unwrap()
+            .with_customer(4711)
+            .unwrap()
+            .with_field("product", "AUTHINFO2")
+            .unwrap();
+        let params = order.params().unwrap();
+        assert_eq!(params["customer"], 4711);
+        assert_eq!(params["product"], "AUTHINFO2");
+
+        let code = AuthInfo2Code::new("s3cr3t").unwrap();
+        assert_eq!(code.clone().expose(), "s3cr3t");
+        assert_eq!(code.to_string(), "<redacted>");
+        let created: AuthInfo2 =
+            serde_json::from_str(r#"{"authinfo2":"s3cr3t","unknown":true}"#).unwrap();
+        assert!(created.rest.contains_key("unknown"));
+        assert!(!format!("{created:?}").contains("s3cr3t"));
+        let quote: AuthInfo2Price =
+            serde_json::from_str(r#"{"netPrice":1.5,"unit":"pieces"}"#).unwrap();
+        assert_eq!(quote.net_price, Some(1.5));
+    }
+
+    #[test]
+    fn customer_records_and_settings() {
+        let update = CustomerUpdate::new(4711)
+            .unwrap()
+            .with_title("Dr.")
+            .unwrap()
+            .with_name("Acme GmbH")
+            .unwrap()
+            .with_street("Lindenstr. 1")
+            .unwrap()
+            .with_zip("83059")
+            .unwrap()
+            .with_city("Kolbermoor")
+            .unwrap()
+            .with_country("de")
+            .unwrap()
+            .with_email(inwx_client::Email::parse("it@example.com").unwrap())
+            .with_phone("+49 89 1")
+            .unwrap()
+            .with_fax("+49 89 2")
+            .unwrap()
+            .with_locale("de")
+            .unwrap()
+            .with_vat("DE123456789")
+            .unwrap()
+            .with_field("company", "Acme")
+            .unwrap();
+        let params = update.params().unwrap();
+        assert_eq!(params["country"], "DE");
+        assert_eq!(params["email"], "it@example.com");
+        assert_eq!(params["company"], "Acme");
+
+        let customer: Customer =
+            serde_json::from_str(r#"{"id":1,"customerNo":"110069","creditLimit":"250.5"}"#)
+                .unwrap();
+        assert_eq!(customer.credit_limit, Some(250.5));
+        assert_eq!(customer.clone(), customer);
+
+        let downloads = CustomerDownloadQuery::new().with_customer(4711).unwrap();
+        assert_eq!(downloads.params()["customer"], 4711);
+        let page: CustomerDownloadPage =
+            serde_json::from_str(r#"{"downloads":[{"hash":"a","size":"10"}]}"#).unwrap();
+        assert_eq!(page.len(), 1);
+        assert!(!page.is_empty());
+        assert_eq!(page.downloads[0].size, Some(10));
+        assert_eq!(CustomerDownload::default().hash, None);
+    }
+
+    #[test]
+    fn data_exports_and_verification_settings() {
+        let export = DataExportRequest::new()
+            .with_customer(4711)
+            .unwrap()
+            .with_field("format", "ZIP")
+            .unwrap();
+        assert!(!export.is_empty());
+        assert_eq!(export.params()["format"], "ZIP");
+        assert!(DataExportRequest::new().is_empty());
+        let answer: DataExport = serde_json::from_str(r#"{"hash":"a","note":"x"}"#).unwrap();
+        assert_eq!(answer.note.as_deref(), Some("x"));
+
+        let settings: ContactVerificationSettings = serde_json::from_str(
+            r#"{"on":true,"one":"1","off":"no","nine":9,"other":"x","gone":null}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.bool_value("on"), Some(true));
+        assert_eq!(settings.bool_value("one"), Some(true));
+        assert_eq!(settings.bool_value("off"), Some(false));
+        assert_eq!(settings.bool_value("nine"), Some(true));
+        assert_eq!(settings.bool_value("other"), None);
+        assert_eq!(settings.bool_value("gone"), None);
+        assert_eq!(settings.string_value("nine").as_deref(), Some("9"));
+        assert_eq!(settings.string_value("on"), None);
+        assert_eq!(settings.value("gone"), serde_json::Value::Null);
+        assert_eq!(settings.value("absent"), serde_json::Value::Null);
+
+        let update = ContactVerificationSettingsUpdate::new()
+            .unwrap()
+            .with_customer(4711)
+            .unwrap()
+            .with_field("verifyEmail", true)
+            .unwrap();
+        assert_eq!(update.params().unwrap()["verifyEmail"], true);
+        assert!(ContactVerificationSettingsUpdate::new()
+            .unwrap()
+            .params()
+            .is_err());
+    }
+
+    #[test]
+    fn documents_upload_download_and_list() {
+        let upload = DocumentUpload::new("contract.pdf", b"%PDF-1.4")
+            .unwrap()
+            .with_mime_type("application/pdf")
+            .unwrap()
+            .with_customer(4711)
+            .unwrap()
+            .with_field("category", "CONTRACT")
+            .unwrap();
+        assert_eq!(upload.name(), "contract.pdf");
+        assert_eq!(upload.byte_len(), 8);
+        let from_base64 = DocumentUpload::from_base64("contract.pdf", "JVBERi0xLjQ=").unwrap();
+        assert_eq!(from_base64.byte_len(), 8);
+        assert_eq!(from_base64.params()["data"], upload.params()["data"]);
+
+        let query = DocumentQuery::new()
+            .with_customer(4711)
+            .unwrap()
+            .with_type("CONTRACT")
+            .unwrap()
+            .with_name("contract.pdf")
+            .unwrap()
+            .with_page(1, 10)
+            .unwrap();
+        let params = query.params();
+        assert_eq!(params["type"], "CONTRACT");
+        assert_eq!(params["name"], "contract.pdf");
+
+        let page: DocumentListPage =
+            serde_json::from_str(r#"{"document":[{"id":1,"mimeType":"text/plain"}]}"#).unwrap();
+        assert_eq!(page.len(), 1);
+        assert!(!page.is_empty());
+        assert_eq!(page.documents[0].mime_type.as_deref(), Some("text/plain"));
+        assert_eq!(DocumentSummary::default().name, None);
+        assert!(DocumentListPage::default().is_empty());
+
+        let download: DocumentDownload =
+            serde_json::from_str(r#"{"name":"a","data":"aGk=","extra":1}"#).unwrap();
+        assert_eq!(download.bytes().unwrap(), b"hi");
+        assert_eq!(download.rest["extra"], 1);
+    }
+
+    #[test]
+    fn host_objects() {
+        let name = inwx_client::Hostname::parse("ns1.example.com").unwrap();
+        let create = HostCreate::new(name.clone())
+            .unwrap()
+            .with_customer(4711)
+            .unwrap()
+            .with_ip("203.0.113.7")
+            .unwrap()
+            .with_field("validationDate", "2026-11-01")
+            .unwrap()
+            .dry_run();
+        let params = create.params();
+        assert_eq!(params["validationDate"], "2026-11-01");
+        assert_eq!(params["testing"], true);
+
+        let update = HostUpdate::new(44)
+            .unwrap()
+            .with_name(&name)
+            .with_customer(4711)
+            .unwrap()
+            .with_ip("2001:db8::1")
+            .unwrap()
+            .with_field("note", "x")
+            .unwrap();
+        assert_eq!(update.params().unwrap()["note"], "x");
+
+        let query = HostListQuery::new()
+            .with_customer(4711)
+            .unwrap()
+            .with_name("ns1.example.com")
+            .unwrap()
+            .with_state("DONE")
+            .unwrap()
+            .with_page(1, 5)
+            .unwrap();
+        assert_eq!(query.params()["state"], "DONE");
+
+        let page: HostListPage =
+            serde_json::from_str(r#"{"host":[{"id":1,"ip_address":"1.2.3.4"}]}"#).unwrap();
+        assert_eq!(page.len(), 1);
+        assert!(!page.is_empty());
+        assert_eq!(page.hosts[0].ip_address.as_deref(), Some("1.2.3.4"));
+        assert_eq!(Host::default().id, None);
+        assert!(HostListPage::default().is_empty());
+    }
+
+    #[test]
+    fn messages_news_and_nic_handles() {
+        let queue: MessageQueue =
+            serde_json::from_str(r#"{"message":[{"id":"1","content":{"a":1}},{"type":"X"}]}"#)
+                .unwrap();
+        assert_eq!(queue.len(), 2);
+        assert!(!queue.is_empty());
+        assert_eq!(queue.ids(), vec![1]);
+        assert_eq!(queue.messages[0].required_id().unwrap(), 1);
+        assert!(queue.messages[1].required_id().is_err());
+        assert_eq!(Message::default().id, None);
+        assert!(MessageQueue::default().is_empty());
+
+        let news = NewsQuery::new()
+            .with_customer(4711)
+            .unwrap()
+            .with_unread_only(true)
+            .with_field("type", "PRODUCT")
+            .unwrap()
+            .with_page(1, 5)
+            .unwrap();
+        let params = news.params();
+        assert_eq!(params["customer"], 4711);
+        assert_eq!(params["type"], "PRODUCT");
+        let news_page: NewsListPage =
+            serde_json::from_str(r#"{"news":[{"id":1,"read":"1"}]}"#).unwrap();
+        assert_eq!(news_page.len(), 1);
+        assert!(!news_page.is_empty());
+        assert_eq!(news_page.items[0].is_read(), Some(true));
+        assert_eq!(NewsItem::default().title, None);
+        assert!(NewsListPage::default().is_empty());
+
+        let handles = NicHandleQuery::new()
+            .with_customer(4711)
+            .unwrap()
+            .with_handle("P1234")
+            .unwrap()
+            .with_field("state", "VERIFIED")
+            .unwrap()
+            .with_page(1, 5)
+            .unwrap();
+        assert_eq!(handles.params()["state"], "VERIFIED");
+        let handle_page: NicHandleListPage =
+            serde_json::from_str(r#"{"handle":[{"handle":"P1","org":"Acme"}]}"#).unwrap();
+        assert_eq!(handle_page.len(), 1);
+        assert!(!handle_page.is_empty());
+        assert_eq!(handle_page.handles[0].organization.as_deref(), Some("Acme"));
+        assert_eq!(NicHandle::default().handle, None);
+        assert!(NicHandleListPage::default().is_empty());
+    }
+
+    #[test]
+    fn pdfs_and_check_answers() {
+        let render = PdfRender::new()
+            .unwrap()
+            .with_document_type("INVOICE")
+            .unwrap()
+            .with_customer(4711)
+            .unwrap()
+            .with_language(inwx_client::Language::De)
+            .with_field("year", 2026)
+            .unwrap();
+        let params = render.params().unwrap();
+        assert_eq!(params["language"], "de");
+        assert_eq!(params["year"], 2026);
+
+        let hash = PdfHash::new("8f2a41c0").unwrap();
+        assert_eq!(hash.to_string(), "8f2a41c0");
+        assert_eq!("8f2a41c0".parse::<PdfHash>().unwrap(), hash.clone());
+        let pdf: PdfDocument =
+            serde_json::from_str(r#"{"pdf":"aGk=","hash":"8f2a","name":"invoice.pdf"}"#).unwrap();
+        assert_eq!(pdf.bytes().unwrap(), b"hi");
+        assert_eq!(pdf.required_hash().unwrap(), PdfHash::new("8f2a").unwrap());
+        assert_eq!(pdf.filename.as_deref(), Some("invoice.pdf"));
+
+        let outcome: CheckOutcome =
+            serde_json::from_str(r#"{"available":"1","note":"free","policy":"X"}"#).unwrap();
+        assert_eq!(outcome.is_available(), Some(true));
+        assert_eq!(outcome.note.as_deref(), Some("free"));
+        assert_eq!(outcome.rest["policy"], "X");
+        assert_eq!(CheckOutcome::default().is_available(), None);
+    }
+}
