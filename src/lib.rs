@@ -34,10 +34,10 @@
 //!
 //! | Area | Methods |
 //! | --- | --- |
-//! | Session | `account.login`, `account.logout`, `account.check`, `account.info` |
-//! | Domains | `check`, `create`, `info`, `list`, `update`, `renew`, `delete`, `whois` |
+//! | Session | `account.login`, `account.logout`, `account.check` (implicit), `account.info` |
+//! | Domains | `domain.check`, `domain.create`, `domain.info`, `domain.list`, `domain.update`, `domain.renew`, `domain.delete`, `domain.whois` |
 //! | Ownership | `domain.transfer`, `domain.trade`, `domain.push`, `domain.restore`, `domain.transfercancel`, `domain.transferOut` |
-//! | DNS records | `nameserver.info` (read), `createRecord`, `updateRecord`, `deleteRecord` |
+//! | DNS records | `nameserver.info` (read), `nameserver.createRecord`, `nameserver.updateRecord`, `nameserver.deleteRecord` |
 //! | Zones | `nameserver.create`, `nameserver.update`, `nameserver.delete`, `nameserver.list`, `nameserver.info`, `nameserver.check`, `nameserver.clone`, `nameserver.export`, `nameserver.exportlist`, `nameserver.exportrecords` |
 //! | Certificates | `certificate.*` (13 methods) |
 //! | Hosting | `hosting.*` (9 methods) |
@@ -45,12 +45,18 @@
 //! | Tags | `tag.*` (5 methods) |
 //! | Nameserver sets | `nameserverset.*` (5 methods) |
 //! | DynDNS | `dyndns.*` (8 methods) |
+//! | DynDNS subscriptions | `dyndnssubscription.create`, `dyndnssubscription.cancel`, `dyndnssubscription.list`, `dyndnssubscription.listProducts` |
 //! | Accounting | `accounting.*` (11 methods) |
-//! | Contacts | `contact.create`, `info`, `list`, `update`, `delete` |
+//! | Contacts | `contact.create`, `contact.info`, `contact.list`, `contact.update`, `contact.delete` |
 //! | Prices | `domain.getPrices`, `domain.getdomainprice` |
 //!
-//! Unknown methods stay reachable through [`InwxClient::call`]; what is not
-//! modelled yet is tracked as an issue, not hidden as "out of scope".
+//! Every name in the table is a command the crate really sends; a count such as
+//! `certificate.* (13 methods)` covers exactly the commands implemented in
+//! `src/certificate.rs`, and `tests/coverage_table.rs` fails the build when the
+//! two drift apart. `account.check` is implicit: the client treats it as a
+//! session-free method but does not wrap it, so it goes through
+//! [`InwxClient::call`]. Unknown methods stay reachable the same way; what is
+//! not modelled yet is tracked as an issue, not hidden as "out of scope".
 //!
 //! # Design
 //!
