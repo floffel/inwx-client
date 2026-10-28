@@ -1,6 +1,7 @@
 //! Typed client for the [INWX](https://www.inwx.com) `DomRobot` JSON-RPC API —
 //! domains, zones and DNS records, ownership changes, certificates, hosting,
-//! DNSSEC, tags, nameserver sets, DynDNS and accounting.
+//! DNSSEC, tags, nameserver sets, DynDNS, accounting and the reseller/partner
+//! objects (applications, customers, documents, hosts, messages, PDFs).
 //!
 //! INWX is a German registrar and DNS provider. Its API is a single JSON-RPC
 //! endpoint (`https://api.domrobot.com/jsonrpc/`, or the free OTE sandbox at
@@ -48,6 +49,11 @@
 //! | Accounting | `accounting.*` (11 methods) |
 //! | Contacts | `contact.create`, `info`, `list`, `update`, `delete` |
 //! | Prices | `domain.getPrices`, `domain.getdomainprice` |
+//! | Applications | `application.check`, `create`, `delete`, `info`, `list`, `update` |
+//! | Customers | `customer.info`, `update`, `delete`, `contactverificationsettingsinfo`, `contactverificationsettingsupdate`, `listdownloads`, `requestdataexport` |
+//! | Hosts (glue records) | `host.check`, `create`, `delete`, `info`, `list`, `update` |
+//! | Documents | `document.upload`, `list`, `download`, `delete` |
+//! | Messages, news, handles, PDFs | `message.poll`, `ack`; `news.list`; `nichandle.list`; `pdf.document`, `pdf.get`; `authinfo2.create`, `getprice` |
 //!
 //! Unknown methods stay reachable through [`InwxClient::call`]; what is not
 //! modelled yet is tracked as an issue, not hidden as "out of scope".
@@ -58,6 +64,9 @@
 //!   [`RecordSet`], [`ZoneCreate`], [`ContactRequest`] and [`Period`] reject what
 //!   the API would reject, so a typo costs a local error instead of a charged
 //!   registration or a broken zone.
+//!   The reseller builders keep that rule: a glue record outside its own domain,
+//!   a file name that is a path, a 14th address or a document above
+//!   [`MAX_DOCUMENT_BYTES`] is refused before anything is sent.
 //! * **Say what cannot be undone.** Ownership changes and refunds take an
 //!   [`Irreversible`] acknowledgement naming the action and the object, so a
 //!   transfer cannot be built by copy-pasting a block and forgetting the domain.
@@ -103,17 +112,26 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod accounting;
+pub mod application;
+pub mod authinfo2;
 pub mod certificate;
 pub mod client;
 pub mod contact;
+pub mod customer;
 pub mod dnssec;
+pub mod document;
 pub mod domain;
 pub mod dyndns;
 pub mod dyndnssubscription;
 pub mod error;
+pub mod host;
 pub mod hosting;
+pub mod message;
 pub mod nameserver;
 pub mod nameserverset;
+pub mod news;
+pub mod nichandle;
+pub mod pdf;
 pub mod price;
 pub mod record;
 pub mod rpc;
@@ -127,6 +145,11 @@ pub use accounting::{
     AccountBalance, CreditLog, Document, Invoice, LockedFund, LockedFunds, PostalDelivery,
     RefundRequest, SslFund, StatementQuery, Transaction, TransactionLog, TransactionLogQuery,
 };
+pub use application::{
+    Application, ApplicationCheck, ApplicationCheckResult, ApplicationCreate, ApplicationQuery,
+    ApplicationType, ApplicationUpdate,
+};
+pub use authinfo2::{AuthInfo2, AuthInfo2PriceQuote, AuthInfo2Record};
 pub use certificate::{
     Certificate, CertificateId, CertificateLogEntry, CertificateMissingData, CertificateOrder,
     CertificateOrderResult, CertificateProduct, CertificateProductQuery, CertificateQuery,
@@ -137,9 +160,16 @@ pub use client::{
     DEFAULT_ATTEMPTS, DEFAULT_BASE_DELAY, DEFAULT_BASE_URL, DEFAULT_MAX_DELAY, SANDBOX_BASE_URL,
 };
 pub use contact::{Contact, ContactListPage, ContactQuery, ContactRequest, ContactUpdate};
+pub use customer::{
+    ContactVerificationSettings, ContactVerificationSettingsUpdate, Customer, CustomerDownload,
+    CustomerDownloadQuery, CustomerUpdate, DataExport,
+};
 pub use dnssec::{
     AddDnsKeyRequest, DnsKey, DnsKeyPair, DnssecAlgorithm, DnssecDigestType, DnssecDomainStatus,
     DnssecFlag, DnssecKey, DnssecKeyQuery, DnssecKeyStatus, DnssecState, DsRecord,
+};
+pub use document::{
+    DocumentEntry, DocumentQuery, DocumentUpload, DownloadedDocument, MAX_DOCUMENT_BYTES,
 };
 pub use domain::{
     DomainCheck, DomainCreate, DomainInfo, DomainListPage, DomainListQuery, DomainRenew,
@@ -151,13 +181,20 @@ pub use dyndns::{
 };
 pub use dyndnssubscription::DynDnsSubscription;
 pub use error::{Error, Result};
+pub use host::{
+    HostCheck, HostCheckResult, HostCreate, HostQuery, HostRecord, HostUpdate, MAX_HOST_ADDRESSES,
+};
 pub use hosting::{
     HostingOrder, HostingPackage, HostingPeriod, HostingReinstatement, HostingSuspension,
 };
+pub use message::{Message, MessageAck, PolledMessage};
 pub use nameserver::{NameserverCheck, ZoneInfo, ZoneListPage, ZoneSummary};
 pub use nameserverset::{
     NameserverSet, NameserverSetCreate, NameserverSetType, NameserverSetUpdate,
 };
+pub use news::NewsItem;
+pub use nichandle::{NicHandle, NicHandleQuery};
+pub use pdf::{PdfFile, PdfHandle, PdfRender};
 pub use price::{DomainPriceQuote, PriceList, TldPrice};
 pub use record::{
     DnsRecord, RecordId, RecordSet, RecordSpec, RecordType, RecordUpdate, DEFAULT_TTL, MAX_TTL,

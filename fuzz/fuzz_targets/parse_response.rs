@@ -7,7 +7,12 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use inwx_client::{Contact, DnsRecord, DomainCheck, DomainInfo, RecordType, RpcResponse, ZoneInfo};
+use inwx_client::{
+    Application, ApplicationCheckResult, ApplicationType, AuthInfo2, AuthInfo2Record, Contact,
+    ContactVerificationSettings, Customer, CustomerDownload, DataExport, DnsRecord, DomainCheck,
+    DomainInfo, DocumentEntry, DownloadedDocument, HostCheckResult, HostRecord, Message, NewsItem,
+    NicHandle, PdfFile, PdfHandle, PolledMessage, RecordType, RpcResponse, ZoneInfo,
+};
 
 fuzz_target!(|data: &[u8]| {
     // The framing layer: any byte string either parses or returns a Json error.
@@ -28,6 +33,30 @@ fuzz_target!(|data: &[u8]| {
         let _ = serde_json::from_value::<DomainCheck>(payload.clone());
         let _ = serde_json::from_value::<Contact>(payload.clone());
         let _ = serde_json::from_value::<Vec<DnsRecord>>(payload.clone());
+
+        // The reseller/partner objects (issue #22) decode the same way, and the
+        // ones with a base64 body run their decoder too.
+        let _ = serde_json::from_value::<Application>(payload.clone());
+        let _ = serde_json::from_value::<Vec<Application>>(payload.clone());
+        let _ = serde_json::from_value::<ApplicationCheckResult>(payload.clone());
+        let _ = serde_json::from_value::<AuthInfo2Record>(payload.clone());
+        let _ = serde_json::from_value::<ContactVerificationSettings>(payload.clone());
+        let _ = serde_json::from_value::<Customer>(payload.clone());
+        let _ = serde_json::from_value::<Vec<Customer>>(payload.clone());
+        let _ = serde_json::from_value::<CustomerDownload>(payload.clone());
+        let _ = serde_json::from_value::<DataExport>(payload.clone());
+        let _ = serde_json::from_value::<DocumentEntry>(payload.clone());
+        let _ = serde_json::from_value::<DownloadedDocument>(payload.clone())
+            .map(|document| document.bytes());
+        let _ = serde_json::from_value::<HostCheckResult>(payload.clone());
+        let _ = serde_json::from_value::<HostRecord>(payload.clone());
+        let _ = serde_json::from_value::<Message>(payload.clone());
+        let _ = serde_json::from_value::<PolledMessage>(payload.clone());
+        let _ = serde_json::from_value::<NewsItem>(payload.clone());
+        let _ = serde_json::from_value::<NicHandle>(payload.clone());
+        let _ = serde_json::from_value::<PdfHandle>(payload.clone());
+        let _ = serde_json::from_value::<PdfFile>(payload.clone()).map(|file| file.bytes());
+
         // A `domain.check` answer may be a single object or an array.
         if let Some(entries) = payload.get("domain").and_then(|value| value.as_array()) {
             for entry in entries {
@@ -45,5 +74,10 @@ fuzz_target!(|data: &[u8]| {
     // Record types are parsed from user input, so feed them the same bytes.
     if let Ok(text) = std::str::from_utf8(data) {
         let _ = RecordType::parse(text);
+        // The reseller value parsers take user input as well: a product type,
+        // an AuthInfo2 secret and a document file name.
+        let _ = ApplicationType::parse(text);
+        let _ = AuthInfo2::new(text);
+        let _ = inwx_client::DocumentUpload::new(text, b"x");
     }
 });
