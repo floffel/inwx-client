@@ -5,7 +5,7 @@ use inwx_client::{
     parse_ip, AuthCode, CertificateId, CertificateOrder, CertificateTerm, CertificateUpdate,
     DnsKey, DnssecKeyQuery, DomainName, DsRecord, Email, Handle, HostingPeriod, Hostname,
     NameserverSetCreate, NameserverSetType, PostalDelivery, RefundRequest, StatementQuery,
-    TagUpdate, Timestamp, ZoneCreate, ZoneUpdate,
+    TagUpdate, Timestamp, ZoneCreate, ZoneUpdate, MAX_LABEL_LEN,
 };
 
 fn domain(name: &str) -> DomainName {
@@ -16,15 +16,19 @@ fn domain(name: &str) -> DomainName {
 
 #[test]
 fn a_label_of_63_bytes_is_accepted_and_64_is_not() {
+    assert_eq!(MAX_LABEL_LEN, 63);
     let ok = format!("{}.com", "a".repeat(63));
     let too_long = format!("{}.com", "a".repeat(64));
     assert_eq!(domain(&ok).as_str(), ok);
+    assert_eq!(Hostname::parse(&ok).unwrap().as_str(), ok);
     assert!(DomainName::parse(&too_long).is_err());
     assert!(Hostname::parse(&too_long).is_err());
 
     // The same limit applies to a nested label.
     assert!(DomainName::parse(&format!("www.{ok}")).is_ok());
+    assert!(Hostname::parse(&format!("www.{ok}")).is_ok());
     assert!(DomainName::parse(&format!("www.{too_long}")).is_err());
+    assert!(Hostname::parse(&format!("www.{too_long}")).is_err());
 }
 
 #[test]
