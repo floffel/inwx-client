@@ -176,6 +176,69 @@ async fn a_rejected_login_is_an_api_error() {
 }
 
 #[tokio::test]
+async fn a_login_server_error_is_ambiguous_and_not_retried() {
+    for status in [500, 599] {
+        let transport = MockTransport::new();
+        transport.status(status, "<html>bad gateway</html>");
+        transport.login("domrobot=abc");
+
+        let client = anonymous_client(transport.clone());
+        let error = client.login().await.unwrap_err();
+
+        assert!(error.is_ambiguous(), "{status}: {error}");
+        assert!(!error.is_retryable(), "{status}");
+        assert!(!client.is_authenticated(), "{status}");
+        assert_eq!(transport.call_count(), 1, "{status}");
+    }
+}
+
+#[tokio::test]
+async fn a_login_timeout_is_ambiguous_and_not_retried() {
+    let transport = MockTransport::new();
+    transport.ambiguous_failure("request timed out");
+    transport.login("domrobot=abc");
+
+    let client = anonymous_client(transport.clone());
+    let error = client.login().await.unwrap_err();
+
+    assert!(error.is_ambiguous());
+    assert!(!error.is_retryable());
+    assert!(!client.is_authenticated());
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
+async fn login_retries_failures_that_happened_before_the_command_ran() {
+    let transport = MockTransport::new();
+    transport.transport_failure("connection refused");
+    transport.status(429, "slow down");
+    transport.login("domrobot=abc");
+
+    let client = anonymous_client(transport.clone());
+    client.login().await.unwrap();
+
+    assert!(client.is_authenticated());
+    assert_eq!(transport.call_count(), 3);
+}
+
+#[tokio::test]
+async fn non_server_error_login_statuses_are_not_ambiguous() {
+    for status in [499, 600] {
+        let transport = MockTransport::new();
+        transport.status(status, r#"{"code":2005,"msg":"rejected"}"#);
+        transport.login("domrobot=abc");
+
+        let client = anonymous_client(transport.clone());
+        let error = client.login().await.unwrap_err();
+
+        assert!(!error.is_ambiguous(), "{status}: {error}");
+        assert_eq!(error.code(), Some(2005), "{status}");
+        assert!(!client.is_authenticated(), "{status}");
+        assert_eq!(transport.call_count(), 1, "{status}");
+    }
+}
+
+#[tokio::test]
 async fn logout_drops_the_session_even_when_the_call_fails() {
     let transport = MockTransport::new();
     transport.api_error(2303, "Object does not exist");
@@ -202,6 +265,77 @@ async fn retryable_http_statuses_are_retried() {
         .unwrap();
 
     assert_eq!(transport.call_count(), 3);
+}
+
+#[tokio::test]
+async fn a_mutating_call_is_not_retried_after_a_server_error() {
+    for status in [500, 599] {
+        let transport = MockTransport::new();
+        transport.status(status, "<html>bad gateway</html>");
+        transport.ok_empty();
+
+        let client = client(transport.clone());
+        let error = client
+            .delete_domain(&DomainName::parse("a.de").unwrap())
+            .await
+            .unwrap_err();
+
+        assert!(error.is_ambiguous(), "{status}: {error}");
+        assert!(!error.is_retryable(), "{status}");
+        assert_eq!(transport.call_count(), 1, "{status}");
+    }
+}
+
+#[tokio::test]
+async fn a_mutating_server_error_is_ambiguous_even_with_an_api_envelope() {
+    let transport = MockTransport::new();
+    transport.status(503, r#"{"code":2300,"msg":"Object pending transfer"}"#);
+    transport.ok_empty();
+
+    let client = client(transport.clone());
+    let error = client
+        .delete_domain(&DomainName::parse("a.de").unwrap())
+        .await
+        .unwrap_err();
+
+    assert!(error.is_ambiguous());
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
+async fn statuses_just_outside_the_server_error_range_are_terminal() {
+    for status in [499, 600] {
+        let transport = MockTransport::new();
+        transport.status(status, "");
+        transport.ok(json!({"domain": []}));
+
+        let client = client(transport.clone());
+        let error = client
+            .list_domains(&DomainListQuery::default())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, Error::Http { status: actual, .. } if actual == status));
+        assert_eq!(transport.call_count(), 1, "{status}");
+    }
+}
+
+#[tokio::test]
+async fn an_idempotent_call_retries_server_error_boundaries() {
+    for status in [500, 599] {
+        let transport = MockTransport::new();
+        transport.status(status, "");
+        transport.status(status, "");
+        transport.ok(json!({"domain": []}));
+
+        let client = client(transport.clone());
+        client
+            .list_domains(&DomainListQuery::default())
+            .await
+            .unwrap();
+
+        assert_eq!(transport.call_count(), 3, "{status}");
+    }
 }
 
 #[tokio::test]
@@ -285,6 +419,120 @@ async fn transport_failures_are_retried_and_terminal_ones_are_not() {
 
     assert!(!error.is_retryable());
     assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
+async fn a_mutating_call_does_not_retry_an_ambiguous_transport_failure() {
+    let transport = MockTransport::new();
+    transport.ambiguous_failure("request timed out");
+    transport.ok_empty();
+
+    let client = client(transport.clone());
+    let error = client
+        .delete_domain(&DomainName::parse("a.de").unwrap())
+        .await
+        .unwrap_err();
+
+    assert!(error.is_ambiguous());
+    assert!(!error.is_retryable());
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
+async fn an_idempotent_call_retries_an_ambiguous_transport_failure() {
+    let transport = MockTransport::new();
+    transport.ambiguous_failure("response body timed out");
+    transport.ok(json!({"domain": []}));
+
+    let client = client(transport.clone());
+    client
+        .list_domains(&DomainListQuery::default())
+        .await
+        .unwrap();
+
+    assert_eq!(transport.call_count(), 2);
+}
+
+#[tokio::test]
+async fn an_idempotent_ambiguous_failure_stops_at_the_policy_limit() {
+    let transport = MockTransport::new();
+    transport.ambiguous_failure("timeout");
+    transport.ambiguous_failure("timeout");
+    transport.ok(json!({"domain": []}));
+
+    let client = client(transport.clone()).with_retry(RetryPolicy::new(2));
+    let error = client
+        .list_domains(&DomainListQuery::default())
+        .await
+        .unwrap_err();
+
+    assert!(error.is_ambiguous());
+    assert_eq!(transport.call_count(), 2);
+}
+
+#[tokio::test]
+async fn an_unknown_raw_method_is_treated_as_mutating() {
+    let transport = MockTransport::new();
+    transport.ambiguous_failure("timeout");
+    transport.ok(json!({"ok": true}));
+
+    let client = client(transport.clone());
+    let error = client
+        .call("unmodelled.command", json!({}))
+        .await
+        .unwrap_err();
+
+    assert!(error.is_ambiguous());
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
+async fn a_rate_limited_mutating_call_is_retried() {
+    let transport = MockTransport::new();
+    transport.status(429, "slow down");
+    transport.ok_empty();
+
+    let client = client(transport.clone());
+    client
+        .delete_domain(&DomainName::parse("a.de").unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(transport.call_count(), 2);
+}
+
+#[tokio::test]
+async fn a_rate_limited_mutating_call_stops_at_the_policy_limit() {
+    let transport = MockTransport::new();
+    transport.status(429, "slow down");
+    transport.status(429, "slow down");
+
+    let client = client(transport.clone()).with_retry(RetryPolicy::new(2));
+    let error = client
+        .delete_domain(&DomainName::parse("a.de").unwrap())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, Error::Http { status: 429, .. }));
+    assert_eq!(transport.call_count(), 2);
+}
+
+#[tokio::test]
+async fn rate_limit_status_boundaries_do_not_retry_neighbouring_statuses() {
+    for status in [428, 430] {
+        let transport = MockTransport::new();
+        transport.status(status, "");
+        transport.ok_empty();
+
+        let client = client(transport.clone());
+        let error = client
+            .delete_domain(&DomainName::parse("a.de").unwrap())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, Error::Http { status: actual, .. } if actual == status));
+        assert_eq!(transport.call_count(), 1, "{status}");
+    }
 }
 
 #[tokio::test]
