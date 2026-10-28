@@ -8,10 +8,11 @@
 
 use libfuzzer_sys::fuzz_target;
 use inwx_client::{
-    Application, ApplicationCheckResult, ApplicationType, AuthInfo2, AuthInfo2Record, Contact,
-    ContactVerificationSettings, Customer, CustomerDownload, DataExport, DnsRecord, DomainCheck,
-    DomainInfo, DocumentEntry, DownloadedDocument, HostCheckResult, HostRecord, Message, NewsItem,
-    NicHandle, PdfFile, PdfHandle, PolledMessage, RecordType, RpcResponse, ZoneInfo,
+    Application, ApplicationCheckResult, ApplicationType, AuthInfo2Order, AuthInfo2OrderResult,
+    AuthInfo2PriceQuote, Contact, ContactVerificationSettings, Customer, CustomerDownload,
+    DataExport, DnsRecord, DomainCheck, DomainInfo, DocumentEntry, DownloadedDocument,
+    HostCheckResult, HostRecord, Message, NewsItem, NicHandle, PdfFile, PdfHandle, PolledMessage,
+    RecordType, RpcResponse, ZoneInfo,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -39,7 +40,8 @@ fuzz_target!(|data: &[u8]| {
         let _ = serde_json::from_value::<Application>(payload.clone());
         let _ = serde_json::from_value::<Vec<Application>>(payload.clone());
         let _ = serde_json::from_value::<ApplicationCheckResult>(payload.clone());
-        let _ = serde_json::from_value::<AuthInfo2Record>(payload.clone());
+        let _ = serde_json::from_value::<AuthInfo2OrderResult>(payload.clone());
+        let _ = serde_json::from_value::<AuthInfo2PriceQuote>(payload.clone());
         let _ = serde_json::from_value::<ContactVerificationSettings>(payload.clone());
         let _ = serde_json::from_value::<Customer>(payload.clone());
         let _ = serde_json::from_value::<Vec<Customer>>(payload.clone());
@@ -75,9 +77,11 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(text) = std::str::from_utf8(data) {
         let _ = RecordType::parse(text);
         // The reseller value parsers take user input as well: a product type,
-        // an AuthInfo2 secret and a document file name.
+        // the domain of an AuthInfo2 order and a document file name.
         let _ = ApplicationType::parse(text);
-        let _ = AuthInfo2::new(text);
+        if let Ok(order_domain) = text.parse::<inwx_client::DomainName>() {
+            let _ = AuthInfo2Order::new(order_domain, true).params();
+        }
         let _ = inwx_client::DocumentUpload::new(text, b"x");
     }
 });

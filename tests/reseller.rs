@@ -11,9 +11,9 @@ mod common;
 use common::{client, MockTransport};
 use inwx_client::{
     ApplicationCheck, ApplicationCreate, ApplicationQuery, ApplicationType, ApplicationUpdate,
-    ContactVerificationSettingsUpdate, CustomerDownloadQuery, CustomerUpdate, DocumentQuery,
-    DocumentUpload, DomainName, HostCheck, HostCreate, HostQuery, HostUpdate, Hostname, MessageAck,
-    NicHandleQuery, PdfRender,
+    AuthInfo2Order, ContactVerificationSettingsUpdate, CustomerDownloadQuery, CustomerUpdate,
+    DocumentQuery, DocumentUpload, DomainName, Error, HostCheck, HostCreate, HostQuery, HostUpdate,
+    Hostname, MessageAck, NicHandleQuery, PdfRender,
 };
 use serde_json::json;
 
@@ -211,46 +211,136 @@ async fn update_application_needs_a_change() {
 // ---------------------------------------------------------------- authinfo2 --
 
 #[tokio::test]
-async fn create_auth_info2_keeps_the_secret_out_of_debug() {
+async fn create_auth_info2_sends_the_domain_and_only_a_set_testing_flag() {
     let transport = MockTransport::new();
-    transport.ok(json!({ "domainName": "example.com", "authInfo2": "aB3-xY9_42" }));
+    transport.ok(json!({
+        "product": "DE-AuthInfo2", "net_price": "1.20", "price": 1.43,
+        "currency": "EUR", "message": "order placed", "vat": 19.0
+    }));
 
-    let record = client(transport.clone())
-        .create_auth_info2(&domain("example.com"))
+    let result = client(transport.clone())
+        .create_auth_info2(&AuthInfo2Order::new(domain("example.de"), false))
         .await
         .unwrap();
 
-    assert_eq!(
-        record
-            .auth_info2
-            .as_ref()
-            .map(inwx_client::AuthInfo2::as_str),
-        Some("aB3-xY9_42")
-    );
-    let printed = format!("{record:?}");
-    assert!(!printed.contains("aB3-xY9_42"), "{printed}");
+    assert_eq!(result.product.as_deref(), Some("DE-AuthInfo2"));
+    assert_eq!(result.net_price, Some(1.2));
+    assert_eq!(result.price, Some(1.43));
+    assert_eq!(result.currency.as_deref(), Some("EUR"));
+    assert_eq!(result.message.as_deref(), Some("order placed"));
 
     let call = transport.only_call();
     assert_eq!(call.method, "authinfo2.create");
-    assert_eq!(call.params["domainName"], "example.com");
+    assert_eq!(call.params["domain"], "example.de");
+    // The upstream default is false, so a real order says nothing about it.
+    assert!(call.params.get("testing").is_none(), "{}", call.params);
 }
 
 #[tokio::test]
-async fn auth_info2_price_reads_the_quote() {
+async fn a_testing_order_sends_the_flag_and_a_real_one_does_not() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "product": "DE-AuthInfo2" }));
+    client(transport.clone())
+        .create_auth_info2(&AuthInfo2Order::new(domain("example.de"), true))
+        .await
+        .unwrap();
+
+    let call = transport.only_call();
+    assert_eq!(call.params["testing"], json!(true));
+    assert_eq!(call.params["domain"], "example.de");
+}
+
+#[tokio::test]
+async fn auth_info2_price_sends_no_parameters() {
     let transport = MockTransport::new();
     transport.ok(json!({ "netPrice": "1.20", "currency": "EUR" }));
 
-    let quote = client(transport.clone())
-        .auth_info2_price(&domain("example.com"))
-        .await
-        .unwrap();
+    let quote = client(transport.clone()).auth_info2_price().await.unwrap();
 
     assert_eq!(quote.net_price, Some(1.2));
     assert_eq!(quote.currency.as_deref(), Some("EUR"));
 
     let call = transport.only_call();
     assert_eq!(call.method, "authinfo2.getprice");
-    assert_eq!(call.params["domainName"], "example.com");
+    assert_eq!(call.params, json!({}), "{}", call.params);
+}
+
+#[tokio::test]
+async fn an_order_is_never_replayed_after_a_transient_status() {
+    // A 5xx says nothing about whether the billable order went through, so the
+    // outcome is reported as uncertain after exactly one attempt.
+    let transport = MockTransport::new();
+    transport.status(500, "");
+
+    let error = client(transport.clone())
+        .create_auth_info2(&AuthInfo2Order::new(domain("example.de"), false))
+        .await
+        .unwrap_err();
+
+    assert!(error.is_uncertain(), "{error:?}");
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
+async fn an_order_is_never_replayed_after_a_timeout_either() {
+    let transport = MockTransport::new();
+    transport.uncertain_failure("connection reset after the body was written");
+
+    let error = client(transport.clone())
+        .create_auth_info2(&AuthInfo2Order::new(domain("example.de"), false))
+        .await
+        .unwrap_err();
+
+    assert!(error.is_uncertain(), "{error:?}");
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
+async fn a_transient_status_on_an_order_with_a_verdict_stays_an_api_error() {
+    // The API did answer with a rejection: that is a verdict, not an
+    // uncertainty, and a rejected command is never repeated.
+    let transport = MockTransport::new();
+    transport.status(500, r#"{"code":2303,"msg":"domain not found"}"#);
+    transport.ok(json!({ "product": "DE-AuthInfo2" }));
+
+    let error = client(transport.clone())
+        .create_auth_info2(&AuthInfo2Order::new(domain("example.de"), false))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, Error::Api { code: 2303, .. }), "{error:?}");
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
+async fn a_success_envelope_behind_a_transient_status_is_still_uncertain_for_an_order() {
+    // HTTP says the transport failed, the body says it worked. For a billable
+    // order that contradiction is not an answer: report it and stop.
+    let transport = MockTransport::new();
+    transport.status(
+        502,
+        r#"{"code":1000,"msg":"Command completed successfully","resData":{"price":1.43}}"#,
+    );
+
+    let error = client(transport.clone())
+        .create_auth_info2(&AuthInfo2Order::new(domain("example.de"), false))
+        .await
+        .unwrap_err();
+
+    assert!(error.is_uncertain(), "{error:?}");
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
+async fn the_price_query_is_replayed_like_any_read() {
+    let transport = MockTransport::new();
+    transport.status(500, "");
+    transport.ok(json!({ "price": 1.43, "currency": "EUR" }));
+
+    let quote = client(transport.clone()).auth_info2_price().await.unwrap();
+
+    assert_eq!(quote.price, Some(1.43));
+    assert_eq!(transport.call_count(), 2);
 }
 
 // ----------------------------------------------------------------- customer --

@@ -1,274 +1,262 @@
-//! `AuthInfo2` (`authinfo2.*`): the registry-side authorisation info of a domain.
+//! The `authinfo2.*` object: the `AuthInfo2` product for `.de` domains.
 //!
-//! Two methods: create the value for a domain, and ask what that costs before
-//! creating it. The value itself is a secret — like the EPP
-//! [`AuthCode`](crate::AuthCode) it prints `<redacted>` in `Debug` and
-//! `Display`, so it cannot leak through a log line or an `unwrap` in a test.
+//! A `.de` domain has no EPP transfer code; the registry moves it with an
+//! `AuthInfo2` token instead, and moving one is a paid order. Two methods cover
+//! that: `authinfo2.create` orders the product for a single domain, and
+//! `authinfo2.getprice` asks what such an order costs.
+//!
+//! The answer of `create` is an order confirmation — a product name and the
+//! amount that was charged — not the token itself, so nothing here is redacted:
+//! what a secret would look like is covered by [`AuthCode`](crate::AuthCode).
 //!
 //! ```
-//! use inwx_client::AuthInfo2;
+//! use inwx_client::{AuthInfo2Order, DomainName};
 //!
-//! let value = AuthInfo2::new("aB3-xY9_42")?;
-//! assert_eq!(value.as_str(), "aB3-xY9_42");
-//! assert_eq!(format!("{value:?}"), "AuthInfo2(<redacted>)");
-//! assert!(AuthInfo2::new("").is_err()); // fail closed on an empty secret
+//! let order = AuthInfo2Order::new(DomainName::parse("example.de")?, true);
+//! let params = order.params();
+//! assert_eq!(params["domain"], "example.de");
+//! assert_eq!(params["testing"], true); // a dry run: the order is not placed
 //! # Ok::<(), inwx_client::Error>(())
 //! ```
+//!
+//! Note the parameter name: this object sends `domain`, not the `domainName`
+//! the rest of the API uses.
 
-use std::fmt;
-use std::str::FromStr;
-
-use serde::de::Error as _;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::json;
+use serde::Deserialize;
+use serde_json::{json, Map, Value};
 
 use crate::client::InwxClient;
 use crate::error::{Error, Result};
 use crate::transport::Transport;
 use crate::types::{de, DomainName};
 
-/// The `AuthInfo2` value of a domain.
+/// A request for `authinfo2.create`: the domain plus the dry-run switch.
 ///
-/// A printable, whitespace-free token of at most 255 characters. An empty value
-/// is refused: an empty secret is never a secret.
+/// `testing` is a parameter of the constructor and not a default, because the
+/// difference between the two calls is whether money is spent: `false` places a
+/// billable order, `true` only asks what would happen.
 ///
 /// ```
-/// use inwx_client::AuthInfo2;
+/// use inwx_client::{AuthInfo2Order, DomainName};
 ///
-/// let value = AuthInfo2::new("s3cr3t-value")?;
-/// assert_eq!(value.as_str(), "s3cr3t-value");
-/// assert_eq!(value.to_string(), "<redacted>");
+/// let domain = DomainName::parse("example.de")?;
+/// let dry_run = AuthInfo2Order::new(domain.clone(), true);
+/// assert_eq!(dry_run.params()["testing"], true);
+///
+/// let real = AuthInfo2Order::new(domain, false);
+/// assert!(real.params().get("testing").is_none());
+/// assert_eq!(real.domain().as_str(), "example.de");
 /// # Ok::<(), inwx_client::Error>(())
 /// ```
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct AuthInfo2(String);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthInfo2Order {
+    domain: DomainName,
+    testing: bool,
+}
 
-impl AuthInfo2 {
-    /// Validates an `AuthInfo2` value.
+impl AuthInfo2Order {
+    /// Builds the request for `domain`, with `testing` as the explicit opt-in
+    /// to a dry run.
     ///
-    /// # Errors
-    ///
-    /// [`Error::Validation`] when the value is empty, longer than 255
-    /// characters, not printable ASCII, or contains whitespace.
-    ///
-    /// ```
-    /// use inwx_client::AuthInfo2;
-    ///
-    /// assert!(AuthInfo2::new("x".repeat(255)).is_ok());
-    /// assert!(AuthInfo2::new("x".repeat(256)).is_err());
-    /// assert!(AuthInfo2::new("two words").is_err());
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    pub fn new(value: impl Into<String>) -> Result<Self> {
-        let raw = value.into();
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            return Err(Error::validation("authInfo2", "must not be empty"));
-        }
-        if trimmed.chars().count() > 255 {
-            return Err(Error::validation(
-                "authInfo2",
-                "must be at most 255 characters",
-            ));
-        }
-        if !trimmed.is_ascii() {
-            return Err(Error::validation("authInfo2", "must be printable ASCII"));
-        }
-        if trimmed.chars().any(char::is_whitespace) || trimmed.chars().any(char::is_control) {
-            return Err(Error::validation(
-                "authInfo2",
-                "must not contain whitespace or control characters",
-            ));
-        }
-        Ok(Self(trimmed.to_owned()))
-    }
-
-    /// The value, for the caller who is allowed to see it.
+    /// The domain arrives as the validated [`DomainName`], so an empty name, a
+    /// malformed one or one beyond
+    /// [`MAX_DOMAIN_LEN`](crate::MAX_DOMAIN_LEN) is already a parse error
+    /// by the time an order can exist. Upstream types `domain` as `text255`;
+    /// a name has to be a syntactically valid domain here, which is stricter.
     ///
     /// ```
-    /// use inwx_client::AuthInfo2;
-    /// assert_eq!(AuthInfo2::new("abc123")?.as_str(), "abc123");
+    /// use inwx_client::{AuthInfo2Order, DomainName};
+    ///
+    /// let order = AuthInfo2Order::new(DomainName::parse("example.de")?, false);
+    /// assert!(!order.is_testing());
+    /// assert_eq!(order.params()["domain"], "example.de");
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
+    pub fn new(domain: DomainName, testing: bool) -> Self {
+        Self { domain, testing }
+    }
+
+    /// The domain the order is for.
+    ///
+    /// ```
+    /// use inwx_client::{AuthInfo2Order, DomainName};
+    ///
+    /// let order = AuthInfo2Order::new(DomainName::parse("example.de")?, false);
+    /// assert_eq!(order.domain().as_str(), "example.de");
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn domain(&self) -> &DomainName {
+        &self.domain
+    }
+
+    /// Whether this is a dry run instead of a real order.
+    ///
+    /// ```
+    /// use inwx_client::{AuthInfo2Order, DomainName};
+    ///
+    /// assert!(AuthInfo2Order::new(DomainName::parse("example.de")?, true).is_testing());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn is_testing(&self) -> bool {
+        self.testing
+    }
+
+    /// The `authinfo2.create` parameters.
+    ///
+    /// `testing` is left out entirely unless it is set, so the wire format
+    /// never states a default the API did not ask for.
+    ///
+    /// ```
+    /// use inwx_client::{AuthInfo2Order, DomainName};
+    ///
+    /// let params = AuthInfo2Order::new(DomainName::parse("example.de")?, false).params();
+    /// assert_eq!(params, serde_json::json!({ "domain": "example.de" }));
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn params(&self) -> Value {
+        let mut params = Map::new();
+        params.insert("domain".to_owned(), json!(self.domain.as_str()));
+        if self.testing {
+            params.insert("testing".to_owned(), json!(true));
+        }
+        Value::Object(params)
     }
 }
 
-impl fmt::Debug for AuthInfo2 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("AuthInfo2(<redacted>)")
-    }
-}
-
-impl fmt::Display for AuthInfo2 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("<redacted>")
-    }
-}
-
-impl FromStr for AuthInfo2 {
-    type Err = Error;
-
-    fn from_str(input: &str) -> Result<Self> {
-        Self::new(input)
-    }
-}
-
-impl Serialize for AuthInfo2 {
-    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for AuthInfo2 {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-        let raw = String::deserialize(deserializer)?;
-        Self::new(raw).map_err(D::Error::custom)
-    }
-}
-
-/// An optional `AuthInfo2` that drops an unusable value instead of failing the
-/// whole answer.
-fn opt_auth_info2<'de, D>(deserializer: D) -> std::result::Result<Option<AuthInfo2>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(de::opt_string(deserializer)?.and_then(|raw| AuthInfo2::new(raw).ok()))
-}
-
-/// The answer of `authinfo2.create`.
+/// The answer of `authinfo2.create`: the confirmation of a placed order.
+///
+/// Every field is optional and unknown keys are ignored, so a change in what
+/// INWX reports costs a `None` instead of a failed parse. Prices are the
+/// documented `float`s and arrive as numbers or as numeric strings; both spell-
+/// ings of each key (`net_price` and `netPrice`) are accepted.
 ///
 /// ```
-/// use inwx_client::AuthInfo2Record;
+/// use inwx_client::AuthInfo2OrderResult;
 ///
-/// let record: AuthInfo2Record = serde_json::from_str(
-///     r#"{"domainName":"example.com","authInfo2":"aB3-xY9_42","status":"ACTIVE"}"#,
+/// let result: AuthInfo2OrderResult = serde_json::from_str(
+///     r#"{"product":"DE-AuthInfo2","net_price":"1.20","price":1.43,
+///         "currency":"EUR","message":"order placed","vat":19.0}"#,
 /// )?;
-/// assert_eq!(record.domain.as_deref(), Some("example.com"));
-/// assert!(record.auth_info2.is_some());
+/// assert_eq!(result.product.as_deref(), Some("DE-AuthInfo2"));
+/// assert_eq!(result.net_price, Some(1.20));
+/// assert_eq!(result.price, Some(1.43));
+/// assert_eq!(result.currency.as_deref(), Some("EUR"));
 /// # Ok::<(), serde_json::Error>(())
 /// ```
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-pub struct AuthInfo2Record {
-    /// Id of the object the value belongs to, when the API reports one.
-    #[serde(default, deserialize_with = "de::opt_i64")]
-    pub id: Option<i64>,
-    /// Domain the value belongs to.
-    #[serde(
-        default,
-        rename = "domainName",
-        alias = "domain",
-        deserialize_with = "de::opt_string"
-    )]
-    pub domain: Option<String>,
-    /// The value itself; `None` when the API sent nothing usable.
-    #[serde(
-        default,
-        rename = "authInfo2",
-        alias = "authinfo2",
-        deserialize_with = "opt_auth_info2"
-    )]
-    pub auth_info2: Option<AuthInfo2>,
-    /// State of the value, carried verbatim.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct AuthInfo2OrderResult {
+    /// The `AuthInfo2` product that was ordered.
     #[serde(default, deserialize_with = "de::opt_string")]
-    pub status: Option<String>,
+    pub product: Option<String>,
+    /// Price without VAT.
+    #[serde(default, alias = "netPrice", deserialize_with = "de::opt_f64")]
+    pub net_price: Option<f64>,
+    /// Price including VAT.
+    #[serde(default, deserialize_with = "de::opt_f64")]
+    pub price: Option<f64>,
+    /// Currency of both amounts, kept as the string the API sent.
+    #[serde(default, deserialize_with = "de::opt_string")]
+    pub currency: Option<String>,
+    /// What the API has to say about the order.
+    #[serde(default, deserialize_with = "de::opt_string")]
+    pub message: Option<String>,
 }
 
-/// The answer of `authinfo2.getprice`.
+/// The answer of `authinfo2.getprice`: what an `AuthInfo2` order costs.
 ///
 /// ```
 /// use inwx_client::AuthInfo2PriceQuote;
 ///
-/// let quote: AuthInfo2PriceQuote =
-///     serde_json::from_str(r#"{"netPrice":"1.20","grossPrice":1.43,"currency":"EUR"}"#)?;
-/// assert_eq!(quote.net_price, Some(1.20));
+/// let quote: AuthInfo2PriceQuote = serde_json::from_str(
+///     r#"{"product":"DE-AuthInfo2","netPrice":1.2,"price":"1.43","currency":"EUR"}"#,
+/// )?;
+/// assert_eq!(quote.net_price, Some(1.2));
+/// assert_eq!(quote.price, Some(1.43));
 /// assert_eq!(quote.currency.as_deref(), Some("EUR"));
 /// # Ok::<(), serde_json::Error>(())
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct AuthInfo2PriceQuote {
+    /// The product the quote is for.
+    #[serde(default, deserialize_with = "de::opt_string")]
+    pub product: Option<String>,
     /// Price without VAT.
-    #[serde(
-        default,
-        rename = "netPrice",
-        alias = "net_price",
-        deserialize_with = "de::opt_f64"
-    )]
+    #[serde(default, alias = "netPrice", deserialize_with = "de::opt_f64")]
     pub net_price: Option<f64>,
     /// Price including VAT.
-    #[serde(
-        default,
-        rename = "grossPrice",
-        alias = "gross_price",
-        deserialize_with = "de::opt_f64"
-    )]
-    pub gross_price: Option<f64>,
-    /// Currency of both amounts.
+    #[serde(default, deserialize_with = "de::opt_f64")]
+    pub price: Option<f64>,
+    /// Currency of both amounts, kept as the string the API sent.
     #[serde(default, deserialize_with = "de::opt_string")]
     pub currency: Option<String>,
-    /// Applied VAT rate, when the API sends one.
-    #[serde(default, deserialize_with = "de::opt_f64")]
-    pub vat: Option<f64>,
-    /// Explanation, when the API sends one.
-    #[serde(default, deserialize_with = "de::opt_string")]
-    pub message: Option<String>,
 }
 
 impl<T: Transport> InwxClient<T> {
-    /// Creates the `AuthInfo2` value for a domain (`authinfo2.create`).
+    /// Orders the `AuthInfo2` product for a domain (`authinfo2.create`).
+    ///
+    /// Pass `testing: true` on the [`AuthInfo2Order`] to ask instead of order.
     ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
     /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
-    /// use inwx_client::{DomainName, InwxClient, ReqwestTransport};
+    /// use inwx_client::{AuthInfo2Order, DomainName, InwxClient, ReqwestTransport};
     ///
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
-    /// let record = client.create_auth_info2(&DomainName::parse("example.com")?).await?;
-    /// // The value is secret: print it explicitly, never through `Debug`.
-    /// println!("{}", record.auth_info2.is_some());
+    /// let order = AuthInfo2Order::new(DomainName::parse("example.de")?, false);
+    /// let result = client.create_auth_info2(&order).await?;
+    /// println!("{:?} {:?} {:?}", result.product, result.price, result.currency);
     /// # Ok(())
     /// # }
     /// ```
     ///
+    /// This is a billable, non-idempotent order, so it is never replayed: on a
+    /// 429, a 5xx or a timeout after the request was written the call answers
+    /// [`Error::Uncertain`] after a single attempt. Check the current state
+    /// (`domain.info`) before ordering again — a retry could buy the product
+    /// twice.
+    ///
     /// # Errors
     ///
-    /// The usual transport and API errors; `2303` when the domain is not in this
-    /// account.
-    pub async fn create_auth_info2(&self, domain: &DomainName) -> Result<AuthInfo2Record> {
-        let data = self
-            .call("authinfo2.create", json!({ "domainName": domain.as_str() }))
-            .await?;
+    /// [`Error::NotAuthenticated`] without a session, [`Error::Api`] when the
+    /// domain is not in this account (`2303`) or the product is unavailable,
+    /// [`Error::Transport`]/[`Error::Http`] for a transport or HTTP failure,
+    /// [`Error::Json`] for an unreadable body, and [`Error::Uncertain`] when the
+    /// request was written but the answer never arrived — that outcome is never
+    /// replayed, because the order may already have been placed.
+    pub async fn create_auth_info2(&self, order: &AuthInfo2Order) -> Result<AuthInfo2OrderResult> {
+        let data = self.call("authinfo2.create", order.params()).await?;
         serde_json::from_value(data).map_err(Error::from)
     }
 
-    /// What creating the `AuthInfo2` value would cost (`authinfo2.getprice`).
+    /// What an `AuthInfo2` order would cost (`authinfo2.getprice`).
+    ///
+    /// The method takes no parameters upstream, so this sends an empty object.
     ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
     /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
-    /// use inwx_client::{DomainName, InwxClient, ReqwestTransport};
+    /// use inwx_client::{InwxClient, ReqwestTransport};
     ///
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
-    /// let quote = client.auth_info2_price(&DomainName::parse("example.com")?).await?;
-    /// println!("{:?} {:?}", quote.net_price, quote.currency);
+    /// let quote = client.auth_info2_price().await?;
+    /// println!("{:?} {:?} {:?}", quote.product, quote.price, quote.currency);
     /// # Ok(())
     /// # }
     /// ```
     ///
     /// # Errors
     ///
-    /// The usual transport and API errors.
-    pub async fn auth_info2_price(&self, domain: &DomainName) -> Result<AuthInfo2PriceQuote> {
-        let data = self
-            .call(
-                "authinfo2.getprice",
-                json!({ "domainName": domain.as_str() }),
-            )
-            .await?;
+    /// [`Error::NotAuthenticated`], [`Error::Api`], [`Error::Transport`],
+    /// [`Error::Uncertain`], [`Error::Json`] or [`Error::Http`]. Being
+    /// read-only, the call is replayed on a transient failure.
+    pub async fn auth_info2_price(&self) -> Result<AuthInfo2PriceQuote> {
+        let data = self.call("authinfo2.getprice", json!({})).await?;
         serde_json::from_value(data).map_err(Error::from)
     }
 }
@@ -276,34 +264,86 @@ impl<T: Transport> InwxClient<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{MAX_DOMAIN_LEN, MAX_LABEL_LEN};
 
-    #[test]
-    fn a_value_of_255_characters_is_accepted_and_256_is_not() {
-        assert!(AuthInfo2::new("x".repeat(255)).is_ok());
-        assert!(AuthInfo2::new("x".repeat(256)).is_err());
-        assert!(AuthInfo2::new("").is_err());
-    }
-
-    #[test]
-    fn the_secret_never_reaches_debug_or_display() {
-        let value = AuthInfo2::new("do-not-log-me").unwrap();
-        assert_eq!(format!("{value:?}"), "AuthInfo2(<redacted>)");
-        assert_eq!(value.to_string(), "<redacted>");
-        assert!(!format!("{value:?}").contains("do-not-log-me"));
-    }
-
-    #[test]
-    fn an_unusable_secret_is_dropped_not_fatal() {
-        let record: AuthInfo2Record =
-            serde_json::from_str(r#"{"authInfo2":"with space","domainName":"a.de"}"#).unwrap();
-        assert!(record.auth_info2.is_none());
-        assert_eq!(record.domain.as_deref(), Some("a.de"));
-
-        let snake: AuthInfo2Record =
-            serde_json::from_str(r#"{"authinfo2":"ok","domain":"a.de"}"#).unwrap();
-        assert_eq!(
-            snake.auth_info2.map(|value| value.as_str().to_owned()),
-            Some("ok".to_owned())
+    /// A name of exactly `length` characters built from valid labels.
+    fn domain_of_len(length: usize) -> String {
+        let head = format!(
+            "{}.{}.{}.",
+            "a".repeat(MAX_LABEL_LEN),
+            "b".repeat(MAX_LABEL_LEN),
+            "c".repeat(MAX_LABEL_LEN)
         );
+        format!("{head}{}", "d".repeat(length - head.len()))
+    }
+
+    #[test]
+    fn a_domain_of_253_characters_is_accepted_and_254_is_not() {
+        // Just inside the limit, just outside it, and the degenerate case.
+        let at_limit = domain_of_len(MAX_DOMAIN_LEN);
+        assert_eq!(at_limit.chars().count(), MAX_DOMAIN_LEN);
+        let order = AuthInfo2Order::new(DomainName::parse(&at_limit).unwrap(), true);
+        assert_eq!(
+            order.params()["domain"].as_str().map(str::len),
+            Some(MAX_DOMAIN_LEN)
+        );
+
+        let over_limit = format!("{at_limit}d");
+        assert_eq!(over_limit.chars().count(), MAX_DOMAIN_LEN + 1);
+        assert!(DomainName::parse(&over_limit).is_err());
+
+        assert!(DomainName::parse("").is_err());
+        assert!(DomainName::parse("   ").is_err());
+    }
+
+    #[test]
+    fn testing_is_only_sent_when_it_is_set() {
+        let domain = DomainName::parse("example.de").unwrap();
+        let dry = AuthInfo2Order::new(domain.clone(), true);
+        assert_eq!(dry.params()["testing"], json!(true));
+        assert!(dry.is_testing());
+
+        let real = AuthInfo2Order::new(domain.clone(), false);
+        assert!(real.params().get("testing").is_none());
+        assert!(!real.is_testing());
+        assert_eq!(real.domain(), &domain);
+
+        // Two orders of the same shape are equal; a flipped switch is not.
+        assert_eq!(real, AuthInfo2Order::new(domain.clone(), false));
+        assert_ne!(real, dry);
+        let _ = format!("{real:?}");
+        let _ = real.clone();
+    }
+
+    #[test]
+    fn both_spellings_decode_and_unknown_fields_are_ignored() {
+        let snake: AuthInfo2OrderResult = serde_json::from_str(
+            r#"{"product":"P","net_price":1.5,"price":2.0,"currency":"EUR","message":"m","extra":{"a":1}}"#,
+        )
+        .unwrap();
+        assert_eq!(snake.net_price, Some(1.5));
+        assert_eq!(snake.message.as_deref(), Some("m"));
+
+        let camel: AuthInfo2OrderResult =
+            serde_json::from_str(r#"{"netPrice":"1.5","price":"2.0"}"#).unwrap();
+        assert_eq!(camel.net_price, Some(1.5));
+        assert_eq!(camel.price, Some(2.0));
+    }
+
+    #[test]
+    fn an_unusable_price_degrades_to_none_instead_of_failing() {
+        let wrong_type: AuthInfo2PriceQuote =
+            serde_json::from_str(r#"{"net_price":true,"price":[1,2],"currency":"EUR"}"#).unwrap();
+        assert_eq!(wrong_type.net_price, None);
+        assert_eq!(wrong_type.price, None);
+        assert_eq!(wrong_type.currency.as_deref(), Some("EUR"));
+
+        let missing: AuthInfo2PriceQuote = serde_json::from_str(r"{}").unwrap();
+        assert_eq!(missing, AuthInfo2PriceQuote::default());
+
+        let null: AuthInfo2OrderResult =
+            serde_json::from_str(r#"{"product":null,"net_price":null}"#).unwrap();
+        assert_eq!(null.product, None);
+        assert_eq!(null.net_price, None);
     }
 }

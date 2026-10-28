@@ -86,7 +86,8 @@ Every method below is implemented against the published INWX API documentation
 | Reseller: customers | `customer.info`, `update`, `delete`, `contactverificationsettingsinfo`, `contactverificationsettingsupdate`, `listdownloads`, `requestdataexport` | e-mail, country code and address lengths checked; the data export is what copies personal data out |
 | Reseller: hosts | `host.check`, `create`, `delete`, `info`, `list`, `update` | a glue record must sit inside its own domain, 1–13 addresses, no duplicates |
 | Reseller: documents | `document.upload`, `list`, `download`, `delete` | file name is never a path, size checked before base64, the body stays out of `Debug` |
-| Reseller: messages, news, handles, PDFs | `message.poll`, `message.ack`, `news.list`, `nichandle.list`, `pdf.document`, `pdf.get` | an empty mailbox is `None`, not an error; the AuthInfo2 value (`authinfo2.create`, `authinfo2.getprice`) is redacted in `Debug` |
+| Reseller: messages, news, handles, PDFs | `message.poll`, `message.ack`, `news.list`, `nichandle.list`, `pdf.document`, `pdf.get` | an empty mailbox is `None`, not an error |
+| Reseller: AuthInfo2 | `authinfo2.create`, `authinfo2.getprice` | the paid order is never replayed after a 429/5xx or a timeout — that answers `Error::Uncertain`; `testing` is an explicit opt-in |
 | Anything else | `InwxClient::call(method, params)` | login, cookies, retries and error envelopes still apply |
 
 ### Design
@@ -167,7 +168,7 @@ documentation does not state:
 | `tag.list` `count.domain` nesting | **unverified** — the table's indentation is ambiguous; both shapes are tolerated. |
 | `dyndnssubscription.cancel` id semantics | **unverified** — Table 2.161 types `id` as "the customer's subscription id", while `create` uses the same name for the plan id; the crate takes two separate parameters so the two cannot be confused. |
 | Every 0.2.0 write against a live endpoint | **unverified** — no credentials in CI; method names, parameters and datatypes come from the tables in `docs/contracts.md`. |
-| The reseller/partner objects (`application.*`, `authinfo2.*`, `customer.*`, `document.*`, `host.*`, `message.*`, `news.list`, `nichandle.list`, `pdf.*`) | **unverified** — added without network access, so chapter 2 §2.3–§2.21 could not be re-read. Request keys follow the spellings the rest of the API uses; every response field is optional and tolerant, so a wrong key costs a `None`. The `Table 2.NNN` numbers in `docs/contracts.md` are derived from the anchors of the earlier sections, not read from the pages. |
+| The reseller/partner objects (`application.*`, `customer.*`, `document.*`, `host.*`, `message.*`, `news.list`, `nichandle.list`, `pdf.*`) | **unverified** — added without network access, so chapter 2 §2.3–§2.21 could not be re-read. Request keys follow the spellings the rest of the API uses; every response field is optional and tolerant, so a wrong key costs a `None`. The `Table 2.NNN` numbers in `docs/contracts.md` are derived from the anchors of the earlier sections, not read from the pages. `authinfo2.*` is no longer on this list: issue #54 read ch02s04, so its `domain` request key and its `product`/`net_price`/`price`/`currency`/`message` output fields are from the page (the table numbers there are still derived). |
 | Unicode → punycode | UTS-46 mapping via `idna`, so emoji become punycode and characters the mapping deletes disappear. The ACE form (`DomainName::as_str`) is what is sent, logged and compared. |
 
 Two methods the predecessor implementation called do **not** exist in the
@@ -193,14 +194,16 @@ documented API and were replaced: `domain.cancel` (use `domain.delete` or
   if it contains a private key — the field takes a signing request only.
 * Retries are bounded and only apply to transient failures that happened before
   the request was written, so a rejected registration cannot be submitted three
-  times. A failure after it was written comes back as `Error::Uncertain` instead
-  of being replayed, because the domain may already exist — check the current
-  state (`domain.info`) before trying again.
+  times. After the request was written the method decides: a read-only method is
+  replayed, anything else comes back as `Error::Uncertain` — including a 429 or a
+  5xx on a write, whose status says nothing about whether the command already
+  ran. `authinfo2.create` is a paid order and is therefore never replayed; check
+  the current state (`domain.info`) before trying again.
 
 ## Testing
 
 ```bash
-cargo test                        # unit + integration + 846 doctests, no network
+cargo test                        # unit + integration + 857 doctests, no network
 cargo test --no-default-features  # the same, without reqwest/tokio
 cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --no-deps --all-features
@@ -238,8 +241,8 @@ cargo +nightly fuzz run parse_response
 * **Fuzz** — `fuzz/fuzz_targets/parse_response.rs` feeds arbitrary bytes through
   the JSON-RPC parser and every typed decoder on `resData`; seeded with success,
   pending, error and hostile-shape bodies.
-  Since issue #22 that list includes the reseller decoders and the three
-  user-input parsers they rely on (`ApplicationType`, `AuthInfo2`,
+  Since issue #22 that list includes the reseller decoders and the user-input
+  parsers they rely on (`ApplicationType`, `DomainName` for an AuthInfo2 order,
   `DocumentUpload`).
 
 ## License

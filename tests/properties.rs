@@ -471,12 +471,12 @@ proptest! {
 // --------------------------------------------------- reseller objects (#22)
 
 use inwx_client::{
-    Application, ApplicationCheckResult, ApplicationQuery, ApplicationType, AuthInfo2PriceQuote,
-    AuthInfo2Record, ContactVerificationSettings, Customer, CustomerDownload,
-    CustomerDownloadQuery, CustomerUpdate, DataExport, DocumentEntry, DocumentQuery,
-    DocumentUpload, DownloadedDocument, HostCheckResult, HostCreate, HostQuery, HostRecord,
-    HostUpdate, Message, MessageAck, NicHandle, NicHandleQuery, PdfFile, PdfHandle, PdfRender,
-    PolledMessage, MAX_HOST_ADDRESSES,
+    Application, ApplicationCheckResult, ApplicationQuery, ApplicationType, AuthInfo2Order,
+    AuthInfo2OrderResult, AuthInfo2PriceQuote, ContactVerificationSettings, Customer,
+    CustomerDownload, CustomerDownloadQuery, CustomerUpdate, DataExport, DocumentEntry,
+    DocumentQuery, DocumentUpload, DownloadedDocument, HostCheckResult, HostCreate, HostQuery,
+    HostRecord, HostUpdate, Message, MessageAck, NicHandle, NicHandleQuery, PdfFile, PdfHandle,
+    PdfRender, PolledMessage, MAX_HOST_ADDRESSES,
 };
 
 proptest! {
@@ -594,6 +594,32 @@ proptest! {
         prop_assert!(CustomerDownloadQuery::new(1).unwrap().with_page(1, 0).is_err());
     }
 
+    /// The `authinfo2.create` parameters echo the validated domain verbatim
+    /// under the `domain` key, and carry `testing` exactly when it was asked
+    /// for — never a stated default, never an extra key.
+    #[test]
+    fn auth_info2_order_params_echo_the_domain(
+        name in "[a-z0-9]([a-z0-9-]{0,20}[a-z0-9])?",
+        testing in proptest::bool::ANY,
+    ) {
+        let order_domain = DomainName::parse(&format!("{name}.de")).unwrap();
+        let order = AuthInfo2Order::new(order_domain.clone(), testing);
+        let params = order.params();
+        prop_assert_eq!(order.domain(), &order_domain);
+        prop_assert_eq!(order.is_testing(), testing);
+        prop_assert_eq!(params["domain"].as_str(), Some(order_domain.as_str()));
+        prop_assert_eq!(params.get("testing").is_some(), testing);
+        if testing {
+            prop_assert_eq!(&params["testing"], &Value::Bool(true));
+        }
+        prop_assert_eq!(
+            params.as_object().map_or(0, serde_json::Map::len),
+            if testing { 2 } else { 1 }
+        );
+        // Those two fields are the whole order, so they decide equality too.
+        prop_assert_eq!(order, AuthInfo2Order::new(order_domain, testing));
+    }
+
     /// Every reseller decoder either yields a value or reports an error — a
     /// payload from the wire never panics and never unwraps.
     #[test]
@@ -612,7 +638,7 @@ fn decode_every_reseller_row(payload: &Value) {
     let _ = serde_json::from_value::<ApplicationCheckResult>(payload.clone())
         .map(|check| check.is_available());
     let _ = serde_json::from_value::<AuthInfo2PriceQuote>(payload.clone());
-    let _ = serde_json::from_value::<AuthInfo2Record>(payload.clone());
+    let _ = serde_json::from_value::<AuthInfo2OrderResult>(payload.clone());
     let _ = serde_json::from_value::<ContactVerificationSettings>(payload.clone())
         .map(|settings| settings.is_verified());
     let _ = serde_json::from_value::<Customer>(payload.clone());

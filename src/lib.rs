@@ -53,7 +53,8 @@
 //! | Customers | `customer.info`, `update`, `delete`, `contactverificationsettingsinfo`, `contactverificationsettingsupdate`, `listdownloads`, `requestdataexport` |
 //! | Hosts (glue records) | `host.check`, `create`, `delete`, `info`, `list`, `update` |
 //! | Documents | `document.upload`, `list`, `download`, `delete` |
-//! | Messages, news, handles, PDFs | `message.poll`, `ack`; `news.list`; `nichandle.list`; `pdf.document`, `pdf.get`; `authinfo2.create`, `getprice` |
+//! | Messages, news, handles, PDFs | `message.poll`, `ack`; `news.list`; `nichandle.list`; `pdf.document`, `pdf.get` |
+//! | `AuthInfo2` | `authinfo2.create`, `authinfo2.getprice` |
 //!
 //! Unknown methods stay reachable through [`InwxClient::call`]; what is not
 //! modelled yet is tracked as an issue, not hidden as "out of scope".
@@ -100,7 +101,10 @@
 //!   signing request, and anything else would upload a secret to a third party.
 //! * Retries are bounded (three attempts, exponential backoff) and only apply to
 //!   failures that happened before the request was written, 429/5xx and `2300`
-//!   (pending transfer) — a rejected command is never repeated.
+//!   (pending transfer) — a rejected command is never repeated. A 429/5xx is
+//!   replayed only for a read-only method as well: for an order the status says
+//!   nothing about whether it already went through, so that outcome is
+//!   [`Error::Uncertain`] after a single attempt.
 //! * A transport failure after the request was written (a timeout, a reset
 //!   mid-response) is [`Error::Uncertain`]: the command may have run. It is
 //!   replayed only for a read-only method ([`is_read_only_method`]), never for a
@@ -149,7 +153,7 @@ pub use application::{
     Application, ApplicationCheck, ApplicationCheckResult, ApplicationCreate, ApplicationQuery,
     ApplicationType, ApplicationUpdate,
 };
-pub use authinfo2::{AuthInfo2, AuthInfo2PriceQuote, AuthInfo2Record};
+pub use authinfo2::{AuthInfo2Order, AuthInfo2OrderResult, AuthInfo2PriceQuote};
 pub use certificate::{
     Certificate, CertificateId, CertificateLogEntry, CertificateMissingData, CertificateOrder,
     CertificateOrderResult, CertificateProduct, CertificateProductQuery, CertificateQuery,
