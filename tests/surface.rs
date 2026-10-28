@@ -468,6 +468,12 @@ fn error_helpers_cover_every_branch() {
         retryable: false,
     };
     assert!(!transport.is_retryable());
+    assert!(!transport.is_ambiguous());
+
+    let ambiguous = Error::ambiguous("timeout");
+    assert!(ambiguous.is_ambiguous());
+    assert!(!ambiguous.is_retryable());
+    assert!(ambiguous.to_string().contains("timeout"));
 
     let missing = Error::MissingField {
         method: "domain.info",
