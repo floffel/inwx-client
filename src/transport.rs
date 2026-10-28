@@ -252,6 +252,51 @@ impl Response {
     }
 }
 
+/// Where a transport failure happened relative to the moment the request bytes
+/// left the process.
+///
+/// The stage is what decides whether a retry is safe: a command that was never
+/// written can be replayed freely, one that was written and then lost may
+/// already have been executed.
+///
+/// ```
+/// use inwx_client::TransportStage;
+///
+/// assert!(TransportStage::BeforeSend.is_safe_to_retry());
+/// assert!(!TransportStage::AfterSend.is_safe_to_retry());
+/// assert!(!TransportStage::Local.is_safe_to_retry());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum TransportStage {
+    /// DNS lookup, TCP connect or TLS handshake failed: the request bytes were
+    /// never handed to the API, so replaying cannot duplicate anything.
+    BeforeSend,
+    /// The request had been written when the failure happened — a timeout
+    /// waiting for the answer, a reset mid-response, a truncated or
+    /// undecodable body. The API may already have processed the command.
+    AfterSend,
+    /// The transport could not even build the request (bad URL, bad header):
+    /// nothing left the process, and a retry cannot help.
+    Local,
+}
+
+impl TransportStage {
+    /// Whether a failure at this stage may be replayed whatever the command
+    /// does — `true` only for [`TransportStage::BeforeSend`].
+    ///
+    /// ```
+    /// use inwx_client::TransportStage;
+    ///
+    /// assert!(TransportStage::BeforeSend.is_safe_to_retry());
+    /// assert!(!TransportStage::AfterSend.is_safe_to_retry());
+    /// ```
+    #[must_use]
+    pub fn is_safe_to_retry(self) -> bool {
+        matches!(self, Self::BeforeSend)
+    }
+}
+
 /// Performs one HTTP request. Implement it for your own stack, or use
 /// `ReqwestTransport`.
 ///
@@ -260,7 +305,12 @@ impl Response {
 /// * send exactly the headers in [`Request::headers`] (including `Cookie`),
 /// * return the raw status, headers and body even for non-2xx (the client
 ///   decides what is retryable),
-/// * classify connection failures as [`Error::transport`],
+/// * classify a failure that happened before the request was written (DNS,
+///   connect, TLS) as [`Error::transport`],
+/// * classify a failure that happened after it was written (a timeout waiting
+///   for the answer, a reset mid-response, a truncated body) as
+///   [`Error::uncertain`](Error::uncertain) — the API may have executed the
+///   command, and the client will not replay it for a mutating method,
 /// * never log the body of a `account.login` call: it carries the password.
 ///
 /// ```
@@ -286,7 +336,8 @@ pub trait Transport {
     ///
     /// # Errors
     ///
-    /// [`Error::Transport`] when no response could be obtained.
+    /// [`Error::Transport`] when the request never reached the API,
+    /// [`Error::Uncertain`] when it was written but no usable answer came back.
     fn execute(&self, request: Request<'_>) -> impl std::future::Future<Output = Result<Response>>;
 }
 
@@ -363,21 +414,35 @@ impl Transport for ReqwestTransport {
     }
 }
 
-/// Maps a `reqwest` failure to a retryable transport error without echoing
-/// headers (the cookie header must never reach a log line).
+/// Where a `reqwest` failure sits relative to the moment the request was
+/// written.
+///
+/// The `reqwest` kind flags are exclusive and a connect timeout is reported as
+/// [`reqwest::Error::is_timeout`], not [`reqwest::Error::is_connect`], so the
+/// timeout is checked first and read as "already sent" — the fail-closed side
+/// of an ambiguous classification.
+#[cfg(feature = "http")]
+fn classify_reqwest_error(error: &reqwest::Error) -> (&'static str, TransportStage) {
+    if error.is_timeout() {
+        ("timeout", TransportStage::AfterSend)
+    } else if error.is_connect() {
+        ("connect", TransportStage::BeforeSend)
+    } else if error.is_builder() {
+        ("request", TransportStage::Local)
+    } else if error.is_body() || error.is_decode() {
+        ("body", TransportStage::AfterSend)
+    } else {
+        ("request", TransportStage::AfterSend)
+    }
+}
+
+/// Maps a `reqwest` failure to the error for its stage without echoing headers
+/// (the cookie header must never reach a log line).
 #[cfg(feature = "http")]
 fn describe_reqwest_error(error: &reqwest::Error) -> Error {
-    let kind = if error.is_timeout() {
-        "timeout"
-    } else if error.is_connect() {
-        "connect"
-    } else if error.is_body() || error.is_decode() {
-        "body"
-    } else {
-        "request"
-    };
+    let (kind, stage) = classify_reqwest_error(error);
     // `reqwest::Error` renders the URL but never request headers.
-    Error::transport(format!("{kind}: {error}"))
+    Error::transport_at(stage, format!("{kind}: {error}"))
 }
 
 #[cfg(test)]
@@ -411,5 +476,23 @@ mod tests {
     fn whitespace_only_body_is_null() {
         let response = Response::new(200, std::iter::empty(), b"  \n\t".to_vec());
         assert!(response.json().unwrap().is_null());
+    }
+
+    #[test]
+    fn only_a_failure_before_the_request_was_written_is_safe_to_retry() {
+        assert!(TransportStage::BeforeSend.is_safe_to_retry());
+        assert!(!TransportStage::AfterSend.is_safe_to_retry());
+        assert!(!TransportStage::Local.is_safe_to_retry());
+
+        // The stage decides the error, and the error decides the retry.
+        for stage in [
+            TransportStage::BeforeSend,
+            TransportStage::AfterSend,
+            TransportStage::Local,
+        ] {
+            let error = Error::transport_at(stage, "boom");
+            assert_eq!(error.is_retryable(), stage.is_safe_to_retry());
+            assert_eq!(error.is_uncertain(), stage == TransportStage::AfterSend);
+        }
     }
 }

@@ -104,8 +104,13 @@ Every method below is implemented against the published INWX API documentation
   giving up. Concurrent first calls may each open a session — harmless, and the
   alternative (holding a lock across an await) buys nothing here.
 * **Bounded retries.** Three attempts, exponential backoff from 500 ms to 8 s,
-  only for transport failures, HTTP 429/5xx and result code `2300` (object pending
-  transfer). A rejected command is never repeated.
+  only for failures that happened *before* the request was written (DNS, connect,
+  TLS), HTTP 429/5xx and result code `2300` (object pending transfer). A rejected
+  command is never repeated.
+* **Uncertain is not retried.** A timeout or a reset after the request was
+  written is `Error::Uncertain`: the API may already have run the command. It is
+  replayed only for a read-only method (`is_read_only_method`), never for a
+  mutating one, so a registration cannot be submitted twice.
 
 ## Feature flags
 
@@ -180,8 +185,11 @@ documented API and were replaced: `domain.cancel` (use `domain.delete` or
 * `AuthCode` (the EPP transfer code) prints `<redacted>` in `Debug` and
   `Display`; `DynDnsAccount` redacts its password. A certificate CSR is refused
   if it contains a private key — the field takes a signing request only.
-* Retries are bounded and only apply to transient failures, so a rejected
-  registration cannot be submitted three times.
+* Retries are bounded and only apply to transient failures that happened before
+  the request was written, so a rejected registration cannot be submitted three
+  times. A failure after it was written comes back as `Error::Uncertain` instead
+  of being replayed, because the domain may already exist — check the current
+  state (`domain.info`) before trying again.
 
 ## Testing
 

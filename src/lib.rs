@@ -90,8 +90,12 @@
 //! * A certificate CSR is refused if it contains a private key: the field takes a
 //!   signing request, and anything else would upload a secret to a third party.
 //! * Retries are bounded (three attempts, exponential backoff) and only apply to
-//!   transport failures, 429/5xx and `2300` (pending transfer) — a rejected
-//!   command is never repeated.
+//!   failures that happened before the request was written, 429/5xx and `2300`
+//!   (pending transfer) — a rejected command is never repeated.
+//! * A transport failure after the request was written (a timeout, a reset
+//!   mid-response) is [`Error::Uncertain`]: the command may have run. It is
+//!   replayed only for a read-only method ([`is_read_only_method`]), never for a
+//!   mutating one, so a registration cannot be submitted twice.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -129,8 +133,8 @@ pub use certificate::{
     CertificateTerm, CertificateUpdate, CertificateValidationMethod, MAX_CSR_LEN,
 };
 pub use client::{
-    AccountInfo, Credentials, InwxClient, Language, RetryPolicy, DEFAULT_ATTEMPTS,
-    DEFAULT_BASE_DELAY, DEFAULT_BASE_URL, DEFAULT_MAX_DELAY, SANDBOX_BASE_URL,
+    is_read_only_method, AccountInfo, Credentials, InwxClient, Language, RetryPolicy,
+    DEFAULT_ATTEMPTS, DEFAULT_BASE_DELAY, DEFAULT_BASE_URL, DEFAULT_MAX_DELAY, SANDBOX_BASE_URL,
 };
 pub use contact::{Contact, ContactListPage, ContactQuery, ContactRequest, ContactUpdate};
 pub use dnssec::{
@@ -166,7 +170,7 @@ pub use transfer::{
 };
 #[cfg(feature = "http")]
 pub use transport::ReqwestTransport;
-pub use transport::{Response, Transport};
+pub use transport::{Response, Transport, TransportStage};
 pub use types::{
     parse_ip, AuthCode, ContactType, DocumentFormat, DomainName, Email, Handle, Hostname, Period,
     PriceType, RenewalMode, Timestamp, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
