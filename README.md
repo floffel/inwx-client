@@ -81,7 +81,7 @@ Every method below is implemented against the published INWX API documentation
 | DynDNS | `dyndns.changepassword`, `check`, `create`, `delete`, `info`, `list`, `log`, `updateRecord`; `dyndnssubscription.create`, `cancel`, `list`, `listProducts` | usernames restricted to the documented 5–42 characters |
 | Accounting | `accounting.accountBalance`, `creditLogById`, `getInvoice`, `getPreviewInvoice`, `getReceipt`, `getstatement`, `listInvoices`, `lockedFunds`, `log`, `refund`, `sendbypost` | PDFs decoded from base64 (`Document::pdf_bytes`); `refund` needs the acknowledgement |
 | Contacts | `contact.create`, `contact.info`, `contact.list`, `contact.update`, `contact.delete` | documented field lengths and country codes enforced |
-| Prices | `domain.getPrices`, `domain.getdomainprice` | `f64` quotes, not amounts to sum |
+| Prices | `domain.getPrices`, `domain.getdomainprice`, `domain.getalldomainprices`, `domain.getextradatarules`, `domain.getpromos`, `domain.pricechanges` | `f64` quotes, not amounts to sum |
 | Reseller: applications | `application.check`, `create`, `delete`, `info`, `list`, `update` | types are validated tokens, not a frozen enum; a check needs a selector, an update needs a change |
 | Reseller: customers | `customer.info`, `update`, `delete`, `contactverificationsettingsinfo`, `contactverificationsettingsupdate`, `listdownloads`, `requestdataexport` | e-mail, country code and address lengths checked; the data export is what copies personal data out |
 | Reseller: hosts | `host.check`, `create`, `delete`, `info`, `list`, `update` | a glue record must sit inside its own domain, 1–13 addresses, no duplicates |
@@ -149,8 +149,9 @@ Two items are genuinely outside the crate, and here is why rather than a label:
 
 The API documentation was read, but **no call was made against a live endpoint**
 while building this crate (there are no credentials in CI, and every test runs
-against a mock transport). Points that rest on documentation alone, or that the
-documentation does not state:
+against a mock transport). Since issue #63 some pages could not be re-read here at
+all, because there is no network access. Points that rest on documentation alone,
+that the documentation does not state, or that rest on a page which stayed unread:
 
 | Item | Status |
 | --- | --- |
@@ -160,6 +161,10 @@ documentation does not state:
 | `nameserver.info` returning the record array | documented (Table 2.208) and implemented; that it *also* serves as the record listing (there is no `nameserver.listRecords`) is an inference from the documented method list. |
 | Prices as `float` | documented; parsed as `f64` and accepted from strings. Display-only: use the amount returned by `create`/`renew` for accounting. |
 | `domain.getdomainprice` response shape | documented as `resData.domain[]`; older flat shapes are tolerated by the parser. |
+| `domain.getalldomainprices` request and answer | **unverified** — added without network access, so the page could not be re-read. It sends `page` (clamped to 1) and `pagelimit` (0 is refused locally), plus `tld` unless the list is empty or every entry is blank, and, because it shares `PriceList` with `domain.getPrices`, reads the rows from `price`, `prices` or `domain` and compares them to `count` in `has_more()`. A wrong key costs an empty list, not a failed parse. |
+| `domain.getextradatarules` parameter names | **unverified** — the page could not be re-read. The order type is sent as `pricetype` because `domain.getdomainprice` spells it that way, and the rules are looked for under `extradata`, `extradataRules` or `rules`. Unknown order values stay raw in `order_type`, so a rule is never dropped for a vocabulary the crate does not know. |
+| `domain.getpromos` response shape | **unverified** — added offline; `page`/`pagelimit` are the paging keys the rest of the API uses, the array is looked for under `promo` or `promos`, and the field names of a promo row are not known. Every field is `Option` and tolerant, so a wrong spelling costs a `None`. |
+| `domain.pricechanges` response shape | **unverified** — added offline; paging is modelled on the other list answers, the rows are looked for under `pricechange` or `pricechanges`, and one object where an array is expected is accepted. The change type is carried as a raw string (`action`) because its vocabulary is not documented. |
 | `nameserver.create` with `type=MASTER` and no `ns` | **unverified** — `ns` is optional in the docs; what INWX assigns in that case is not stated. Sent as documented. |
 | `dyndns.updateRecord` account selection | **unverified** — Table 2.159 lists only `ipAddress` and `ipAddressV6`; no account selector is documented. Sent exactly as documented. |
 | `hosting.getPrices` price fields | **unverified** — Table 2.181 lists only `id` and `product`, so no price is modelled. |
@@ -200,12 +205,13 @@ documented API and were replaced: `domain.cancel` (use `domain.delete` or
 ## Testing
 
 ```bash
-cargo test                        # unit + integration + 846 doctests, no network
+cargo test                        # unit + integration + 868 doctests, no network
 cargo test --no-default-features  # the same, without reqwest/tokio
 cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --no-deps --all-features
 cargo llvm-cov --no-default-features --summary-only --fail-under-lines 95
 cargo +nightly fuzz run parse_response
+cargo +nightly fuzz run parse_price_rows
 ```
 
 * **Unit** — permissive scalars, cookie collection, retry backoff, record and
@@ -233,6 +239,10 @@ cargo +nightly fuzz run parse_response
   that upper-cases and reparses up to exactly 64 characters, a document file name
   is never a path or an empty string, an uploaded body survives base64, a host
   takes 1 to 13 addresses, ids are positive and paging stays one-based.
+  The price surface (#63) adds three more: a cents-precise amount decodes to the
+  same value whether INWX sends it as a number or as a decimal string, the
+  direction of a scheduled change agrees with the cents it came from, and an
+  unknown order type is always carried as raw text next to its typed view.
 * **Coverage** — 98.5 % lines / 99.4 % functions without the `http` feature. CI
   gates at 95 %; the reqwest adapter is the only code that needs a socket.
 * **Fuzz** — `fuzz/fuzz_targets/parse_response.rs` feeds arbitrary bytes through
@@ -241,6 +251,10 @@ cargo +nightly fuzz run parse_response
   Since issue #22 that list includes the reseller decoders and the three
   user-input parsers they rely on (`ApplicationType`, `AuthInfo2`,
   `DocumentUpload`).
+  `fuzz/fuzz_targets/parse_price_rows.rs` (issue #63) does the same for the
+  price surface: an amount as a number or a decimal string, a list as an array
+  or a bare object, and a row set under any of the keys INWX uses
+  (`price`, `promo`, `pricechange`, `extradata` and their plurals).
 
 ## License
 

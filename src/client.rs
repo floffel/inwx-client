@@ -937,10 +937,14 @@ const READ_ONLY_METHODS: &[&str] = &[
     "dnssec.info",
     "dnssec.listkeys",
     "domain.check",
+    "domain.getalldomainprices",
     "domain.getdomainprice",
+    "domain.getextradatarules",
     "domain.getprices",
+    "domain.getpromos",
     "domain.info",
     "domain.list",
+    "domain.pricechanges",
     "domain.whois",
     "dyndns.check",
     "dyndns.info",
@@ -1177,6 +1181,25 @@ mod tests {
         assert!(!is_read_only_method("domain.inf"));
         assert!(!is_read_only_method("tag.update"));
         assert!(!is_read_only_method("domain.create"));
+
+        // The price endpoints added for issue #63 sit exactly on the line:
+        // neighbour spellings that the API does not have stay mutating.
+        for method in [
+            "domain.getalldomainprices",
+            "domain.getextradatarules",
+            "domain.getpromos",
+            "domain.pricechanges",
+        ] {
+            assert!(is_read_only_method(method), "{method} only reads");
+            assert!(
+                !is_read_only_method(&format!("{method}x")),
+                "{method}x must stay outside the table"
+            );
+            assert!(
+                !is_read_only_method(method.trim_end_matches('s')),
+                "{method} without its last character must stay outside"
+            );
+        }
 
         // Case and padding are folded away; a bare namespace is not a method.
         assert!(is_read_only_method("  DOMAIN.INFO\t"));

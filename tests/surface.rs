@@ -14,9 +14,10 @@ use inwx_client::{
     transport::{Request, Response, TransportStage},
     AccountInfo, Contact, ContactQuery, ContactRequest, ContactType, ContactUpdate, Credentials,
     DnsRecord, DomainCheck, DomainCreate, DomainInfo, DomainListPage, DomainListQuery, DomainName,
-    DomainPriceQuote, DomainRenew, DomainUpdate, Error, Hostname, InwxClient, Language,
-    NameserverCheck, Period, PriceList, PriceType, RecordId, RecordSpec, RecordType, RecordUpdate,
-    RenewalMode, RetryPolicy, TldPrice, ZoneInfo, ZoneListPage, ZoneSummary,
+    DomainPriceQuote, DomainRenew, DomainUpdate, Error, ExtraDataRule, Hostname, InwxClient,
+    Language, NameserverCheck, Period, PriceChange, PriceList, PriceType, PromoCode, RecordId,
+    RecordSpec, RecordType, RecordUpdate, RenewalMode, RetryPolicy, TldPrice, ZoneInfo,
+    ZoneListPage, ZoneSummary,
 };
 use serde_json::json;
 
@@ -622,10 +623,26 @@ fn response_payload_types_are_constructible_and_comparable() {
     assert_eq!(price.tld.len(), 0);
     let list = PriceList::default();
     assert_eq!(list.len(), 0);
+    assert!(list.is_empty());
+    assert!(!list.has_more());
     assert!(list.find("de").is_none());
 
     let quote = DomainPriceQuote::default();
     assert!(quote.price.is_none());
+
+    let rule = ExtraDataRule::default();
+    assert!(rule.key.is_none());
+    assert_eq!(rule.price_type(), None);
+    assert!(!rule.is_text());
+
+    let promo = PromoCode::default();
+    assert!(promo.code.is_none());
+    assert_eq!(promo.price_type(), None);
+
+    let change = PriceChange::default();
+    assert!(change.tld.is_none());
+    assert_eq!(change.price_type(), None);
+    assert_eq!(change.is_increase(), None);
 
     let contact = Contact::default();
     assert!(contact.handle().is_none());

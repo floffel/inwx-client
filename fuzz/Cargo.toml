@@ -22,4 +22,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "parse_price_rows"
+path = "fuzz_targets/parse_price_rows.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
