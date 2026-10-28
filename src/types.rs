@@ -14,9 +14,37 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::{Error, Result};
 
 /// Longest legal DNS name in presentation form, without the trailing root dot.
+///
+/// ```
+/// use inwx_client::{DomainName, MAX_DOMAIN_LEN};
+///
+/// // 63 + 1 + 63 + 1 + 63 + 1 + 61 = 253.
+/// let at_limit = format!(
+///     "{}.{}.{}.{}",
+///     "a".repeat(63),
+///     "b".repeat(63),
+///     "c".repeat(63),
+///     "d".repeat(61)
+/// );
+/// assert_eq!(at_limit.len(), MAX_DOMAIN_LEN);
+/// assert!(DomainName::parse(&at_limit).is_ok());
+///
+/// let over_limit = format!("{at_limit}e");
+/// assert!(DomainName::parse(&over_limit).is_err());
+/// ```
 pub const MAX_DOMAIN_LEN: usize = 253;
 
 /// Longest legal single DNS label.
+///
+/// ```
+/// use inwx_client::{DomainName, MAX_LABEL_LEN};
+///
+/// let at_limit = format!("{}.com", "a".repeat(MAX_LABEL_LEN));
+/// assert!(DomainName::parse(&at_limit).is_ok());
+///
+/// let over_limit = format!("{}.com", "a".repeat(MAX_LABEL_LEN + 1));
+/// assert!(DomainName::parse(&over_limit).is_err());
+/// ```
 pub const MAX_LABEL_LEN: usize = 63;
 
 /// A domain name, validated and converted to its ASCII (punycode) form.
@@ -198,8 +226,9 @@ impl Hostname {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when a label is empty, too long, starts or ends
-    /// with a hyphen, or contains a character outside `[a-z0-9-]`.
+    /// [`Error::Validation`] when the name exceeds [`MAX_DOMAIN_LEN`], a label
+    /// is empty or exceeds [`MAX_LABEL_LEN`], a label starts or ends with a
+    /// hyphen, or contains a character outside `[a-z0-9-]`.
     pub fn parse(input: &str) -> Result<Self> {
         let trimmed = input.trim().trim_end_matches('.');
         let ascii = idna::domain_to_ascii(trimmed).map_err(|error| {
@@ -1362,11 +1391,63 @@ mod tests {
     }
 
     #[test]
-    fn domain_rejects_overlong_names() {
-        let long_label = "a".repeat(64);
+    fn domain_enforces_label_and_total_length_limits() {
+        let max_label = "a".repeat(MAX_LABEL_LEN);
+        assert!(DomainName::parse(&format!("{max_label}.com")).is_ok());
+
+        let long_label = "a".repeat(MAX_LABEL_LEN + 1);
         assert!(DomainName::parse(&format!("{long_label}.com")).is_err());
-        let long_name = format!("{}.com", "a".repeat(250));
-        assert!(DomainName::parse(&long_name).is_err());
+
+        // Every label is legal on its own, so only the total-name limit can
+        // distinguish these two inputs.
+        let last_label_len = MAX_DOMAIN_LEN - (3 * MAX_LABEL_LEN + 3);
+        let at_limit = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(MAX_LABEL_LEN),
+            "b".repeat(MAX_LABEL_LEN),
+            "c".repeat(MAX_LABEL_LEN),
+            "d".repeat(last_label_len)
+        );
+        assert_eq!(at_limit.len(), MAX_DOMAIN_LEN);
+        assert_eq!(
+            DomainName::parse(&at_limit)
+                .ok()
+                .as_ref()
+                .map(DomainName::as_str),
+            Some(at_limit.as_str())
+        );
+        assert_eq!(
+            Hostname::parse(&at_limit)
+                .ok()
+                .as_ref()
+                .map(Hostname::as_str),
+            Some(at_limit.as_str())
+        );
+
+        let over_limit = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(MAX_LABEL_LEN),
+            "b".repeat(MAX_LABEL_LEN),
+            "c".repeat(MAX_LABEL_LEN),
+            "d".repeat(last_label_len + 1)
+        );
+        assert_eq!(over_limit.len(), MAX_DOMAIN_LEN + 1);
+        for (expected_field, error) in [
+            ("domain", DomainName::parse(&over_limit).unwrap_err()),
+            ("hostname", Hostname::parse(&over_limit).unwrap_err()),
+        ] {
+            let Error::Validation { field, message } = error else {
+                panic!("expected a validation error, got {error}");
+            };
+            assert_eq!(field, expected_field);
+            assert_eq!(
+                message,
+                format!(
+                    "must be at most {MAX_DOMAIN_LEN} characters, got {}",
+                    over_limit.len()
+                )
+            );
+        }
     }
 
     #[test]
