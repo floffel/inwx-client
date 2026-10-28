@@ -12,13 +12,14 @@ use inwx_client::{
     is_read_only_method,
     rpc::{self, Detail, RpcRequest, RpcResponse},
     transport::{Request, Response, TransportStage},
-    AccountInfo, Contact, ContactQuery, ContactRequest, ContactType, ContactUpdate, Credentials,
-    DnsRecord, DomainCheck, DomainCreate, DomainInfo, DomainListPage, DomainListQuery, DomainName,
-    DomainPriceQuote, DomainRenew, DomainUpdate, Error, Hostname, InwxClient, Language,
-    NameserverCheck, Period, PriceList, PriceType, RecordId, RecordSpec, RecordType, RecordUpdate,
-    RenewalMode, RetryPolicy, TldPrice, ZoneInfo, ZoneListPage, ZoneSummary,
+    AccountInfo, AuthCode, AuthInfoUpdate, Contact, ContactQuery, ContactRequest, ContactType,
+    ContactUpdate, Credentials, DnsRecord, DomainCheck, DomainControlResult, DomainCreate,
+    DomainInfo, DomainListPage, DomainListQuery, DomainName, DomainPriceQuote, DomainRenew,
+    DomainUpdate, Error, Hostname, InwxClient, Language, NameserverCheck, Period, PriceList,
+    PriceType, RecordId, RecordSpec, RecordType, RecordUpdate, RenewalMode, RetryPolicy, TldPrice,
+    TransferCodeUpdate, ZoneInfo, ZoneListPage, ZoneSummary,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 
 fn domain(name: &str) -> DomainName {
     DomainName::parse(name).unwrap()
@@ -506,6 +507,17 @@ fn error_helpers_cover_every_branch() {
     assert!(!is_read_only_method("domain.create"));
     assert!(!is_read_only_method(""));
     assert!(!is_read_only_method("   "));
+    // The transfer/lock controls are mutations and must never be replayed.
+    for control in [
+        "domain.setAuthInfo",
+        "domain.setDomainTransferCode",
+        "domain.block",
+        "domain.unblock",
+    ] {
+        assert!(!is_read_only_method(control), "{control}");
+        assert!(!is_read_only_method(&control.to_uppercase()), "{control}");
+        assert!(!is_read_only_method(&format!("\t{control}\n")), "{control}");
+    }
 
     let missing = Error::MissingField {
         method: "domain.info",
@@ -630,4 +642,59 @@ fn response_payload_types_are_constructible_and_comparable() {
     let contact = Contact::default();
     assert!(contact.handle().is_none());
     assert!(AccountInfo::default().account_id.is_none());
+}
+
+#[test]
+fn every_transfer_control_setter_and_accessor() {
+    let code = AuthCode::new("aB3-xY9_42").unwrap();
+    let name = domain("example.com");
+
+    let auth = AuthInfoUpdate::new(name.clone(), code.clone());
+    assert_eq!(auth.domain(), &name);
+    assert_eq!(auth.code().as_str(), "aB3-xY9_42");
+    assert_eq!(auth.clone(), auth);
+    assert_eq!(auth.params()["domain"], "example.com");
+    assert_eq!(auth.params()["authCode"], "aB3-xY9_42");
+    // The wire value is the real code; every rendering of the request is not.
+    assert!(!format!("{auth:?}").contains("aB3-xY9_42"));
+    assert!(!auth.code().to_string().contains("aB3-xY9_42"));
+    assert_ne!(
+        auth,
+        AuthInfoUpdate::new(name.clone(), AuthCode::new("other").unwrap())
+    );
+
+    let transfer = TransferCodeUpdate::new(name.clone(), code.clone());
+    assert_eq!(transfer.domain(), &name);
+    assert_eq!(transfer.code().as_str(), "aB3-xY9_42");
+    assert_eq!(transfer.clone(), transfer);
+    assert_eq!(transfer.params()["domain"], "example.com");
+    assert_eq!(transfer.params()["authCode"], "aB3-xY9_42");
+    assert!(!format!("{transfer:?}").contains("aB3-xY9_42"));
+    assert_ne!(
+        transfer,
+        TransferCodeUpdate::new(name.clone(), AuthCode::new("other").unwrap())
+    );
+    // The two request types are distinct types, so one cannot be sent for the
+    // other by accident.
+    assert_ne!(auth.params()["authCode"], Value::Null);
+}
+
+#[test]
+fn domain_control_result_defaults_are_all_empty() {
+    let ack = DomainControlResult::default();
+    assert_eq!(ack.ro_id, None);
+    assert_eq!(ack.domain, None);
+    assert_eq!(ack.status, None);
+    assert_eq!(ack.auth_code, None);
+    assert_eq!(ack.clone(), ack);
+
+    let filled = DomainControlResult {
+        ro_id: Some(77),
+        domain: Some("example.com".into()),
+        status: Some("SUCCESS".into()),
+        auth_code: Some(AuthCode::new("aB3-xY9_42").unwrap()),
+    };
+    assert_eq!(filled.auth_code.as_ref().unwrap().as_str(), "aB3-xY9_42");
+    assert_ne!(filled, ack);
+    assert!(!format!("{filled:?}").contains("aB3-xY9_42"));
 }

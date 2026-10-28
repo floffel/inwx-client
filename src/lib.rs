@@ -36,7 +36,7 @@
 //! | Area | Methods |
 //! | --- | --- |
 //! | Session | `account.login`, `account.logout`, `account.check`, `account.info` |
-//! | Domains | `check`, `create`, `info`, `list`, `update`, `renew`, `delete`, `whois` |
+//! | Domains | `check`, `create`, `info`, `list`, `update`, `renew`, `delete`, `whois`; transfer lock: `setAuthInfo`, `setDomainTransferCode`, `block`, `unblock` |
 //! | Ownership | `domain.transfer`, `domain.trade`, `domain.push`, `domain.restore`, `domain.transfercancel`, `domain.transferOut` |
 //! | DNS records | `nameserver.info` (read), `createRecord`, `updateRecord`, `deleteRecord` |
 //! | Zones | `nameserver.create`, `nameserver.update`, `nameserver.delete`, `nameserver.list`, `nameserver.info`, `nameserver.check`, `nameserver.clone`, `nameserver.export`, `nameserver.exportlist`, `nameserver.exportrecords` |
@@ -95,7 +95,11 @@
 //! * Session cookies and credentials are rejected if they contain control
 //!   characters, so a value cannot smuggle a second header.
 //! * [`AuthCode`] (the EPP transfer code) prints `<redacted>` in `Debug` and
-//!   `Display`; the DynDNS account type redacts its password.
+//!   `Display`, and its length is checked on the caller's string before the
+//!   value is copied; the transfer controls (`domain.setAuthInfo`,
+//!   `domain.setDomainTransferCode`) take it as a typed value, so a code cannot
+//!   be sent unvalidated or leak through an error message. The DynDNS account
+//!   type redacts its password.
 //! * A certificate CSR is refused if it contains a private key: the field takes a
 //!   signing request, and anything else would upload a secret to a third party.
 //! * Retries are bounded (three attempts, exponential backoff) and only apply to
@@ -104,7 +108,8 @@
 //! * A transport failure after the request was written (a timeout, a reset
 //!   mid-response) is [`Error::Uncertain`]: the command may have run. It is
 //!   replayed only for a read-only method ([`is_read_only_method`]), never for a
-//!   mutating one, so a registration cannot be submitted twice.
+//!   mutating one, so a registration cannot be submitted twice and a transfer
+//!   code or a domain block cannot be applied twice.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -172,8 +177,8 @@ pub use document::{
     DocumentEntry, DocumentQuery, DocumentUpload, DownloadedDocument, MAX_DOCUMENT_BYTES,
 };
 pub use domain::{
-    DomainCheck, DomainCreate, DomainInfo, DomainListPage, DomainListQuery, DomainRenew,
-    DomainUpdate, Registration, RenewalResult,
+    AuthInfoUpdate, DomainCheck, DomainControlResult, DomainCreate, DomainInfo, DomainListPage,
+    DomainListQuery, DomainRenew, DomainUpdate, Registration, RenewalResult, TransferCodeUpdate,
 };
 pub use dyndns::{
     DynDnsAccount, DynDnsAccountInfo, DynDnsAccountRef, DynDnsCheck, DynDnsCreated, DynDnsLog,
@@ -210,6 +215,6 @@ pub use transport::ReqwestTransport;
 pub use transport::{Response, Transport, TransportStage};
 pub use types::{
     parse_ip, AuthCode, ContactType, DocumentFormat, DomainName, Email, Handle, Hostname, Period,
-    PriceType, RenewalMode, Timestamp, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
+    PriceType, RenewalMode, Timestamp, MAX_AUTH_CODE_LEN, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
 };
 pub use zone::{RecordExport, UrlRedirectType, ZoneCreate, ZoneExport, ZoneType, ZoneUpdate};

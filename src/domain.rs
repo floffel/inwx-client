@@ -3,13 +3,13 @@
 //! Everything here is documented INWX surface (`domain.*`); the request builders
 //! validate before the call, the response types parse permissively.
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, Map, Value};
 
 use crate::client::InwxClient;
 use crate::error::{Error, Result};
 use crate::transport::Transport;
-use crate::types::{de, DomainName, Hostname, Period, RenewalMode};
+use crate::types::{de, AuthCode, DomainName, Hostname, Period, RenewalMode};
 
 /// The answer to one `domain.check` entry.
 ///
@@ -963,6 +963,306 @@ pub struct RenewalResult {
     pub currency: Option<String>,
 }
 
+/// An optional [`AuthCode`] that drops an unusable value instead of failing the
+/// whole answer — the API occasionally echoes a code it would not accept as
+/// input, and that must not lose the rest of the reply.
+fn opt_auth_code<'de, D>(deserializer: D) -> std::result::Result<Option<AuthCode>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(de::opt_string(deserializer)?.and_then(|raw| AuthCode::new(raw).ok()))
+}
+
+/// A new transfer auth code for one domain (`domain.setAuthInfo`).
+///
+/// This is the domain's EPP auth code: what `domain.info` reports as `authCode`
+/// and what a gaining registrar needs to start a transfer. It is not the
+/// registry-side [`AuthInfo2`](crate::AuthInfo2) value, which is a separate
+/// object with methods of its own (`authinfo2.*`).
+///
+/// The code is a secret, so it is validated and capped by
+/// [`AuthCode::new`] before anything is built, and it stays out of `Debug` and
+/// `Display`. Sending the request replaces the code the previous holder knew —
+/// that is why this crate takes a built [`AuthInfoUpdate`] instead of a bare
+/// string, so the domain it applies to is always named.
+///
+/// ```
+/// use inwx_client::{AuthCode, AuthInfoUpdate, DomainName};
+///
+/// let request = AuthInfoUpdate::new(
+///     DomainName::parse("example.com")?,
+///     AuthCode::new("aB3-xY9_42")?,
+/// );
+/// assert_eq!(request.domain().as_str(), "example.com");
+/// assert_eq!(request.params()["domain"], "example.com");
+/// assert_eq!(request.params()["authCode"], "aB3-xY9_42");
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthInfoUpdate {
+    domain: DomainName,
+    code: AuthCode,
+}
+
+impl AuthInfoUpdate {
+    /// Builds the request for a domain and a code that already passed
+    /// [`AuthCode::new`].
+    ///
+    /// Infallible by design: an unvalidated string cannot get in here, so a
+    /// constructed request is always sendable.
+    ///
+    /// ```
+    /// use inwx_client::{AuthCode, AuthInfoUpdate, DomainName};
+    ///
+    /// let request = AuthInfoUpdate::new(
+    ///     DomainName::parse("a.de")?,
+    ///     AuthCode::new("x".repeat(255))?,
+    /// );
+    /// assert_eq!(request.code().as_str().len(), 255);
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn new(domain: DomainName, code: AuthCode) -> Self {
+        Self { domain, code }
+    }
+
+    /// The domain whose code changes.
+    ///
+    /// ```
+    /// use inwx_client::{AuthCode, AuthInfoUpdate, DomainName};
+    ///
+    /// let request = AuthInfoUpdate::new(
+    ///     DomainName::parse("a.de")?,
+    ///     AuthCode::new("code-42")?,
+    /// );
+    /// assert_eq!(request.domain().as_str(), "a.de");
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn domain(&self) -> &DomainName {
+        &self.domain
+    }
+
+    /// The new code. Prints `<redacted>`, like every [`AuthCode`].
+    ///
+    /// ```
+    /// use inwx_client::{AuthCode, AuthInfoUpdate, DomainName};
+    ///
+    /// let request = AuthInfoUpdate::new(
+    ///     DomainName::parse("a.de")?,
+    ///     AuthCode::new("code-42")?,
+    /// );
+    /// assert_eq!(request.code().as_str(), "code-42");
+    /// assert!(!format!("{request:?}").contains("code-42"));
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn code(&self) -> &AuthCode {
+        &self.code
+    }
+
+    /// The request params: `domain` and `authCode`, and nothing else.
+    ///
+    /// The value on the wire is the real code — the endpoint needs it — while
+    /// `Debug` of this request keeps it redacted.
+    ///
+    /// ```
+    /// use inwx_client::{AuthCode, AuthInfoUpdate, DomainName};
+    ///
+    /// let params = AuthInfoUpdate::new(
+    ///     DomainName::parse("a.de")?,
+    ///     AuthCode::new("code-42")?,
+    /// ).params();
+    /// assert_eq!(params["domain"], "a.de");
+    /// assert_eq!(params["authCode"], "code-42");
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn params(&self) -> Value {
+        json!({
+            "domain": self.domain,
+            "authCode": self.code,
+        })
+    }
+}
+
+/// A new teleprovider transfer code for one domain
+/// (`domain.setDomainTransferCode`).
+///
+/// The teleprovider transfer code moves a domain between INWX customers; it is a
+/// different secret from the EPP auth code of [`AuthInfoUpdate`], which moves a
+/// domain between registrars. Both are held as [`AuthCode`], so both are capped,
+/// validated and redacted the same way.
+///
+/// ```
+/// use inwx_client::{AuthCode, DomainName, TransferCodeUpdate};
+///
+/// let request = TransferCodeUpdate::new(
+///     DomainName::parse("example.com")?,
+///     AuthCode::new("tc-9f2K")?,
+/// );
+/// assert_eq!(request.params()["domain"], "example.com");
+/// assert_eq!(request.params()["authCode"], "tc-9f2K");
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferCodeUpdate {
+    domain: DomainName,
+    code: AuthCode,
+}
+
+impl TransferCodeUpdate {
+    /// Builds the request for a domain and a code that already passed
+    /// [`AuthCode::new`].
+    ///
+    /// ```
+    /// use inwx_client::{AuthCode, DomainName, TransferCodeUpdate};
+    ///
+    /// let request = TransferCodeUpdate::new(
+    ///     DomainName::parse("a.de")?,
+    ///     AuthCode::new("x".repeat(255))?,
+    /// );
+    /// assert_eq!(request.domain().as_str(), "a.de");
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn new(domain: DomainName, code: AuthCode) -> Self {
+        Self { domain, code }
+    }
+
+    /// The domain whose transfer code changes.
+    ///
+    /// ```
+    /// use inwx_client::{AuthCode, DomainName, TransferCodeUpdate};
+    ///
+    /// let request = TransferCodeUpdate::new(
+    ///     DomainName::parse("a.de")?,
+    ///     AuthCode::new("tc-1")?,
+    /// );
+    /// assert_eq!(request.domain().as_str(), "a.de");
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn domain(&self) -> &DomainName {
+        &self.domain
+    }
+
+    /// The new transfer code, redacted in `Debug`.
+    ///
+    /// ```
+    /// use inwx_client::{AuthCode, DomainName, TransferCodeUpdate};
+    ///
+    /// let request = TransferCodeUpdate::new(
+    ///     DomainName::parse("a.de")?,
+    ///     AuthCode::new("tc-1")?,
+    /// );
+    /// assert_eq!(request.code().as_str(), "tc-1");
+    /// assert!(!format!("{request:?}").contains("tc-1"));
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn code(&self) -> &AuthCode {
+        &self.code
+    }
+
+    /// The request params: `domain` and `authCode`.
+    ///
+    /// ```
+    /// use inwx_client::{AuthCode, DomainName, TransferCodeUpdate};
+    ///
+    /// let params = TransferCodeUpdate::new(
+    ///     DomainName::parse("a.de")?,
+    ///     AuthCode::new("tc-1")?,
+    /// ).params();
+    /// assert_eq!(params["domain"], "a.de");
+    /// assert_eq!(params["authCode"], "tc-1");
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn params(&self) -> Value {
+        json!({
+            "domain": self.domain,
+            "authCode": self.code,
+        })
+    }
+}
+
+/// What one of the transfer/lock commands answered.
+///
+/// All four (`domain.setAuthInfo`, `domain.setDomainTransferCode`,
+/// `domain.block`, `domain.unblock`) report a small acknowledgement rather than
+/// a domain record, and which fields appear depends on the TLD. Everything is
+/// therefore optional, unknown keys are ignored and both spellings of a key are
+/// accepted, so a shape this code has not seen still parses.
+///
+/// A code the API echoes back is kept as an [`AuthCode`], which prints
+/// `<redacted>`; an echo that is not a usable code is dropped instead of
+/// failing the whole answer.
+///
+/// ```
+/// use inwx_client::DomainControlResult;
+///
+/// let ack: DomainControlResult = serde_json::from_str(
+///     r#"{"roId":"77","domain":"example.com","status":"SUCCESS","authCode":"aB3-xY9_42","future":1}"#,
+/// )?;
+/// assert_eq!(ack.ro_id, Some(77));
+/// assert_eq!(ack.status.as_deref(), Some("SUCCESS"));
+/// let code = ack.auth_code.unwrap();
+/// assert_eq!(format!("{code:?}"), "AuthCode(<redacted>)");
+///
+/// // snake_case and a bare `{}` both parse; nothing is required.
+/// let empty: DomainControlResult = serde_json::from_str(r#"{"ro_id":77}"#)?;
+/// assert_eq!(empty.ro_id, Some(77));
+/// assert_eq!(empty.domain, None);
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct DomainControlResult {
+    /// Repository object id of the affected domain object, when reported.
+    #[serde(
+        default,
+        rename = "roId",
+        alias = "ro_id",
+        deserialize_with = "de::opt_i64"
+    )]
+    pub ro_id: Option<i64>,
+    /// The domain the command applied to, as the API spells it.
+    #[serde(default, alias = "domainName", deserialize_with = "de::opt_string")]
+    pub domain: Option<String>,
+    /// State string of the command, carried verbatim.
+    #[serde(default, deserialize_with = "de::opt_string")]
+    pub status: Option<String>,
+    /// A code the API echoes; `None` when it sent nothing usable.
+    #[serde(
+        default,
+        rename = "authCode",
+        alias = "auth_code",
+        deserialize_with = "opt_auth_code"
+    )]
+    pub auth_code: Option<AuthCode>,
+}
+
+/// Decodes the acknowledgement of a transfer/lock command.
+///
+/// A plain `1000` carries no `resData` at all — the framing layer hands that
+/// over as `Value::Null`, which is a success with nothing to report — and some
+/// endpoints wrap the single object in a one-element array. The shape is checked
+/// before anything is decoded: an array that does not hold exactly one object
+/// says nothing usable, so it yields an empty acknowledgement instead of
+/// guessing (and instead of stuffing a whole object into a single field). A bare
+/// scalar cannot be an acknowledgement at all, so it stays [`Error::Json`].
+///
+/// [`Error::Json`]: crate::Error::Json
+fn control_result(data: Value) -> Result<DomainControlResult> {
+    match data {
+        Value::Array(mut entries) if entries.len() == 1 => {
+            serde_json::from_value(entries.remove(0)).map_err(Error::from)
+        }
+        Value::Null | Value::Array(_) => Ok(DomainControlResult::default()),
+        other => serde_json::from_value(other).map_err(Error::from),
+    }
+}
+
 impl<T: Transport> InwxClient<T> {
     /// Checks one or more domains for availability (`domain.check`).
     ///
@@ -1267,6 +1567,147 @@ impl<T: Transport> InwxClient<T> {
         })
     }
 
+    /// Replaces the transfer auth code of a domain (`domain.setAuthInfo`).
+    ///
+    /// The new code is what a gaining registrar has to present for a transfer;
+    /// the old one stops working with this call. It is distinct from
+    /// [`AuthInfo2`](crate::AuthInfo2), the registry-side value handled by the
+    /// `authinfo2.*` methods.
+    ///
+    /// The command is a non-idempotent mutation: it is never replayed, so an
+    /// [`Error::Uncertain`] means the code may or may not have changed and the
+    /// caller has to check (`domain.info`) rather than resend.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use inwx_client::{AuthCode, AuthInfoUpdate, DomainName, InwxClient, ReqwestTransport};
+    ///
+    /// let client = InwxClient::new(ReqwestTransport::new())
+    ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
+    /// let request = AuthInfoUpdate::new(
+    ///     DomainName::parse("example.com")?,
+    ///     AuthCode::new("aB3-xY9_42")?,
+    /// );
+    /// let ack = client.set_auth_info(&request).await?;
+    /// println!("{:?}", ack.status);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The usual transport and API errors. A failure after the request was
+    /// written is [`Error::Uncertain`] and is never retried here.
+    pub async fn set_auth_info(&self, request: &AuthInfoUpdate) -> Result<DomainControlResult> {
+        let data = self.call("domain.setAuthInfo", request.params()).await?;
+        control_result(data)
+    }
+
+    /// Replaces the teleprovider transfer code of a domain
+    /// (`domain.setDomainTransferCode`).
+    ///
+    /// That code moves a domain between INWX customers, as opposed to the EPP
+    /// auth code of [`set_auth_info`](Self::set_auth_info), which moves it
+    /// between registrars.
+    ///
+    /// Like the other controls here this is a non-idempotent mutation and is
+    /// never replayed after an [`Error::Uncertain`].
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use inwx_client::{AuthCode, DomainName, InwxClient, ReqwestTransport, TransferCodeUpdate};
+    ///
+    /// let client = InwxClient::new(ReqwestTransport::new())
+    ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
+    /// let request = TransferCodeUpdate::new(
+    ///     DomainName::parse("example.com")?,
+    ///     AuthCode::new("tc-9f2K")?,
+    /// );
+    /// let ack = client.set_domain_transfer_code(&request).await?;
+    /// println!("{:?}", ack.status);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The usual transport and API errors, with [`Error::Uncertain`] for a
+    /// failure after the request was written.
+    pub async fn set_domain_transfer_code(
+        &self,
+        request: &TransferCodeUpdate,
+    ) -> Result<DomainControlResult> {
+        let data = self
+            .call("domain.setDomainTransferCode", request.params())
+            .await?;
+        control_result(data)
+    }
+
+    /// Locks a domain against outgoing changes (`domain.block`).
+    ///
+    /// This is the broad block of the domain object — it is not the
+    /// `transferLock` flag of [`set_transfer_lock`](Self::set_transfer_lock),
+    /// which only covers the registrar transfer. Releasing it is
+    /// [`unblock_domain`](Self::unblock_domain), so no
+    /// [`Irreversible`](crate::Irreversible)
+    /// acknowledgement is required: the command can be undone.
+    ///
+    /// It is still a mutation, so it is never replayed after an
+    /// [`Error::Uncertain`].
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use inwx_client::{DomainName, InwxClient, ReqwestTransport};
+    ///
+    /// let client = InwxClient::new(ReqwestTransport::new())
+    ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
+    /// client.block_domain(&DomainName::parse("example.com")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The usual transport and API errors — including the codes for a domain in
+    /// a state that forbids blocking.
+    pub async fn block_domain(&self, domain: &DomainName) -> Result<DomainControlResult> {
+        let data = self
+            .call("domain.block", json!({ "domain": domain.as_str() }))
+            .await?;
+        control_result(data)
+    }
+
+    /// Releases the block set by [`block_domain`](Self::block_domain)
+    /// (`domain.unblock`).
+    ///
+    /// A non-idempotent mutation like its counterpart: never replayed after an
+    /// [`Error::Uncertain`].
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use inwx_client::{DomainName, InwxClient, ReqwestTransport};
+    ///
+    /// let client = InwxClient::new(ReqwestTransport::new())
+    ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
+    /// client.unblock_domain(&DomainName::parse("example.com")?).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The usual transport and API errors.
+    pub async fn unblock_domain(&self, domain: &DomainName) -> Result<DomainControlResult> {
+        let data = self
+            .call("domain.unblock", json!({ "domain": domain.as_str() }))
+            .await?;
+        control_result(data)
+    }
+
     /// Reads the raw whois output (`domain.whois`).
     ///
     /// ```no_run
@@ -1388,5 +1829,128 @@ mod tests {
             serde_json::from_str(r#"{"roId":"42","price":"8.90"}"#).unwrap();
         assert_eq!(registration.ro_id, 42);
         assert_eq!(registration.price, Some(8.9));
+    }
+
+    fn auth_info_request() -> AuthInfoUpdate {
+        AuthInfoUpdate::new(
+            DomainName::parse("a.de").unwrap(),
+            AuthCode::new("sEcReT-code_1").unwrap(),
+        )
+    }
+
+    fn transfer_code_request() -> TransferCodeUpdate {
+        TransferCodeUpdate::new(
+            DomainName::parse("a.de").unwrap(),
+            AuthCode::new("sEcReT-code_1").unwrap(),
+        )
+    }
+
+    #[test]
+    fn control_requests_send_domain_and_code_only() {
+        for params in [
+            auth_info_request().params(),
+            transfer_code_request().params(),
+        ] {
+            let object = params.as_object().unwrap();
+            assert_eq!(object.len(), 2);
+            assert_eq!(object["domain"], "a.de");
+            assert_eq!(object["authCode"], "sEcReT-code_1");
+        }
+    }
+
+    #[test]
+    fn control_requests_keep_the_code_out_of_debug() {
+        for debug in [
+            format!("{:?}", auth_info_request()),
+            format!("{:?}", transfer_code_request()),
+            format!("{}", auth_info_request().code()),
+            format!("{}", transfer_code_request().code()),
+        ] {
+            assert!(!debug.contains("sEcReT-code_1"), "{debug}");
+            assert!(debug.contains("<redacted>"), "{debug}");
+        }
+    }
+
+    #[test]
+    fn control_requests_round_trip_through_clone_and_eq() {
+        let request = auth_info_request();
+        assert_eq!(request.clone(), request);
+        assert_ne!(
+            request,
+            AuthInfoUpdate::new(
+                DomainName::parse("b.de").unwrap(),
+                AuthCode::new("sEcReT-code_1").unwrap(),
+            )
+        );
+        let transfer = transfer_code_request();
+        assert_eq!(transfer.clone(), transfer);
+        assert_eq!(transfer.code().as_str(), "sEcReT-code_1");
+    }
+
+    #[test]
+    fn control_result_reads_both_spellings_and_ignores_unknown_keys() {
+        let camel: DomainControlResult = serde_json::from_str(
+            r#"{"roId":"77","domain":"a.de","status":"SUCCESS","authCode":"code-1","future":true}"#,
+        )
+        .unwrap();
+        assert_eq!(camel.ro_id, Some(77));
+        assert_eq!(camel.domain.as_deref(), Some("a.de"));
+        assert_eq!(camel.status.as_deref(), Some("SUCCESS"));
+        assert_eq!(
+            camel.auth_code.as_ref().map(AuthCode::as_str),
+            Some("code-1")
+        );
+
+        let snake: DomainControlResult = serde_json::from_str(
+            r#"{"ro_id":77,"domainName":"a.de","status":"SUCCESS","auth_code":"code-1"}"#,
+        )
+        .unwrap();
+        assert_eq!(snake, camel);
+    }
+
+    #[test]
+    fn control_result_accepts_an_empty_ack() {
+        let empty: DomainControlResult = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty, DomainControlResult::default());
+        assert!(empty.auth_code.is_none());
+        assert_eq!(
+            control_result(Value::Null).unwrap(),
+            DomainControlResult::default()
+        );
+    }
+
+    #[test]
+    fn control_result_unwraps_a_single_element_array() {
+        let parsed = control_result(serde_json::from_str(r#"[{"roId":7}]"#).unwrap()).unwrap();
+        assert_eq!(parsed.ro_id, Some(7));
+        // Nothing in the array, or more objects than a single-domain command
+        // can have answered with, reports nothing usable instead of guessing.
+        assert_eq!(
+            control_result(serde_json::from_str("[]").unwrap()).unwrap(),
+            DomainControlResult::default()
+        );
+        let extra =
+            control_result(serde_json::from_str(r#"[{"roId":7},{"roId":8}]"#).unwrap()).unwrap();
+        assert_eq!(extra, DomainControlResult::default());
+        // A scalar answer is not an acknowledgement of anything.
+        assert!(control_result(Value::Bool(true)).is_err());
+    }
+
+    #[test]
+    fn control_result_drops_an_unusable_echoed_code() {
+        let parsed: DomainControlResult =
+            serde_json::from_str(r#"{"authCode":"not a code","status":"SUCCESS"}"#).unwrap();
+        assert!(parsed.auth_code.is_none());
+        assert_eq!(parsed.status.as_deref(), Some("SUCCESS"));
+
+        let empty_code: DomainControlResult = serde_json::from_str(r#"{"authCode":""}"#).unwrap();
+        assert!(empty_code.auth_code.is_none());
+        // Still redacted when it *is* usable.
+        let debug = format!(
+            "{:?}",
+            serde_json::from_str::<DomainControlResult>(r#"{"authCode":"code-1"}"#).unwrap()
+        );
+        assert!(!debug.contains("code-1"), "{debug}");
+        assert!(debug.contains("<redacted>"), "{debug}");
     }
 }

@@ -49,6 +49,23 @@ pub const MAX_DOMAIN_LEN: usize = 253;
 /// ```
 pub const MAX_LABEL_LEN: usize = 63;
 
+/// Longest legal authorisation code, in bytes.
+///
+/// The API types the transfer code as `token255`, so 255 bytes are still
+/// accepted and 256 are not. Anything that passes is printable ASCII, where
+/// bytes and characters are the same count; the size is checked first, so an
+/// oversized input is refused before it is looked at any further.
+///
+/// ```
+/// use inwx_client::{AuthCode, MAX_AUTH_CODE_LEN};
+///
+/// assert_eq!(MAX_AUTH_CODE_LEN, 255);
+/// assert!(AuthCode::new("x".repeat(MAX_AUTH_CODE_LEN)).is_ok());
+/// assert!(AuthCode::new("x".repeat(MAX_AUTH_CODE_LEN + 1)).is_err());
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+pub const MAX_AUTH_CODE_LEN: usize = 255;
+
 /// A domain name, validated and converted to its ASCII (punycode) form.
 ///
 /// `parse` trims surrounding whitespace and one trailing root dot, applies
@@ -918,9 +935,10 @@ impl<'de> Deserialize<'de> for Email {
 
 /// A domain authorisation code (`authCode`, the EPP transfer code).
 ///
-/// The value is a printable ASCII token; it is not trimmed down to nothing and
-/// it never reaches a log line: `Debug` prints `<redacted>`, the same rule
-/// [`Credentials`](crate::Credentials) follows.
+/// The value is a printable ASCII token of at most [`MAX_AUTH_CODE_LEN`] bytes,
+/// checked on the caller's string before it is copied; it is not trimmed down to
+/// nothing and it never reaches a log line: `Debug` prints `<redacted>`, the
+/// same rule [`Credentials`](crate::Credentials) follows.
 ///
 /// ```
 /// use inwx_client::AuthCode;
@@ -940,18 +958,19 @@ impl AuthCode {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the code is empty, longer than 255
-    /// characters, contains whitespace, or is not printable ASCII.
+    /// [`Error::Validation`] when the code is empty, longer than
+    /// [`MAX_AUTH_CODE_LEN`] characters, contains whitespace, or is not
+    /// printable ASCII.
     pub fn new(code: impl Into<String>) -> Result<Self> {
         let raw = code.into();
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             return Err(Error::validation("authCode", "must not be empty"));
         }
-        if trimmed.len() > 255 {
+        if trimmed.len() > MAX_AUTH_CODE_LEN {
             return Err(Error::validation(
                 "authCode",
-                "must be at most 255 characters",
+                format!("must be at most {MAX_AUTH_CODE_LEN} characters"),
             ));
         }
         if !trimmed.is_ascii() {

@@ -69,7 +69,7 @@ Every method below is implemented against the published INWX API documentation
 | Area | Methods / types | Notes |
 | --- | --- | --- |
 | Session | `account.login`, `account.logout`, `account.check` (implicit), `account.info` | cookie session, lazy login, one re-login on `2200`/`2201`/`2202` |
-| Domains | `domain.check`, `domain.create`, `domain.info`, `domain.list`, `domain.update`, `domain.renew`, `domain.delete`, `domain.whois` | auth code (`authCode`) via `domain.info wide=1`; renewal mode and transfer lock via `domain.update` |
+| Domains | `domain.check`, `domain.create`, `domain.info`, `domain.list`, `domain.update`, `domain.renew`, `domain.delete`, `domain.whois`, `domain.setAuthInfo`, `domain.setDomainTransferCode`, `domain.block`, `domain.unblock` | auth code (`authCode`) via `domain.info wide=1`; renewal mode and the `transferLock` flag via `domain.update`; `domain.block`/`domain.unblock` are the reversible block of the domain object, which is not the `transferLock` flag, and `domain.setAuthInfo` is not the `authinfo2.*` object. Codes go through `AuthCode`: validated, capped at 255 characters on the caller's string before it is copied, redacted in `Debug`/`Display` and absent from error messages |
 | Ownership | `domain.transfer`, `domain.trade`, `domain.push`, `domain.restore`, `domain.transfercancel`, `domain.transferOut` | typed builders behind an `Irreversible` acknowledgement that names the action and the domain; auth codes redacted in `Debug` |
 | Zones | `nameserver.create`, `nameserver.update`, `nameserver.delete`, `nameserver.clone`, `nameserver.list`, `nameserver.info`, `nameserver.check`, `nameserver.export`, `nameserver.exportlist`, `nameserver.exportrecords` | `ZoneCreate`/`ZoneUpdate` builders; an update sends only what changed and can never touch a record |
 | DNS records | `nameserver.info` (read), `nameserver.createRecord`, `nameserver.updateRecord`, `nameserver.deleteRecord` | typed payloads per record type, multi-id updates, `RecordSet` for the set-level rules (apex CNAME, CNAME siblings, duplicates) |
@@ -168,6 +168,9 @@ documentation does not state:
 | `dyndnssubscription.cancel` id semantics | **unverified** — Table 2.161 types `id` as "the customer's subscription id", while `create` uses the same name for the plan id; the crate takes two separate parameters so the two cannot be confused. |
 | Every 0.2.0 write against a live endpoint | **unverified** — no credentials in CI; method names, parameters and datatypes come from the tables in `docs/contracts.md`. |
 | The reseller/partner objects (`application.*`, `authinfo2.*`, `customer.*`, `document.*`, `host.*`, `message.*`, `news.list`, `nichandle.list`, `pdf.*`) | **unverified** — added without network access, so chapter 2 §2.3–§2.21 could not be re-read. Request keys follow the spellings the rest of the API uses; every response field is optional and tolerant, so a wrong key costs a `None`. The `Table 2.NNN` numbers in `docs/contracts.md` are derived from the anchors of the earlier sections, not read from the pages. |
+| `domain.setAuthInfo` / `domain.setDomainTransferCode` request key | **unverified** — the pages of the two setters were not reachable while adding them; `authCode` is the spelling `domain.info`/`domain.update`/`domain.transfer` use for the same value. A wrong key would be an API error, not a silent success. |
+| Output of the four transfer/lock commands | **unverified** — `DomainControlResult` requires nothing: every field is optional, unknown keys are ignored, both spellings are accepted and a `1000` without `resData` is an empty acknowledgement, so an unseen shape parses instead of failing. |
+| What `domain.block` locks | **unverified** — documented as blocking the domain; which registry locks that is per TLD, and how it relates to the `transferLock` flag, is not stated. Treated as the broader, reversible control, hence no `Irreversible` acknowledgement. |
 | Unicode → punycode | UTS-46 mapping via `idna`, so emoji become punycode and characters the mapping deletes disappear. The ACE form (`DomainName::as_str`) is what is sent, logged and compared. |
 
 Two methods the predecessor implementation called do **not** exist in the
@@ -189,8 +192,11 @@ documented API and were replaced: `domain.cancel` (use `domain.delete` or
   characters, so a value cannot smuggle a second header; the same check guards
   record content and update fields.
 * `AuthCode` (the EPP transfer code) prints `<redacted>` in `Debug` and
-  `Display`; `DynDnsAccount` redacts its password. A certificate CSR is refused
-  if it contains a private key — the field takes a signing request only.
+  `Display` and never appears in an error message; it is checked against
+  `MAX_AUTH_CODE_LEN` on the caller's string, so an oversized code is refused
+  before it is copied. `DynDnsAccount` redacts its password. A
+  certificate CSR is refused if it contains a private key — the field takes a
+  signing request only.
 * Retries are bounded and only apply to transient failures that happened before
   the request was written, so a rejected registration cannot be submitted three
   times. A failure after it was written comes back as `Error::Uncertain` instead

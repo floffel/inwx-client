@@ -15,12 +15,12 @@ use inwx_client::{
     CertificateQuery, CertificateUpdate, CertificateValidationMethod, ContactVerificationSettings,
     ContactVerificationSettingsUpdate, CustomerUpdate, DataExport, DnsKey, DnssecAlgorithm,
     DnssecDigestType, DnssecDomainStatus, DnssecFlag, DnssecKeyQuery, DnssecKeyStatus, Document,
-    DocumentFormat, DocumentQuery, DocumentUpload, DomainName, DownloadedDocument, DsRecord,
-    DynDnsAccount, DynDnsAccountRef, DynDnsRecord, Email, Handle, HostCheck, HostCreate,
-    HostUpdate, HostingOrder, HostingPeriod, Hostname, Irreversible, NameserverSet,
-    NameserverSetType, NameserverSetUpdate, NewsItem, NicHandle, NicHandleQuery, PdfFile,
-    PdfRender, PostalDelivery, RecordSet, RecordSpec, RefundRequest, StatementQuery, TagUpdate,
-    Timestamp, TransferAnswer, UrlRedirectType, ZoneCreate, ZoneType, ZoneUpdate,
+    DocumentFormat, DocumentQuery, DocumentUpload, DomainControlResult, DomainName,
+    DownloadedDocument, DsRecord, DynDnsAccount, DynDnsAccountRef, DynDnsRecord, Email, Handle,
+    HostCheck, HostCreate, HostUpdate, HostingOrder, HostingPeriod, Hostname, Irreversible,
+    NameserverSet, NameserverSetType, NameserverSetUpdate, NewsItem, NicHandle, NicHandleQuery,
+    PdfFile, PdfRender, PostalDelivery, RecordSet, RecordSpec, RefundRequest, StatementQuery,
+    TagUpdate, Timestamp, TransferAnswer, UrlRedirectType, ZoneCreate, ZoneType, ZoneUpdate,
 };
 use serde_json::json;
 
@@ -1029,4 +1029,52 @@ fn reseller_hosts_cover_the_testing_and_rename_fields() {
     )
     .is_ok());
     assert!(HostCheck::new(long_domain, Hostname::parse(&"n".repeat(58)).unwrap()).is_err());
+}
+
+#[test]
+fn domain_control_result_decodes_every_shape() {
+    // camelCase, the spelling the API uses today.
+    let camel: DomainControlResult = serde_json::from_str(
+        r#"{"roId":"77","domain":"example.com","status":"SUCCESS","authCode":"aB3-xY9_42"}"#,
+    )
+    .unwrap();
+    assert_eq!(camel.ro_id, Some(77));
+    assert_eq!(camel.domain.as_deref(), Some("example.com"));
+    assert_eq!(camel.status.as_deref(), Some("SUCCESS"));
+    assert_eq!(camel.auth_code.as_ref().unwrap().as_str(), "aB3-xY9_42");
+
+    // snake_case aliases and the `domainName` variant, plus keys we do not know.
+    let snake: DomainControlResult = serde_json::from_str(
+        r#"{"ro_id":77,"domainName":"example.com","auth_code":"tc-1","future":{"nested":[1,2]}}"#,
+    )
+    .unwrap();
+    assert_eq!(snake.ro_id, Some(77));
+    assert_eq!(snake.domain.as_deref(), Some("example.com"));
+    assert_eq!(snake.status, None);
+    assert_eq!(snake.auth_code.as_ref().unwrap().as_str(), "tc-1");
+
+    // Nothing is required, and a wrong-typed field degrades instead of losing
+    // the whole acknowledgement.
+    assert_eq!(
+        serde_json::from_str::<DomainControlResult>("{}").unwrap(),
+        DomainControlResult::default()
+    );
+    let odd: DomainControlResult =
+        serde_json::from_str(r#"{"roId":"not-a-number","status":["weird"]}"#).unwrap();
+    assert_eq!(odd.ro_id, None);
+    assert_eq!(odd.status, Some(r#"["weird"]"#.into()));
+
+    // An echoed code the input rules would refuse is dropped, not fatal.
+    let echoed: DomainControlResult =
+        serde_json::from_str(r#"{"authCode":"not a valid code","roId":1}"#).unwrap();
+    assert_eq!(echoed.ro_id, Some(1));
+    assert_eq!(echoed.auth_code, None);
+    assert!(!format!("{echoed:?}").contains("not a valid code"));
+
+    // Serialising a code writes the real value — the request needs it — while
+    // `Debug` and `Display` stay redacted.
+    let code = AuthCode::new("aB3-xY9_42").unwrap();
+    assert_eq!(serde_json::to_string(&code).unwrap(), "\"aB3-xY9_42\"");
+    assert_eq!(format!("{code:?}"), "AuthCode(<redacted>)");
+    assert_eq!(code.to_string(), "<redacted>");
 }

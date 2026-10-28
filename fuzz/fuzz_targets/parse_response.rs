@@ -8,10 +8,11 @@
 
 use libfuzzer_sys::fuzz_target;
 use inwx_client::{
-    Application, ApplicationCheckResult, ApplicationType, AuthInfo2, AuthInfo2Record, Contact,
-    ContactVerificationSettings, Customer, CustomerDownload, DataExport, DnsRecord, DomainCheck,
-    DomainInfo, DocumentEntry, DownloadedDocument, HostCheckResult, HostRecord, Message, NewsItem,
-    NicHandle, PdfFile, PdfHandle, PolledMessage, RecordType, RpcResponse, ZoneInfo,
+    Application, ApplicationCheckResult, ApplicationType, AuthCode, AuthInfo2, AuthInfo2Record,
+    Contact, ContactVerificationSettings, Customer, CustomerDownload, DataExport, DnsRecord,
+    DomainCheck, DomainControlResult, DomainInfo, DocumentEntry, DownloadedDocument,
+    HostCheckResult, HostRecord, Message, NewsItem, NicHandle, PdfFile, PdfHandle, PolledMessage,
+    RecordType, RpcResponse, ZoneInfo,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -31,6 +32,8 @@ fuzz_target!(|data: &[u8]| {
         let _ = serde_json::from_value::<ZoneInfo>(payload.clone());
         let _ = serde_json::from_value::<DomainInfo>(payload.clone());
         let _ = serde_json::from_value::<DomainCheck>(payload.clone());
+        let _ = serde_json::from_value::<DomainControlResult>(payload.clone());
+        let _ = serde_json::from_value::<Vec<DomainControlResult>>(payload.clone());
         let _ = serde_json::from_value::<Contact>(payload.clone());
         let _ = serde_json::from_value::<Vec<DnsRecord>>(payload.clone());
 
@@ -78,6 +81,9 @@ fuzz_target!(|data: &[u8]| {
         // an AuthInfo2 secret and a document file name.
         let _ = ApplicationType::parse(text);
         let _ = AuthInfo2::new(text);
+        // Transfer auth codes are user input too, and the size cap has to hold
+        // against anything at all (issue #60).
+        let _ = AuthCode::new(text);
         let _ = inwx_client::DocumentUpload::new(text, b"x");
     }
 });

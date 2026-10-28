@@ -4,8 +4,9 @@ mod common;
 
 use common::{client, MockTransport};
 use inwx_client::{
-    ContactQuery, ContactRequest, ContactType, ContactUpdate, DomainCreate, DomainListQuery,
-    DomainName, DomainRenew, DomainUpdate, Error, Hostname, Period, PriceType, RenewalMode,
+    AuthCode, AuthInfoUpdate, ContactQuery, ContactRequest, ContactType, ContactUpdate,
+    DomainControlResult, DomainCreate, DomainListQuery, DomainName, DomainRenew, DomainUpdate,
+    Error, Hostname, Period, PriceType, RenewalMode, TransferCodeUpdate,
 };
 use serde_json::json;
 
@@ -600,4 +601,138 @@ async fn a_domain_price_quote_also_accepts_a_flat_answer() {
         .unwrap();
 
     assert_eq!(quote.price, Some(8.9));
+}
+
+// --------------------------------------------- transfer lock and auth codes
+
+#[tokio::test]
+async fn setting_the_auth_info_sends_domain_and_code() {
+    let transport = MockTransport::new();
+    transport.ok(json!({"roId": "77", "domain": "example.com", "status": "SUCCESS"}));
+
+    let client = client(transport.clone());
+    let request = AuthInfoUpdate::new(domain("example.com"), AuthCode::new("aB3-xY9_42").unwrap());
+    let ack = client.set_auth_info(&request).await.unwrap();
+
+    let call = transport.only_call();
+    assert_eq!(call.method, "domain.setAuthInfo");
+    assert_eq!(call.params["domain"], "example.com");
+    assert_eq!(call.params["authCode"], "aB3-xY9_42");
+    assert_eq!(ack.ro_id, Some(77));
+    assert_eq!(ack.domain.as_deref(), Some("example.com"));
+    assert_eq!(ack.status.as_deref(), Some("SUCCESS"));
+    assert!(ack.auth_code.is_none());
+}
+
+#[tokio::test]
+async fn setting_the_transfer_code_accepts_the_snake_case_answer() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "ro_id": 77,
+        "domainName": "example.com",
+        "auth_code": "aB3-xY9_42",
+        "somethingNew": {"nested": true},
+    }));
+
+    let client = client(transport.clone());
+    let request = TransferCodeUpdate::new(domain("example.com"), AuthCode::new("tc-9f2K").unwrap());
+    let ack = client.set_domain_transfer_code(&request).await.unwrap();
+
+    let call = transport.only_call();
+    assert_eq!(call.method, "domain.setDomainTransferCode");
+    assert_eq!(call.params["authCode"], "tc-9f2K");
+    assert_eq!(ack.ro_id, Some(77));
+    // The echoed code parses but never leaves the redacted `Debug`.
+    assert_eq!(
+        ack.auth_code.as_ref().map(AuthCode::as_str),
+        Some("aB3-xY9_42")
+    );
+    assert!(!format!("{ack:?}").contains("aB3-xY9_42"));
+}
+
+#[tokio::test]
+async fn blocking_and_unblocking_name_the_domain_only() {
+    for (method, result) in [("domain.block", true), ("domain.unblock", false)] {
+        let transport = MockTransport::new();
+        transport.ok_empty();
+
+        let client = client(transport.clone());
+        let ack = if result {
+            client.block_domain(&domain("example.com")).await.unwrap()
+        } else {
+            client.unblock_domain(&domain("example.com")).await.unwrap()
+        };
+
+        let call = transport.only_call();
+        assert_eq!(call.method, method);
+        assert_eq!(call.params, json!({"domain": "example.com"}));
+        assert_eq!(ack, DomainControlResult::default());
+    }
+}
+
+/// A mutation whose outcome is unknown is reported, not repeated.
+#[tokio::test]
+async fn the_transfer_controls_are_never_replayed_after_an_uncertain_failure() {
+    for name in [
+        "domain.setAuthInfo",
+        "domain.setDomainTransferCode",
+        "domain.block",
+        "domain.unblock",
+    ] {
+        let transport = MockTransport::new();
+        transport.uncertain_failure("reset after request");
+        transport.ok_empty();
+
+        let client = client(transport.clone());
+        let error = client.call(name, json!({"domain": "example.com"})).await;
+        assert!(error.unwrap_err().is_uncertain(), "method `{name}`");
+        assert_eq!(transport.call_count(), 1, "method `{name}`");
+    }
+}
+
+#[tokio::test]
+async fn the_typed_controls_report_an_uncertain_outcome_once() {
+    let domain_name = domain("example.com");
+    for kind in 0..4 {
+        let transport = MockTransport::new();
+        transport.uncertain_failure("timeout waiting for response");
+
+        let client = client(transport.clone());
+        let outcome = match kind {
+            0 => client
+                .set_auth_info(&AuthInfoUpdate::new(
+                    domain_name.clone(),
+                    AuthCode::new("code-1").unwrap(),
+                ))
+                .await
+                .map(|_| ()),
+            1 => client
+                .set_domain_transfer_code(&TransferCodeUpdate::new(
+                    domain_name.clone(),
+                    AuthCode::new("code-1").unwrap(),
+                ))
+                .await
+                .map(|_| ()),
+            2 => client.block_domain(&domain_name).await.map(|_| ()),
+            _ => client.unblock_domain(&domain_name).await.map(|_| ()),
+        };
+
+        assert!(outcome.unwrap_err().is_uncertain(), "kind {kind}");
+        assert_eq!(transport.call_count(), 1, "kind {kind}");
+    }
+}
+
+#[tokio::test]
+async fn a_rejected_control_command_is_terminal() {
+    let transport = MockTransport::new();
+    transport.api_error(2303, "Object does not exist");
+
+    let client = client(transport.clone());
+    let error = client
+        .block_domain(&domain("missing.de"))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), Some(2303));
+    assert_eq!(transport.call_count(), 1);
 }
