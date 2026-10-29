@@ -208,11 +208,11 @@ proptest! {
 use std::str::FromStr;
 
 use inwx_client::{
-    is_read_only_method, parse_ip, ActionKind, AuthCode, CertificateOrder, CertificateTerm, DnsKey,
-    DnssecAlgorithm, DnssecDigestType, DnssecDomainStatus, DnssecFlag, DnssecKeyQuery,
-    DnssecKeyStatus, DocumentFormat, Email, Error, Handle, HostingPeriod, Irreversible,
-    NameserverSetType, RecordSet, Timestamp, TransferAnswer, TransportStage, UrlRedirectType,
-    ZoneCreate, ZoneType,
+    is_read_only_method, parse_ip, AccountRole, ActionKind, AuthCode, CertificateOrder,
+    CertificateTerm, DnsKey, DnssecAlgorithm, DnssecDigestType, DnssecDomainStatus, DnssecFlag,
+    DnssecKeyQuery, DnssecKeyStatus, DocumentFormat, Email, Error, Handle, HostingPeriod,
+    Irreversible, NameserverSetType, RecordSet, Timestamp, TransferAnswer, TransportStage,
+    UrlRedirectType, ZoneCreate, ZoneType,
 };
 
 /// Arbitrary text for parsers that must never panic.
@@ -230,6 +230,7 @@ fn method_name() -> impl Strategy<Value = String> {
 fn known_read_only() -> impl Strategy<Value = String> {
     prop_oneof![
         Just(String::from("account.info")),
+        Just(String::from("account.getroles")),
         Just(String::from("contact.info")),
         Just(String::from("domain.info")),
         Just(String::from("domain.list")),
@@ -278,6 +279,7 @@ proptest! {
         let _ = AuthCode::new(&input);
         let _ = DnsKey::parse(&input);
         let _ = inwx_client::DsRecord::parse(&input);
+        let _ = AccountRole::parse(&input);
     }
 
     #[test]
@@ -302,6 +304,9 @@ proptest! {
         }
         if let Ok(status) = DnssecKeyStatus::parse(&input) {
             prop_assert_eq!(DnssecKeyStatus::parse(status.as_str()).unwrap(), status);
+        }
+        if let Ok(role) = AccountRole::parse(&input) {
+            prop_assert_eq!(AccountRole::parse(role.as_str()).unwrap(), role);
         }
     }
 

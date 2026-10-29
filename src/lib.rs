@@ -47,6 +47,7 @@
 //! | Nameserver sets | `nameserverset.*` (5 methods) |
 //! | DynDNS | `dyndns.*` (8 methods) |
 //! | Accounting | `accounting.*` (11 methods) |
+//! | Account roles | `account.getroles`, `account.addrole`, `account.removerole` |
 //! | Contacts | `contact.create`, `info`, `list`, `update`, `delete` |
 //! | Prices | `domain.getPrices`, `domain.getdomainprice` |
 //! | Applications | `application.check`, `create`, `delete`, `info`, `list`, `update` |
@@ -72,7 +73,8 @@
 //!   transfer cannot be built by copy-pasting a block and forgetting the domain.
 //! * **Parse permissively.** Unknown fields are ignored, unknown enum values are
 //!   carried ([`RecordType::Other`], [`RenewalMode::Other`],
-//!   [`ContactType::Other`]), and scalars are accepted as numbers or strings —
+//!   [`ContactType::Other`], [`AccountRole::Other`]), and scalars are accepted as
+//!   numbers or strings —
 //!   INWX is inconsistent between methods.
 //! * **No socket needed.** The HTTP layer sits behind [`Transport`]; the test
 //!   suite and the examples in these docs drive a scripted mock.
@@ -111,6 +113,7 @@
 // `record::RecordSpec` and friends read better than a flattened module.
 #![allow(clippy::module_name_repetitions)]
 
+pub mod account;
 pub mod accounting;
 pub mod application;
 pub mod authinfo2;
@@ -141,6 +144,7 @@ pub mod transport;
 pub mod types;
 pub mod zone;
 
+pub use account::{AccountRole, AccountRoleEntry};
 pub use accounting::{
     AccountBalance, CreditLog, Document, Invoice, LockedFund, LockedFunds, PostalDelivery,
     RefundRequest, SslFund, StatementQuery, Transaction, TransactionLog, TransactionLogQuery,

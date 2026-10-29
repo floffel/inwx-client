@@ -8,10 +8,11 @@
 
 use libfuzzer_sys::fuzz_target;
 use inwx_client::{
-    Application, ApplicationCheckResult, ApplicationType, AuthInfo2, AuthInfo2Record, Contact,
-    ContactVerificationSettings, Customer, CustomerDownload, DataExport, DnsRecord, DomainCheck,
-    DomainInfo, DocumentEntry, DownloadedDocument, HostCheckResult, HostRecord, Message, NewsItem,
-    NicHandle, PdfFile, PdfHandle, PolledMessage, RecordType, RpcResponse, ZoneInfo,
+    AccountRole, AccountRoleEntry, Application, ApplicationCheckResult, ApplicationType, AuthInfo2,
+    AuthInfo2Record, Contact, ContactVerificationSettings, Customer, CustomerDownload, DataExport,
+    DnsRecord, DomainCheck, DomainInfo, DocumentEntry, DownloadedDocument, HostCheckResult,
+    HostRecord, Message, NewsItem, NicHandle, PdfFile, PdfHandle, PolledMessage, RecordType,
+    RpcResponse, ZoneInfo,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -56,6 +57,9 @@ fuzz_target!(|data: &[u8]| {
         let _ = serde_json::from_value::<NicHandle>(payload.clone());
         let _ = serde_json::from_value::<PdfHandle>(payload.clone());
         let _ = serde_json::from_value::<PdfFile>(payload.clone()).map(|file| file.bytes());
+        // Account roles (#74): the row model and the role vocabulary inside it.
+        let _ = serde_json::from_value::<AccountRoleEntry>(payload.clone());
+        let _ = serde_json::from_value::<Vec<AccountRoleEntry>>(payload.clone());
 
         // A `domain.check` answer may be a single object or an array.
         if let Some(entries) = payload.get("domain").and_then(|value| value.as_array()) {
@@ -79,5 +83,6 @@ fuzz_target!(|data: &[u8]| {
         let _ = ApplicationType::parse(text);
         let _ = AuthInfo2::new(text);
         let _ = inwx_client::DocumentUpload::new(text, b"x");
+        let _ = AccountRole::parse(text);
     }
 });

@@ -916,6 +916,7 @@ impl<T: Transport> InwxClient<T> {
 /// duplicated registration.
 const READ_ONLY_METHODS: &[&str] = &[
     "account.check",
+    "account.getroles",
     "account.info",
     "accounting.accountbalance",
     "accounting.creditlogbyid",
@@ -1177,6 +1178,12 @@ mod tests {
         assert!(!is_read_only_method("domain.inf"));
         assert!(!is_read_only_method("tag.update"));
         assert!(!is_read_only_method("domain.create"));
+
+        // Reading roles may be replayed; granting or revoking one may not.
+        assert!(is_read_only_method("account.getroles"));
+        assert!(!is_read_only_method("account.getrole"));
+        assert!(!is_read_only_method("account.addrole"));
+        assert!(!is_read_only_method("account.removerole"));
 
         // Case and padding are folded away; a bare namespace is not a method.
         assert!(is_read_only_method("  DOMAIN.INFO\t"));

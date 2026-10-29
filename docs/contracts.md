@@ -431,6 +431,30 @@ characters), the body is neither empty nor larger than `MAX_DOCUMENT_BYTES`
 bigger again — and the body is absent from `Debug`, because these documents are
 mandates and ID copies.
 
+## Account roles (issue #74, `src/account.rs`)
+
+Chapter 2 §2.1 (`account.*`) also covers granting a role to a handle:
+
+| Method | Wrapper | Input table | Output table |
+| --- | --- | --- | --- |
+| `account.getroles` | `account_roles` | not read | not read |
+| `account.addrole` | `add_role` | not read | — |
+| `account.removerole` | `remove_role` | not read | — |
+
+**Provenance.** The page could not be fetched in the run that added these three
+methods — it had no network access — so, unlike the sections above, this one
+claims no `Table 2.NNN` number at all. The method names come from the issue; the
+request keys (`handle`, `role`) and the two possible answer keys (`roles`,
+`role`) are the spellings the rest of the API uses and are flagged below.
+
+Local checks: `handle` is a positive id, `role` a non-empty token of at most 255
+characters. The role vocabulary is not treated as frozen — `OWNER`, `ADMIN`,
+`TECH`, `BILLING`, `NONE` become variants and anything else is carried verbatim
+in `AccountRole::Other`, so a role INWX adds later still decodes. Reading is in
+the read-only table and may therefore be replayed after an uncertain failure;
+granting and revoking are not, because replaying them would duplicate a
+permission change, so such an outcome surfaces as `Error::Uncertain`.
+
 ## Unverified
 
 Points the documentation does not settle. Each is modelled as documented and
@@ -453,6 +477,9 @@ flagged here; none is a guess about an endpoint's existence.
 | `customer.requestdataexport` answer | **unverified** | Modelled as `{downloadId, status, filename}` because `customer.listdownloads` lists downloads; the crate carries any of them as `None`. |
 | `host.create` address parameter | **unverified** | The address list is sent as `ip`, an array of address strings, matching `masterIp`/`ipAddress` elsewhere in the API; a single string is accepted on the way back. The 13-address limit is the registry host protocol, not the INWX page. |
 | `extData` per-TLD keys | **documented, not enumerated** | ch03 §3.49 lists the generic keys and then a long TLD-specific list; `ExtData::set` carries any upper-case token. |
+| `account.getroles`/`addrole`/`removerole` tables | **not read** | ch02 §2.1 could not be fetched offline, so this section claims no table number; the method names come from the issue and must be confirmed against the page. |
+| Account role request and answer keys | **unverified** | The request sends `handle` and `role`; the answer is read under `roles` and, if that is absent, under `role`, and the customer field under `customer` or `username`. Every response field is `Option` and unknown keys are ignored, so a different spelling costs a `None`, not a failed parse — but the request keys must be checked against the live page. |
+| Account role vocabulary | **unverified** | `OWNER`/`ADMIN`/`TECH`/`BILLING`/`NONE` are the roles the product describes; the page was not read, so unknown values are carried in `AccountRole::Other` instead of being rejected. |
 
 ## Deliberately not modelled
 
