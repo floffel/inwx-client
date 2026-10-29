@@ -35,7 +35,7 @@
 //!
 //! | Area | Methods |
 //! | --- | --- |
-//! | Session | `account.login`, `account.logout`, `account.check`, `account.info` |
+//! | Session | `account.login`, `account.logout`, `account.check`, `account.info`, `account.unlock` |
 //! | Domains | `check`, `create`, `info`, `list`, `update`, `renew`, `delete`, `whois` |
 //! | Ownership | `domain.transfer`, `domain.trade`, `domain.push`, `domain.restore`, `domain.transfercancel`, `domain.transferOut` |
 //! | DNS records | `nameserver.info` (read), `createRecord`, `updateRecord`, `deleteRecord` |
@@ -156,8 +156,9 @@ pub use certificate::{
     CertificateTerm, CertificateUpdate, CertificateValidationMethod, MAX_CSR_LEN,
 };
 pub use client::{
-    is_read_only_method, AccountInfo, Credentials, InwxClient, Language, RetryPolicy,
-    DEFAULT_ATTEMPTS, DEFAULT_BASE_DELAY, DEFAULT_BASE_URL, DEFAULT_MAX_DELAY, SANDBOX_BASE_URL,
+    is_read_only_method, AccountInfo, AccountUnlock, Credentials, InwxClient, Language,
+    RetryPolicy, UnlockAccount, DEFAULT_ATTEMPTS, DEFAULT_BASE_DELAY, DEFAULT_BASE_URL,
+    DEFAULT_MAX_DELAY, MAX_SUBACCOUNT_USERNAME_LEN, SANDBOX_BASE_URL,
 };
 pub use contact::{Contact, ContactListPage, ContactQuery, ContactRequest, ContactUpdate};
 pub use customer::{

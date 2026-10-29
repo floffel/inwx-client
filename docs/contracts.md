@@ -22,7 +22,7 @@ settle. It is modelled as documented and flagged rather than guessed at.
 
 | Area | Methods | Source |
 | --- | --- | --- |
-| Session | `account.login`, `account.logout`, `account.check`, `account.info` | ch02 §2.1, Tables 2.1–2.17 |
+| Session | `account.login`, `account.logout`, `account.check`, `account.info`, `account.unlock` | ch02 §2.1, Tables 2.1–2.17 |
 | Domains | `domain.check`, `create`, `info`, `list`, `update`, `renew`, `delete`, `whois` | ch02 §2.9 |
 | DNS records | `nameserver.info`, `createRecord`, `updateRecord`, `deleteRecord` | ch02 §2.15, Tables 2.197–2.212 |
 | Zones (read) | `nameserver.list`, `nameserver.info`, `nameserver.delete`, `nameserver.check` | ch02 §2.15 |
@@ -453,6 +453,7 @@ flagged here; none is a guess about an endpoint's existence.
 | `customer.requestdataexport` answer | **unverified** | Modelled as `{downloadId, status, filename}` because `customer.listdownloads` lists downloads; the crate carries any of them as `None`. |
 | `host.create` address parameter | **unverified** | The address list is sent as `ip`, an array of address strings, matching `masterIp`/`ipAddress` elsewhere in the API; a single string is accepted on the way back. The 13-address limit is the registry host protocol, not the INWX page. |
 | `extData` per-TLD keys | **documented, not enumerated** | ch03 §3.49 lists the generic keys and then a long TLD-specific list; `ExtData::set` carries any upper-case token. |
+| `account.unlock` request and answer | **derived, not read** | The public chapter does not settle the shape, so the request is `{"user": text64}` — the same key and datatype `account.login` uses for a login name — and every answer field (`username`, `state`) is `Option`, ignores unknown keys and accepts snake_case as well as camelCase. Network access was unavailable, so neither key was confirmed against a live page; a wrong response key costs a `None`, but the *request* key must be checked before unlocking is used in production. |
 
 ## Deliberately not modelled
 

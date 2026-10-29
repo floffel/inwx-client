@@ -9,7 +9,7 @@ mod common;
 
 use common::{client, MockTransport};
 use inwx_client::{
-    parse_ip, AccountBalance, AddDnsKeyRequest, ApplicationCheck, ApplicationCreate,
+    parse_ip, AccountBalance, AccountUnlock, AddDnsKeyRequest, ApplicationCheck, ApplicationCreate,
     ApplicationQuery, ApplicationType, ApplicationUpdate, AuthCode, AuthInfo2, Certificate,
     CertificateLogEntry, CertificateOrder, CertificateProduct, CertificateProductQuery,
     CertificateQuery, CertificateUpdate, CertificateValidationMethod, ContactVerificationSettings,
@@ -20,7 +20,8 @@ use inwx_client::{
     HostUpdate, HostingOrder, HostingPeriod, Hostname, Irreversible, NameserverSet,
     NameserverSetType, NameserverSetUpdate, NewsItem, NicHandle, NicHandleQuery, PdfFile,
     PdfRender, PostalDelivery, RecordSet, RecordSpec, RefundRequest, StatementQuery, TagUpdate,
-    Timestamp, TransferAnswer, UrlRedirectType, ZoneCreate, ZoneType, ZoneUpdate,
+    Timestamp, TransferAnswer, UnlockAccount, UrlRedirectType, ZoneCreate, ZoneType, ZoneUpdate,
+    MAX_SUBACCOUNT_USERNAME_LEN,
 };
 use serde_json::json;
 
@@ -331,6 +332,16 @@ fn token_and_text_validators_cover_their_limits() {
             .params()["testing"],
         true
     );
+
+    // A sub-account login name is stricter than free text: `validate_text`
+    // tolerates a newline, the unlock request does not.
+    assert!(UnlockAccount::new("us\ner").is_err());
+    assert!(UnlockAccount::new("nul\u{0}byte").is_err());
+    assert!(UnlockAccount::new("").is_err());
+    assert!(UnlockAccount::new("   ").is_err());
+    let at_limit = "a".repeat(MAX_SUBACCOUNT_USERNAME_LEN);
+    assert!(UnlockAccount::new(&at_limit).is_ok());
+    assert!(UnlockAccount::new(format!("{at_limit}x")).is_err());
 }
 
 #[test]
@@ -742,6 +753,22 @@ fn remaining_public_accessors_and_parsers() {
     // `HostingPeriod` parsing from a string, including a non-numeric one.
     assert!("abc".parse::<HostingPeriod>().is_err());
     assert_eq!("18".parse::<HostingPeriod>().unwrap().months(), 18);
+
+    // `UnlockAccount` accessors and the permissive `AccountUnlock` answer.
+    let request = UnlockAccount::new("sub-account").unwrap();
+    assert_eq!(request.username(), "sub-account");
+    assert_eq!(request.params(), json!({ "user": "sub-account" }));
+
+    let answer: AccountUnlock = serde_json::from_value(json!({
+        "username": "sub-account",
+        "state": 1,
+        "someFutureField": { "nested": true },
+    }))
+    .unwrap();
+    assert_eq!(answer.username.as_deref(), Some("sub-account"));
+    assert_eq!(answer.state.as_deref(), Some("1"));
+    assert_eq!(AccountUnlock::default().username, None);
+    assert_eq!(AccountUnlock::default().state, None);
 }
 
 #[test]
@@ -757,6 +784,32 @@ fn listing_helpers_report_empty_and_full_pages() {
             .unwrap();
     assert_eq!(full.len(), 2);
     assert!(full.has_more());
+}
+
+#[tokio::test]
+async fn unlock_account_sends_the_name_and_tolerates_an_empty_answer() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "username": "sub-account", "state": "OPEN" }));
+    transport.ok_empty();
+
+    let client = client(transport.clone());
+    let answer = client
+        .unlock_account(&UnlockAccount::new("sub-account").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(answer.username.as_deref(), Some("sub-account"));
+    assert_eq!(answer.state.as_deref(), Some("OPEN"));
+
+    let call = &transport.calls()[0];
+    assert_eq!(call.method, "account.unlock");
+    assert_eq!(call.params, json!({ "user": "sub-account" }));
+
+    // A success envelope without `resData` is the empty answer, not an error.
+    let empty = client
+        .unlock_account(&UnlockAccount::new("other").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(empty, AccountUnlock::default());
 }
 
 // ------------------------------------------------------------ reseller #22 --

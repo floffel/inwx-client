@@ -12,11 +12,12 @@ use inwx_client::{
     is_read_only_method,
     rpc::{self, Detail, RpcRequest, RpcResponse},
     transport::{Request, Response, TransportStage},
-    AccountInfo, Contact, ContactQuery, ContactRequest, ContactType, ContactUpdate, Credentials,
-    DnsRecord, DomainCheck, DomainCreate, DomainInfo, DomainListPage, DomainListQuery, DomainName,
-    DomainPriceQuote, DomainRenew, DomainUpdate, Error, Hostname, InwxClient, Language,
+    AccountInfo, AccountUnlock, Contact, ContactQuery, ContactRequest, ContactType, ContactUpdate,
+    Credentials, DnsRecord, DomainCheck, DomainCreate, DomainInfo, DomainListPage, DomainListQuery,
+    DomainName, DomainPriceQuote, DomainRenew, DomainUpdate, Error, Hostname, InwxClient, Language,
     NameserverCheck, Period, PriceList, PriceType, RecordId, RecordSpec, RecordType, RecordUpdate,
-    RenewalMode, RetryPolicy, TldPrice, ZoneInfo, ZoneListPage, ZoneSummary,
+    RenewalMode, RetryPolicy, TldPrice, UnlockAccount, ZoneInfo, ZoneListPage, ZoneSummary,
+    MAX_SUBACCOUNT_USERNAME_LEN,
 };
 use serde_json::json;
 
@@ -630,4 +631,36 @@ fn response_payload_types_are_constructible_and_comparable() {
     let contact = Contact::default();
     assert!(contact.handle().is_none());
     assert!(AccountInfo::default().account_id.is_none());
+
+    let unlock = AccountUnlock::default();
+    assert!(unlock.username.is_none());
+    assert!(unlock.state.is_none());
+
+    // Unknown keys are ignored and a number arrives as a string.
+    let answer: AccountUnlock = serde_json::from_value(json!({
+        "username": "sub-account",
+        "state": "OPEN",
+        "someFutureField": 1,
+    }))
+    .unwrap();
+    assert_eq!(
+        answer,
+        AccountUnlock {
+            username: Some("sub-account".into()),
+            state: Some("OPEN".into()),
+        }
+    );
+    assert_eq!(answer.clone(), answer);
+
+    assert_eq!(MAX_SUBACCOUNT_USERNAME_LEN, 64);
+    let at_limit = "a".repeat(MAX_SUBACCOUNT_USERNAME_LEN);
+    assert!(UnlockAccount::new(&at_limit).is_ok());
+    assert!(UnlockAccount::new(format!("{at_limit}x")).is_err());
+
+    let request = UnlockAccount::new("sub-account").unwrap();
+    assert_eq!(request.username(), "sub-account");
+    assert_eq!(request.params(), json!({ "user": "sub-account" }));
+    assert_eq!(request.clone(), request);
+    assert_eq!(request, UnlockAccount::new("sub-account").unwrap());
+    assert_ne!(request, UnlockAccount::new("other").unwrap());
 }
