@@ -786,6 +786,11 @@ impl<T: Transport> InwxClient<T> {
     /// cannot have side effects. For a mutating method the error is returned
     /// as-is, because a second attempt could register twice.
     ///
+    /// The same rule covers HTTP: a 429 or a 5xx is replayed only for a
+    /// read-only method. For a mutating method the status says nothing about
+    /// whether the command already ran, so the call answers
+    /// [`Error::Uncertain`] after a single attempt instead of retrying.
+    ///
     /// # Errors
     ///
     /// [`Error::NotAuthenticated`], [`Error::Api`], [`Error::Transport`],
@@ -823,7 +828,8 @@ impl<T: Transport> InwxClient<T> {
                 }
                 Ok(response) => {
                     // HTTP 401/403 means the session died; 429 and 5xx are
-                    // worth another try; anything else is terminal.
+                    // worth another try for a method that cannot have done
+                    // anything yet; anything else is terminal.
                     let status = response.status();
                     if matches!(status, 401 | 403) && !relogged_in && self.credentials.is_some() {
                         relogged_in = true;
@@ -831,7 +837,7 @@ impl<T: Transport> InwxClient<T> {
                         self.login().await?;
                         continue;
                     }
-                    if is_retryable_status(status) {
+                    if status_replay_allowed(status, method) {
                         if let Some(delay) = self.policy.delay(attempt) {
                             sleep_for(delay).await;
                             attempt += 1;
@@ -839,6 +845,17 @@ impl<T: Transport> InwxClient<T> {
                         }
                     }
                     return match RpcResponse::parse(response.body()) {
+                        // The API did answer with a verdict, so the verdict
+                        // outranks the status and is never repeated.
+                        Ok(envelope) if !envelope.is_success() => envelope.into_result(),
+                        // Nothing readable answered behind a transient status.
+                        // The request was written, so on a command that mutates
+                        // the outcome is unknown and a replay could duplicate
+                        // the work.
+                        _ if status_is_uncertain(status, method) => Err(Error::uncertain(format!(
+                            "`{method}` answered HTTP {status}; the command may have been \
+                             executed, check the current state before retrying"
+                        ))),
                         Ok(envelope) => envelope.into_result(),
                         Err(_) => Err(Error::Http {
                             status,
@@ -926,6 +943,7 @@ const READ_ONLY_METHODS: &[&str] = &[
     "accounting.listinvoices",
     "accounting.lockedfunds",
     "accounting.log",
+    "authinfo2.getprice",
     "certificate.getproduct",
     "certificate.info",
     "certificate.list",
@@ -1011,6 +1029,22 @@ fn is_public_method(method: &str) -> bool {
 /// HTTP statuses worth another attempt.
 fn is_retryable_status(status: u16) -> bool {
     status == 429 || (500..600).contains(&status)
+}
+
+/// Whether an HTTP status may be answered with another attempt of `method`.
+///
+/// A transient status is only worth replaying when the command cannot have
+/// done anything yet. For a mutating method the status alone says nothing
+/// about whether the order already happened.
+fn status_replay_allowed(status: u16, method: &str) -> bool {
+    is_retryable_status(status) && is_read_only_method(method)
+}
+
+/// Whether a status leaves the outcome of `method` unknown: the request was
+/// written, the answer is a transient failure, and a second attempt could
+/// duplicate the mutation.
+fn status_is_uncertain(status: u16, method: &str) -> bool {
+    is_retryable_status(status) && !is_read_only_method(method)
 }
 
 /// Collects every `Set-Cookie` header into a single `Cookie` value.
@@ -1177,12 +1211,51 @@ mod tests {
         assert!(!is_read_only_method("domain.inf"));
         assert!(!is_read_only_method("tag.update"));
         assert!(!is_read_only_method("domain.create"));
+        // The two authinfo2 methods sit on both sides of the line: the price
+        // query reads, the order spends money.
+        assert!(is_read_only_method("authinfo2.getprice"));
+        assert!(!is_read_only_method("authinfo2.create"));
 
         // Case and padding are folded away; a bare namespace is not a method.
         assert!(is_read_only_method("  DOMAIN.INFO\t"));
         assert!(!is_read_only_method(""));
         assert!(!is_read_only_method("   "));
         assert!(!is_read_only_method("list"));
+    }
+
+    #[test]
+    fn a_transient_status_is_only_replayed_for_a_read_only_method() {
+        // Inside the retryable band on a read method: replay. The same status
+        // on an order: never. Just outside the band: terminal either way.
+        assert!(status_replay_allowed(500, "domain.list"));
+        assert!(status_replay_allowed(429, "domain.list"));
+        assert!(!status_replay_allowed(500, "authinfo2.create"));
+        assert!(!status_replay_allowed(429, "authinfo2.create"));
+        assert!(!status_replay_allowed(400, "domain.list"));
+        assert!(!status_replay_allowed(404, "domain.list"));
+    }
+
+    #[test]
+    fn a_transient_status_on_an_order_leaves_the_outcome_unknown() {
+        assert!(status_is_uncertain(500, "authinfo2.create"));
+        assert!(status_is_uncertain(429, "authinfo2.create"));
+        assert!(!status_is_uncertain(500, "domain.list"));
+        // A terminal status is an answer, not an missing one.
+        assert!(!status_is_uncertain(404, "authinfo2.create"));
+        assert!(!status_is_uncertain(400, "authinfo2.create"));
+        // The two classifications are mutually exclusive and together cover
+        // exactly the retryable statuses.
+        for status in 0u16..600 {
+            assert!(
+                !(status_replay_allowed(status, "authinfo2.create")
+                    && status_is_uncertain(status, "authinfo2.create"))
+            );
+            assert_eq!(
+                status_replay_allowed(status, "domain.list")
+                    || status_is_uncertain(status, "authinfo2.create"),
+                is_retryable_status(status)
+            );
+        }
     }
 
     #[test]

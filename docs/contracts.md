@@ -307,12 +307,29 @@ Source: <https://account.inwx.com/en/help/apidoc/f/ch02s04.html>
 
 | Method | Wrapper | Input table | Output table |
 | --- | --- | --- | --- |
-| `authinfo2.create` | `create_auth_info2` | 2.46 (derived) | 2.47 (derived) |
-| `authinfo2.getprice` | `auth_info2_price` | 2.48 (derived) | 2.49 (derived) |
+| `authinfo2.create` | `AuthInfo2Order` → `create_auth_info2` | 2.46 (derived) | 2.47 (derived) |
+| `authinfo2.getprice` | `auth_info2_price` | — (none documented) | 2.49 (derived) |
 
-The value is a secret: `AuthInfo2` prints `<redacted>` in `Debug` and `Display`
-like `AuthCode`, refuses an empty value, and an unusable value in an answer
-degrades to `None` instead of failing the record.
+The fields are the ones the chapter lists. `authinfo2.create` takes `domain`
+(`text255`, required) and `testing` (`boolean`, optional, default false) and
+answers `product`, `net_price`, `price`, `currency`, `message`;
+`authinfo2.getprice` takes no input at all and answers the same fields without
+`message`. Note the request key: this object sends `domain`, not the
+`domainName` the rest of the API uses — the spelling here was read off the
+page, unlike the reseller keys in the table below.
+
+`domain` is taken as the validated `DomainName`, which is
+stricter than `text255`: an empty, malformed or oversized name is a local
+validation error instead of a charged call. `testing` is an explicit argument of
+`AuthInfo2Order::new` and is omitted from the request when false, so a billable
+order is never what a defaulted call does.
+
+The answer of `create` is an order confirmation — a product name and the amount
+charged — not a secret, so nothing in this module is redacted; the transfer-code
+secret is `AuthCode`. Because `create` is a paid, non-idempotent order it is not
+in `READ_ONLY_METHODS`: a 429, a 5xx or a mid-flight timeout answers
+`Error::Uncertain` after a single attempt, and the caller checks the state
+before ordering again.
 
 ### `customer.*` (`src/customer.rs`)
 
@@ -447,7 +464,7 @@ flagged here; none is a guess about an endpoint's existence.
 | `tag.list` `count` nesting | **unverified** | Table 2.235 shows `count` → `domain` with an ambiguous indentation; parsed as `{"count": {"domain": N}}` with a scalar `count` also tolerated. |
 | Live-endpoint behaviour for every 0.2.0 method | **unverified** | No credentials in CI; every test is offline against fixtures. Method names, parameters and datatypes are from the tables above. |
 | Table numbers of the reseller sections | **derived, not read** | The run that added them had no network access; the numbers follow from the anchors `certificate` 2.50, `hosting` 2.177, `nameserver` 2.193 and `tag` 2.229. Confirm against the pages before quoting them. |
-| Parameter names of the reseller objects | **unverified** | `applicationId`, `customerNumber`, `hostId`, `documentId`, `messageId`, `pdfId`, `domainName`, `cc`, `ip` and the `type`/`status`/`state` fields are the spellings the rest of the API uses, applied to the objects of chapter 2 §2.3–§2.21. Every response field is `Option`, ignores unknown keys and accepts snake_case as well as camelCase, so a spelling that turns out to be different costs a `None`, not a failed parse — but the *request* keys must be checked against the live pages. |
+| Parameter names of the reseller objects | **unverified** | `applicationId`, `customerNumber`, `hostId`, `documentId`, `messageId`, `pdfId`, `domainName`, `cc`, `ip` and the `type`/`status`/`state` fields are the spellings the rest of the API uses, applied to the objects of chapter 2 §2.3–§2.21. Every response field is `Option`, ignores unknown keys and accepts snake_case as well as camelCase, so a spelling that turns out to be different costs a `None`, not a failed parse — but the *request* keys must be checked against the live pages. `authinfo2` is the exception: issue #54 read that chapter, so its `domain` key and its five output fields are taken from the page. |
 | `application.*` object shape | **unverified** | Chapter 2 §2.3 is the only description; which `type` values exist is account-specific, so the crate models the type as a validated token instead of an enum and never invents a vocabulary. |
 | `message.ack` state parameter | **unverified** | Whether `message.ack` takes a completion state at all is not settled by the documentation. `MessageAck::with_state` is optional and off by default, so the default request carries only the message id. |
 | `customer.requestdataexport` answer | **unverified** | Modelled as `{downloadId, status, filename}` because `customer.listdownloads` lists downloads; the crate carries any of them as `None`. |
@@ -461,4 +478,5 @@ flagged here; none is a guess about an endpoint's existence.
 - Nothing else. The reseller/partner objects that used to be listed here
   (`application.*`, `authinfo2.*`, `customer.*`, `document.*`, `host.*`,
   `message.*`, `news.list`, `nichandle.list`, `pdf.*`) are modelled since
-  issue #22; see the sections above for what is still unverified about them.
+  issue #22; `authinfo2.*` was re-checked against the page in issue #54. See the
+  sections above for what is still unverified about the rest.

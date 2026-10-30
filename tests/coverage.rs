@@ -10,17 +10,18 @@ mod common;
 use common::{client, MockTransport};
 use inwx_client::{
     parse_ip, AccountBalance, AddDnsKeyRequest, ApplicationCheck, ApplicationCreate,
-    ApplicationQuery, ApplicationType, ApplicationUpdate, AuthCode, AuthInfo2, Certificate,
-    CertificateLogEntry, CertificateOrder, CertificateProduct, CertificateProductQuery,
-    CertificateQuery, CertificateUpdate, CertificateValidationMethod, ContactVerificationSettings,
-    ContactVerificationSettingsUpdate, CustomerUpdate, DataExport, DnsKey, DnssecAlgorithm,
-    DnssecDigestType, DnssecDomainStatus, DnssecFlag, DnssecKeyQuery, DnssecKeyStatus, Document,
-    DocumentFormat, DocumentQuery, DocumentUpload, DomainName, DownloadedDocument, DsRecord,
-    DynDnsAccount, DynDnsAccountRef, DynDnsRecord, Email, Handle, HostCheck, HostCreate,
-    HostUpdate, HostingOrder, HostingPeriod, Hostname, Irreversible, NameserverSet,
-    NameserverSetType, NameserverSetUpdate, NewsItem, NicHandle, NicHandleQuery, PdfFile,
-    PdfRender, PostalDelivery, RecordSet, RecordSpec, RefundRequest, StatementQuery, TagUpdate,
-    Timestamp, TransferAnswer, UrlRedirectType, ZoneCreate, ZoneType, ZoneUpdate,
+    ApplicationQuery, ApplicationType, ApplicationUpdate, AuthCode, AuthInfo2Order,
+    AuthInfo2OrderResult, AuthInfo2PriceQuote, Certificate, CertificateLogEntry, CertificateOrder,
+    CertificateProduct, CertificateProductQuery, CertificateQuery, CertificateUpdate,
+    CertificateValidationMethod, ContactVerificationSettings, ContactVerificationSettingsUpdate,
+    CustomerUpdate, DataExport, DnsKey, DnssecAlgorithm, DnssecDigestType, DnssecDomainStatus,
+    DnssecFlag, DnssecKeyQuery, DnssecKeyStatus, Document, DocumentFormat, DocumentQuery,
+    DocumentUpload, DomainName, DownloadedDocument, DsRecord, DynDnsAccount, DynDnsAccountRef,
+    DynDnsRecord, Email, Handle, HostCheck, HostCreate, HostUpdate, HostingOrder, HostingPeriod,
+    Hostname, Irreversible, NameserverSet, NameserverSetType, NameserverSetUpdate, NewsItem,
+    NicHandle, NicHandleQuery, PdfFile, PdfRender, PostalDelivery, RecordSet, RecordSpec,
+    RefundRequest, StatementQuery, TagUpdate, Timestamp, TransferAnswer, UrlRedirectType,
+    ZoneCreate, ZoneType, ZoneUpdate,
 };
 use serde_json::json;
 
@@ -777,14 +778,40 @@ fn reseller_value_types_run_their_trait_impls() {
     let carried: ApplicationType = serde_json::from_str("\"whatever else\"").unwrap();
     assert_eq!(carried.as_str(), "WHATEVER ELSE");
 
-    // `AuthInfo2`: parsing, serde, and the non-ASCII branch.
-    let secret: AuthInfo2 = "aB3-xY9".parse().unwrap();
-    assert_eq!(serde_json::to_string(&secret).unwrap(), "\"aB3-xY9\"");
-    let round: AuthInfo2 = serde_json::from_str("\"aB3-xY9\"").unwrap();
-    assert_eq!(round, secret);
-    assert!(serde_json::from_str::<AuthInfo2>("\"\"").is_err());
-    let err = AuthInfo2::new("geheim\u{e4}").unwrap_err();
-    assert!(err.is_validation());
+    // `AuthInfo2Order`: accessors, `params`, `Debug`, `Clone`, `PartialEq`, and
+    // the two permissive answer types.
+    let order = AuthInfo2Order::new(domain("example.de"), true);
+    assert_eq!(order.domain(), &domain("example.de"));
+    assert!(order.is_testing());
+    assert_eq!(
+        order.params(),
+        json!({ "domain": "example.de", "testing": true })
+    );
+    assert_eq!(order.clone(), order);
+    assert_ne!(order, AuthInfo2Order::new(domain("example.de"), false));
+    let _ = format!("{order:?}");
+    let order_result: AuthInfo2OrderResult = serde_json::from_str(
+        r#"{"product":"P","netPrice":1.2,"price":"1.43","currency":"EUR","message":"m","x":1}"#,
+    )
+    .unwrap();
+    assert_eq!(order_result.price, Some(1.43));
+    assert!(format!("{order_result:?}").contains("product: Some(\"P\")"));
+    assert_eq!(
+        order_result,
+        AuthInfo2OrderResult {
+            product: Some("P".to_owned()),
+            net_price: Some(1.2),
+            price: Some(1.43),
+            currency: Some("EUR".to_owned()),
+            message: Some("m".to_owned()),
+        }
+    );
+    let quote: AuthInfo2PriceQuote = serde_json::from_str("{}").unwrap();
+    assert_eq!(quote, AuthInfo2PriceQuote::default());
+    assert_eq!(
+        format!("{quote:?}"),
+        "AuthInfo2PriceQuote { product: None, net_price: None, price: None, currency: None }"
+    );
 
     // The read helpers of the small answer types.
     let news: NewsItem = serde_json::from_str(r#"{"id":1,"read":1}"#).unwrap();
