@@ -636,3 +636,142 @@ fn decode_every_reseller_row(payload: &Value) {
     let _ = serde_json::from_value::<PdfHandle>(payload.clone());
     let _ = serde_json::from_value::<PdfFile>(payload.clone()).map(|file| file.bytes());
 }
+
+// ------------------------------------- transfer lock and auth codes (#60)
+
+use inwx_client::{AuthInfoUpdate, DomainControlResult, TransferCodeUpdate, MAX_AUTH_CODE_LEN};
+
+/// A code the validator accepts: printable ASCII, so never empty after trimming
+/// and never carrying whitespace or a control character. Every value starts
+/// with a marker that cannot occur in a redacted rendering, so the leak
+/// assertions cannot pass by accident.
+fn marked_code_text() -> impl Strategy<Value = String> {
+    "[\\x21-\\x7e]{1,40}".prop_map(|suffix| format!("secret{suffix}"))
+}
+
+/// The four transfer/lock commands added for #60.
+fn control_method() -> impl Strategy<Value = &'static str> {
+    prop_oneof![
+        Just("domain.setAuthInfo"),
+        Just("domain.setDomainTransferCode"),
+        Just("domain.block"),
+        Just("domain.unblock"),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// The auth-code check is a predicate, not a panic: for any input at all it
+    /// either accepts the trimmed value or refuses it with a validation error
+    /// that never quotes a long code back.
+    #[test]
+    fn auth_code_validation_is_total_and_exact(input in arbitrary()) {
+        let trimmed = input.trim();
+        let expected = !trimmed.is_empty()
+            && trimmed.len() <= MAX_AUTH_CODE_LEN
+            && trimmed.is_ascii()
+            && !trimmed.chars().any(|c| c.is_whitespace() || c.is_control());
+        let outcome = AuthCode::new(&input);
+        prop_assert_eq!(outcome.is_ok(), expected);
+        if let Err(error) = outcome {
+            prop_assert!(error.is_validation());
+            let quoted = error.to_string();
+            prop_assert!(!quoted.contains(trimmed) || trimmed.len() < 3);
+        }
+    }
+
+    /// An accepted code survives validation twice, and no rendering of it
+    /// besides `as_str` carries the value.
+    #[test]
+    fn accepted_auth_codes_round_trip_and_stay_redacted(raw in marked_code_text()) {
+        let code = AuthCode::new(&raw).unwrap();
+        prop_assert_eq!(code.as_str(), raw.as_str());
+        prop_assert_eq!(format!("{code:?}"), "AuthCode(<redacted>)");
+        prop_assert_eq!(code.to_string(), "<redacted>");
+        // The wire form carries the real code; parsing it back proves the
+        // value was written verbatim, escaping included.
+        let wire = serde_json::to_string(&code).unwrap();
+        let parsed = serde_json::from_str::<Value>(&wire).unwrap();
+        prop_assert_eq!(parsed, Value::String(raw));
+        let again = AuthCode::new(code.as_str()).unwrap();
+        prop_assert_eq!(again, code);
+    }
+
+    /// Boundary pair for the cap: the last accepted length and the first
+    /// rejected one, walked up from the limit.
+    #[test]
+    fn auth_code_cap_is_exact(extra in 0usize..4) {
+        let inside = "x".repeat(MAX_AUTH_CODE_LEN - extra);
+        let outside = "x".repeat(MAX_AUTH_CODE_LEN + 1 + extra);
+        prop_assert_eq!(inside.len(), MAX_AUTH_CODE_LEN - extra);
+        prop_assert!(AuthCode::new(&inside).is_ok());
+        let error = AuthCode::new(&outside).unwrap_err();
+        prop_assert!(error.is_validation());
+        prop_assert!(error.to_string().contains("at most"));
+    }
+
+    /// Both request builders send exactly the domain and the code, and keep the
+    /// code out of `Debug`.
+    #[test]
+    fn control_requests_send_domain_and_code_only(
+        label in "[a-z]{1,10}",
+        raw in marked_code_text(),
+    ) {
+        let name = DomainName::parse(&format!("{label}.com")).unwrap();
+        let code = AuthCode::new(&raw).unwrap();
+
+        let auth = AuthInfoUpdate::new(name.clone(), code.clone());
+        let auth_params = auth.params();
+        prop_assert_eq!(auth_params["domain"].as_str().unwrap(), name.as_str());
+        prop_assert_eq!(auth_params["authCode"].as_str().unwrap(), raw.as_str());
+        prop_assert_eq!(auth_params.as_object().map(serde_json::Map::len), Some(2));
+        let auth_debug = format!("{auth:?}");
+        prop_assert!(!auth_debug.contains(&raw));
+
+        let transfer = TransferCodeUpdate::new(name, code);
+        let transfer_params = transfer.params();
+        prop_assert_eq!(transfer_params["authCode"].as_str().unwrap(), raw.as_str());
+        prop_assert_eq!(
+            transfer_params.as_object().map(serde_json::Map::len),
+            Some(2)
+        );
+        let transfer_debug = format!("{transfer:?}");
+        prop_assert!(!transfer_debug.contains(&raw));
+    }
+
+    /// The four controls are mutations: never read-only, whatever the case or
+    /// the padding, and their one-character-shorter prefixes are not either.
+    #[test]
+    fn transfer_controls_are_never_read_only(
+        name in control_method(),
+        lead in padding(),
+        trail in padding(),
+    ) {
+        prop_assert!(!is_read_only_method(name));
+        prop_assert!(!is_read_only_method(&name.to_uppercase()));
+        let padded = format!("{lead}{name}{trail}");
+        prop_assert!(!is_read_only_method(&padded));
+        prop_assert!(!is_read_only_method(&name[..name.len() - 1]));
+        // The read-only neighbour in the same namespace stays readable.
+        prop_assert!(is_read_only_method("domain.info"));
+    }
+
+    /// The acknowledgement decoder is total: any payload yields a value or an
+    /// error, never a panic, and an echoed code stays behind the redaction.
+    #[test]
+    fn control_answers_decode_without_panic(
+        bytes in proptest::collection::vec(any::<u8>(), 0..256),
+    ) {
+        if let Ok(payload) = serde_json::from_str::<Value>(&String::from_utf8_lossy(&bytes)) {
+            if let Ok(ack) = serde_json::from_value::<DomainControlResult>(payload.clone()) {
+                let debug = format!("{ack:?}");
+                if let Some(code) = ack.auth_code {
+                    prop_assert!(debug.contains("AuthCode(<redacted>)"));
+                    prop_assert_eq!(code.to_string(), "<redacted>");
+                }
+            }
+            let _ = serde_json::from_value::<Vec<DomainControlResult>>(payload);
+        }
+    }
+}

@@ -263,6 +263,43 @@ decodes them with the `base64` crate and refuses invalid input rather than writi
 a corrupt file. `accounting.refund` moves money and therefore requires the same
 `Irreversible` acknowledgement as the ownership commands.
 
+## 0.2.0 — transfer lock and auth codes (`src/domain.rs`, issue #60)
+
+Source: <https://account.inwx.com/en/help/apidoc/f/ch02s09.html> — the same
+`domain.*` object as the ownership section above (the issue cites the published
+index at <https://www.inwx.de/en/help/apidocs>).
+
+| Method | Wrapper | Input table | Output table | Notes |
+| --- | --- | --- | --- | --- |
+| `domain.setAuthInfo` | `AuthInfoUpdate` → `set_auth_info` | not read | not read | `domain` `token255`, `authCode` `token255`; the EPP transfer code a gaining registrar presents. Distinct from the `authinfo2.*` object (§2.4), which is a registry-side object with methods of its own |
+| `domain.setDomainTransferCode` | `TransferCodeUpdate` → `set_domain_transfer_code` | not read | not read | same two keys; the teleprovider code moves a domain between INWX customers, not between registrars |
+| `domain.block` | `block_domain` | not read | not read | `domain` only; blocks the domain object against outgoing changes |
+| `domain.unblock` | `unblock_domain` | not read | not read | `domain` only; releases the block, so the pair needs no `Irreversible` acknowledgement — it can be undone |
+
+**The table numbers of these four rows were not read.** The run that added them
+had no network access, so `ch02s09` could not be opened and no `Table 2.NNN` is
+claimed here; that is the only difference from the sections above. The method
+names are the ones the INWX documentation publishes, and the request/response
+spellings they carry are listed under Unverified.
+
+Validation added on top of the documented type, in `AuthCode`
+(`src/types.rs`): a code that is empty after trimming, longer than
+`MAX_AUTH_CODE_LEN` (255 characters), not printable ASCII, or carrying
+whitespace/control characters is rejected before the request is built. The
+length is checked on the caller's string, so an oversized input never causes a
+second allocation, and the value stays out of `Debug`, `Display` and every error
+message — only the request body carries it.
+
+`domain.block` is the block of the domain object, not the `transferLock` flag
+that `domain.update` and `domain.transfer` carry: the two are independent
+controls and the crate exposes both (`set_transfer_lock` sets the flag).
+
+All four are mutating and non-idempotent, so none of them is in the read-only
+table in `src/client.rs`. A 5xx or a timeout after the request was written comes
+back as `Error::Uncertain` and is never replayed: the code may already be
+replaced or the lock already set, so the caller has to read the state
+(`domain.info`) instead of resending.
+
 ## Reseller/partner objects (issue #22)
 
 Chapter 2 also documents the objects of the reseller/partner product. They are
@@ -452,6 +489,10 @@ flagged here; none is a guess about an endpoint's existence.
 | `message.ack` state parameter | **unverified** | Whether `message.ack` takes a completion state at all is not settled by the documentation. `MessageAck::with_state` is optional and off by default, so the default request carries only the message id. |
 | `customer.requestdataexport` answer | **unverified** | Modelled as `{downloadId, status, filename}` because `customer.listdownloads` lists downloads; the crate carries any of them as `None`. |
 | `host.create` address parameter | **unverified** | The address list is sent as `ip`, an array of address strings, matching `masterIp`/`ipAddress` elsewhere in the API; a single string is accepted on the way back. The 13-address limit is the registry host protocol, not the INWX page. |
+| `domain.setAuthInfo` / `domain.setDomainTransferCode` request key | **unverified** | The pages of the two setters could not be fetched in the run that added them. `authCode` is the spelling `domain.info`, `domain.update` and `domain.transfer` use for the same value (Table 2.139), applied here. A wrong request key would come back as an API error rather than a silent success, but it must be checked against the live page. |
+| Output shape of the four transfer/lock commands | **unverified** | No page was read, so `DomainControlResult` models nothing as required: every field is `Option`, unknown keys are ignored, camelCase and snake_case are both accepted, and a `1000` without `resData` is an empty acknowledgement. A shape that differs from the modelled one therefore yields `None`s, not a parse failure. |
+| What `domain.block` blocks | **unverified** | The command is documented as blocking the domain; which registry locks that maps to per TLD, and how it interacts with the `transferLock` flag of `domain.update`, is not stated on the page. The crate treats it as the broader, reversible control (it has `domain.unblock`) and therefore does not require an `Irreversible` acknowledgement for it. |
+| Table numbers of the transfer-lock section | **not read** | Added without network access; unlike the reseller numbers above these were not even derived, because the section covers four methods inside an object whose numbering was already in use (`domain.*` spans 2.120–2.142) and a derived guess would be indistinguishable from a read number. |
 | `extData` per-TLD keys | **documented, not enumerated** | ch03 §3.49 lists the generic keys and then a long TLD-specific list; `ExtData::set` carries any upper-case token. |
 
 ## Deliberately not modelled

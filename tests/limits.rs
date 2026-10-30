@@ -2,10 +2,11 @@
 //! just inside the limit and the one just outside it.
 
 use inwx_client::{
-    parse_ip, AuthCode, CertificateId, CertificateOrder, CertificateTerm, CertificateUpdate,
-    DnsKey, DnssecKeyQuery, DomainName, DsRecord, Email, Error, Handle, HostingPeriod, Hostname,
-    NameserverSetCreate, NameserverSetType, PostalDelivery, RefundRequest, StatementQuery,
-    TagUpdate, Timestamp, ZoneCreate, ZoneUpdate, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
+    parse_ip, AuthCode, AuthInfoUpdate, CertificateId, CertificateOrder, CertificateTerm,
+    CertificateUpdate, DnsKey, DnssecKeyQuery, DomainName, DsRecord, Email, Error, Handle,
+    HostingPeriod, Hostname, NameserverSetCreate, NameserverSetType, PostalDelivery, RefundRequest,
+    StatementQuery, TagUpdate, Timestamp, TransferCodeUpdate, ZoneCreate, ZoneUpdate,
+    MAX_AUTH_CODE_LEN, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
 };
 
 fn domain(name: &str) -> DomainName {
@@ -125,12 +126,126 @@ fn email_boundaries() {
 
 #[test]
 fn auth_code_boundaries() {
+    assert_eq!(MAX_AUTH_CODE_LEN, 255);
+
     assert!(AuthCode::new("a").is_ok());
-    assert!(AuthCode::new("x".repeat(255)).is_ok());
-    assert!(AuthCode::new("x".repeat(256)).is_err());
-    for bad in ["", " ", "with space", "line\nbreak", "Ümlaut", "two words"] {
-        assert!(AuthCode::new(bad).is_err(), "{bad:?}");
+    // Just inside the cap, exactly on it, and one character outside.
+    let at_limit = "x".repeat(MAX_AUTH_CODE_LEN);
+    let one_shorter = "x".repeat(MAX_AUTH_CODE_LEN - 1);
+    let one_longer = "x".repeat(MAX_AUTH_CODE_LEN + 1);
+    assert_eq!(AuthCode::new(&one_shorter).unwrap().as_str(), one_shorter);
+    assert_eq!(AuthCode::new(&at_limit).unwrap().as_str(), at_limit);
+    let Error::Validation { field, message } = AuthCode::new(&one_longer).unwrap_err() else {
+        panic!("an oversized code must be rejected");
+    };
+    assert_eq!(field, "authCode");
+    assert!(message.contains("at most"), "{message}");
+
+    // Empty, whitespace-only and every shape that hides behind trimming.
+    for bad in ["", " ", "\t\n", "   "] {
+        let error = AuthCode::new(bad).unwrap_err();
+        let Error::Validation { field, .. } = error else {
+            panic!("{bad:?} must be rejected");
+        };
+        assert_eq!(field, "authCode");
     }
+    // Surrounding whitespace is trimmed, so this is the same code as "a".
+    assert_eq!(AuthCode::new("  a  ").unwrap().as_str(), "a");
+
+    // Embedded whitespace, control characters and NUL never get in.
+    for bad in [
+        "with space",
+        "two\twords",
+        "line\nbreak",
+        "a\u{0}b",
+        "bell\u{7}",
+        "del\u{7f}",
+    ] {
+        let error = AuthCode::new(bad).unwrap_err();
+        let Error::Validation { field, .. } = error else {
+            panic!("{bad:?} must be rejected");
+        };
+        assert_eq!(field, "authCode");
+    }
+
+    // Non-ASCII is refused; the error text never carries the code itself.
+    for bad in ["Ümlaut", "日本", "\u{200b}zero", "emoji\u{1f600}"] {
+        let error = AuthCode::new(bad).unwrap_err();
+        let Error::Validation { message, .. } = error else {
+            panic!("{bad:?} must be rejected");
+        };
+        assert!(!message.contains(bad), "the error leaks the code");
+    }
+
+    // The size check runs on bytes before the character checks, so a
+    // multi-byte string that passes the cap still fails on the alphabet, and
+    // one that exceeds it is reported as oversized rather than non-ASCII.
+    let just_inside = "\u{e4}".repeat(MAX_AUTH_CODE_LEN / 2);
+    assert_eq!(just_inside.len(), 254);
+    let Error::Validation { message, .. } = AuthCode::new(&just_inside).unwrap_err() else {
+        panic!("non-ASCII must be rejected");
+    };
+    assert!(message.contains("printable ASCII"), "{message}");
+    let just_outside = "\u{e4}".repeat(MAX_AUTH_CODE_LEN / 2 + 1);
+    assert_eq!(just_outside.len(), 256);
+    let Error::Validation { message, .. } = AuthCode::new(&just_outside).unwrap_err() else {
+        panic!("an oversized non-ASCII string must be rejected");
+    };
+    assert!(message.contains("at most"), "{message}");
+
+    // Every printable ASCII byte round-trips unchanged.
+    for byte in 0x21u8..=0x7e {
+        let code = format!("{}", char::from(byte));
+        assert_eq!(AuthCode::new(&code).unwrap().as_str(), code);
+    }
+}
+
+// ---------------------------------------------- transfer lock and auth codes --
+
+/// The longest name the type accepts, built so no single label is the reason.
+fn longest_domain() -> String {
+    format!(
+        "{}.{}.{}.{}",
+        "a".repeat(63),
+        "b".repeat(63),
+        "c".repeat(63),
+        "d".repeat(61)
+    )
+}
+
+#[test]
+fn transfer_control_requests_take_the_largest_valid_input() {
+    let name = longest_domain();
+    assert_eq!(name.len(), MAX_DOMAIN_LEN);
+    let code = "x".repeat(MAX_AUTH_CODE_LEN);
+
+    for kind in ["authInfo", "transferCode"] {
+        let params = match kind {
+            "authInfo" => AuthInfoUpdate::new(
+                DomainName::parse(&name).unwrap(),
+                AuthCode::new(code.clone()).unwrap(),
+            )
+            .params(),
+            _ => TransferCodeUpdate::new(
+                DomainName::parse(&name).unwrap(),
+                AuthCode::new(code.clone()).unwrap(),
+            )
+            .params(),
+        };
+        assert_eq!(params["domain"], name);
+        assert_eq!(params["authCode"].as_str().unwrap(), code);
+        assert_eq!(
+            params.as_object().map(serde_json::Map::len),
+            Some(2),
+            "{kind}"
+        );
+    }
+
+    // One byte outside either limit cannot be built at all, so it can never
+    // reach the wire.
+    assert!(DomainName::parse(&format!("{name}e")).is_err());
+    assert!(AuthCode::new("x".repeat(MAX_AUTH_CODE_LEN + 1)).is_err());
+    assert!(AuthCode::new("").is_err());
 }
 
 // ------------------------------------------------------------------ handles --
