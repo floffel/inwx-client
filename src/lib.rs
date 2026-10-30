@@ -48,7 +48,7 @@
 //! | DynDNS | `dyndns.*` (8 methods) |
 //! | Accounting | `accounting.*` (11 methods) |
 //! | Contacts | `contact.create`, `info`, `list`, `update`, `delete` |
-//! | Prices | `domain.getPrices`, `domain.getdomainprice` |
+//! | Prices | `domain.getPrices`, `domain.getdomainprice`, `domain.getalldomainprices`, `domain.getextradatarules`, `domain.getpromos`, `domain.pricechanges` |
 //! | Applications | `application.check`, `create`, `delete`, `info`, `list`, `update` |
 //! | Customers | `customer.info`, `update`, `delete`, `contactverificationsettingsinfo`, `contactverificationsettingsupdate`, `listdownloads`, `requestdataexport` |
 //! | Hosts (glue records) | `host.check`, `create`, `delete`, `info`, `list`, `update` |
@@ -195,7 +195,7 @@ pub use nameserverset::{
 pub use news::NewsItem;
 pub use nichandle::{NicHandle, NicHandleQuery};
 pub use pdf::{PdfFile, PdfHandle, PdfRender};
-pub use price::{DomainPriceQuote, PriceList, TldPrice};
+pub use price::{DomainPriceQuote, ExtraDataRule, PriceChange, PriceList, PromoCode, TldPrice};
 pub use record::{
     DnsRecord, RecordId, RecordSet, RecordSpec, RecordType, RecordUpdate, DEFAULT_TTL, MAX_TTL,
 };

@@ -263,6 +263,39 @@ decodes them with the `base64` crate and refuses invalid input rather than writi
 a corrupt file. `accounting.refund` moves money and therefore requires the same
 `Irreversible` acknowledgement as the ownership commands.
 
+## 0.2.0 — price surface (`src/price.rs`)
+
+Source: <https://account.inwx.com/en/help/apidoc/f/ch02s09.html>
+
+| Method | Wrapper | Input table | Output table | Notes |
+| --- | --- | --- | --- | --- |
+| `domain.getPrices` | `tld_prices` | §2.9 | §2.9 | `tld` array, each entry trimmed, stripped of a leading dot and lower-cased; an empty argument omits the key and asks for the account's whole table. Output `count` + `price[]` → `TldPrice`: `createPrice`, `transferPrice`, `renewalPrice`, `updatePrice`, `tradePrice`, `trusteePrice`, `createPeriod`, `transferPeriod`, `renewalPeriod`, `vat` |
+| `domain.getdomainprice` | `domain_price` | §2.9 | §2.9 | `domain` as a one-element array, `pricetype` (`reg` \| `renewal` \| `transfer` \| `trade` \| `update` \| `restore`), optional `period` (`1Y` …). Reads `resData.domain[0]`; a single object under `domain` and a flat `resData` are both tolerated |
+| `domain.getalldomainprices` | `all_domain_prices` | **unverified** | **unverified** | `tld` array (omitted when the list is empty or every entry is blank), `page` (clamped to 1), `pagelimit`; a `pagelimit` of 0 is refused locally. Decoded into the same `PriceList` as `domain.getPrices`, so the rows are read from `price`, `prices` or `domain` and `has_more()` compares them with `count` |
+| `domain.getextradatarules` | `extra_data_rules` | **unverified** | **unverified** | `tld` when given (a blank one is refused locally) and the order type as `pricetype` when given. The rules are looked for under `extradata`, `extradataRules` or `rules`, one `ExtraDataRule` each; the order it applies to stays raw in `order_type` and is offered parsed by `price_type()`. This is the pre-flight for `domain.create`: it says which per-TLD extra data an order has to carry |
+| `domain.getpromos` | `promo_codes` | **unverified** | **unverified** | `tld` when given, `page`, `pagelimit`. `Vec<PromoCode>` read from `promo` or `promos`; which keys a promo row carries (code, TLD, period, amount, validity) is not known here |
+| `domain.pricechanges` | `price_changes` | **unverified** | **unverified** | `tld` when given, `page`, `pagelimit`. `Vec<PriceChange>` for the scheduled changes, read from `pricechange` or `pricechanges`; the change type stays raw in `action` and is offered parsed by `price_type()` |
+
+Two of these are 0.1.x methods and stay listed in §0.1.x exactly as they were;
+issue #63 added the other four to the same file, so the whole surface is recorded
+in one place.
+
+**No `Table 2.NNN` number is claimed for the four new methods.** The domain section
+owns the block between `dnssec` (ends 2.100) and `dyndns` (starts 2.147), which is
+far too wide a range to place a price table in, and the run that added them had no
+network access, so `ch02s09` was not re-read at all. A derived number here would be
+an invented number, so the two table columns say **unverified** instead.
+
+Decoding follows the crate's usual rules, and that is what makes the guesses cheap:
+unknown fields are ignored, an unrecognised order or change type is carried as a raw
+string instead of failing the row, and snake_case and camelCase are both accepted.
+An amount that is neither a JSON number nor a numeric string decodes to `None`. The
+three list answers are read row by row, so a row that does not fit at all is skipped
+rather than failing the call, and the list can come back short; the two `PriceList`
+answers are deserialized whole, where an unreadable row is an error. Prices stay
+`float` on the wire and `f64` here (`de::opt_f64`): quotes to display and compare,
+never amounts to sum.
+
 ## Reseller/partner objects (issue #22)
 
 Chapter 2 also documents the objects of the reseller/partner product. They are
@@ -433,8 +466,10 @@ mandates and ID copies.
 
 ## Unverified
 
-Points the documentation does not settle. Each is modelled as documented and
-flagged here; none is a guess about an endpoint's existence.
+Points the documentation does not settle — and, since issue #63, the endpoints
+whose pages could not be re-read here at all, because there is no network access.
+Each is modelled as far as the documentation reaches and flagged here; none is a
+guess about an endpoint's existence.
 
 | Item | Status | Why |
 | --- | --- | --- |
@@ -442,6 +477,10 @@ flagged here; none is a guess about an endpoint's existence.
 | `dyndns.updateRecord` account selection | **unverified** | Table 2.159 lists only `ipAddress` and `ipAddressV6`; how the account is identified is not documented in the public chapter. The crate sends exactly those two parameters. |
 | `hosting.create` id type | **partially documented** | `hostingId`/`productId` are `token255` there (Table 2.180) but `int` elsewhere (§2.13); the crate takes `i64` and sends strings for `hosting.create`, numbers for the `int` methods. |
 | `hosting.getPrices` output shape | **unverified** | Table 2.181 documents `hosting[]` with only `id` and `product`; a price field is implied by the name but not listed, so no price is modelled. |
+| `domain.getalldomainprices` request and answer | **unverified** | Added without network access, so `ch02s09` could not be re-read. `page`/`pagelimit` are the paging keys the other list methods use, and the row keys are inherited from `domain.getPrices` (`price`, `prices`, `domain`), which is not necessarily what this method answers; whether `count` comes back at all is unknown, so `has_more()` is only as good as those keys. |
+| `domain.getextradatarules` parameter names | **unverified** | No network access. The order type is sent as `pricetype` because `domain.getdomainprice` spells it that way, `tld` as a single string, and reading the rules from `extradata`, `extradataRules` or `rules` in turn is a guess about the key the array arrives under. Whether the answer is an array of rules or a single object is modelled tolerantly as well. |
+| `domain.getpromos` answer shape | **unverified** | No network access. Paging parameters, the row keys (`promo`, `promos`) and the field names of a promo row are modelled on the other list endpoints; one object where an array is expected is accepted, and a key that turns out to be different costs an empty list instead of a failed call. |
+| `domain.pricechanges` answer shape | **unverified** | No network access. Same model: paging, the row keys (`pricechange`, `pricechanges`) and the row fields are guesses, the change type is carried as a raw `action` string because its vocabulary is not documented, and a single-object answer is accepted in place of the array. |
 | `certificate.log` answer shape | **unverified** | Table 2.64 lists flat fields; whether the API wraps them in an array is not shown. The parser accepts an array or a single object. |
 | `nameserver.exportlist` "export as file" | **unverified** | Table 2.203/2.204 promises a document but documents a `count`+`domains` payload; the crate parses the documented payload. |
 | `tag.list` `count` nesting | **unverified** | Table 2.235 shows `count` → `domain` with an ambiguous indentation; parsed as `{"count": {"domain": N}}` with a scalar `count` also tolerated. |
