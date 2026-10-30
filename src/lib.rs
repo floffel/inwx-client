@@ -35,7 +35,7 @@
 //!
 //! | Area | Methods |
 //! | --- | --- |
-//! | Session | `account.login`, `account.logout`, `account.check`, `account.info` |
+//! | Session | `account.login`, `account.logout`, `account.check`, `account.info`, `account.changepassword` |
 //! | Domains | `check`, `create`, `info`, `list`, `update`, `renew`, `delete`, `whois` |
 //! | Ownership | `domain.transfer`, `domain.trade`, `domain.push`, `domain.restore`, `domain.transfercancel`, `domain.transferOut` |
 //! | DNS records | `nameserver.info` (read), `createRecord`, `updateRecord`, `deleteRecord` |
@@ -105,6 +105,10 @@
 //!   mid-response) is [`Error::Uncertain`]: the command may have run. It is
 //!   replayed only for a read-only method ([`is_read_only_method`]), never for a
 //!   mutating one, so a registration cannot be submitted twice.
+//! * [`Password`] (the new password of `account.changepassword`) redacts itself
+//!   in `Debug` and `Display`, compares in constant time, is zeroized when it is
+//!   dropped and has no `Deserialize`: a secret is an input and is never parsed
+//!   back out of a response.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -209,7 +213,7 @@ pub use transfer::{
 pub use transport::ReqwestTransport;
 pub use transport::{Response, Transport, TransportStage};
 pub use types::{
-    parse_ip, AuthCode, ContactType, DocumentFormat, DomainName, Email, Handle, Hostname, Period,
-    PriceType, RenewalMode, Timestamp, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
+    parse_ip, AuthCode, ContactType, DocumentFormat, DomainName, Email, Handle, Hostname, Password,
+    Period, PriceType, RenewalMode, Timestamp, MAX_DOMAIN_LEN, MAX_LABEL_LEN, MAX_PASSWORD_LEN,
 };
 pub use zone::{RecordExport, UrlRedirectType, ZoneCreate, ZoneExport, ZoneType, ZoneUpdate};

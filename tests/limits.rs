@@ -4,9 +4,11 @@
 use inwx_client::{
     parse_ip, AuthCode, CertificateId, CertificateOrder, CertificateTerm, CertificateUpdate,
     DnsKey, DnssecKeyQuery, DomainName, DsRecord, Email, Error, Handle, HostingPeriod, Hostname,
-    NameserverSetCreate, NameserverSetType, PostalDelivery, RefundRequest, StatementQuery,
-    TagUpdate, Timestamp, ZoneCreate, ZoneUpdate, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
+    NameserverSetCreate, NameserverSetType, Password, PostalDelivery, RefundRequest,
+    StatementQuery, TagUpdate, Timestamp, ZoneCreate, ZoneUpdate, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
+    MAX_PASSWORD_LEN,
 };
+use zeroize::Zeroize as _;
 
 fn domain(name: &str) -> DomainName {
     DomainName::parse(name).unwrap()
@@ -131,6 +133,51 @@ fn auth_code_boundaries() {
     for bad in ["", " ", "with space", "line\nbreak", "Ümlaut", "two words"] {
         assert!(AuthCode::new(bad).is_err(), "{bad:?}");
     }
+}
+
+// ---------------------------------------------------------------- passwords --
+
+#[test]
+fn password_boundaries() {
+    // Just inside the limit, and one character outside it.
+    assert!(Password::new("x").is_ok());
+    assert!(Password::new("x".repeat(MAX_PASSWORD_LEN)).is_ok());
+    assert!(Password::new("x".repeat(MAX_PASSWORD_LEN + 1)).is_err());
+
+    // The limit is measured in characters, so a two-byte secret crosses it at
+    // the same place an ASCII one does.
+    assert!(Password::new("ö".repeat(MAX_PASSWORD_LEN)).is_ok());
+    assert!(Password::new("ö".repeat(MAX_PASSWORD_LEN + 1)).is_err());
+
+    // Fail closed on blank, and on control characters (they would break the
+    // JSON body / terminal echo).
+    for bad in ["", " ", "  \n "] {
+        assert!(Password::new(bad).is_err(), "{bad:?}");
+    }
+    for bad in ["line\nbreak", "tab\there", "nul\0byte"] {
+        assert!(Password::new(bad).is_err(), "{bad:?}");
+    }
+
+    // Unlike an auth code, spaces and non-ASCII characters are legal; they are
+    // kept exactly as given instead of being trimmed.
+    for good in ["p4ss wörd", "  kept  ", "ünicode ✓"] {
+        let password = Password::new(good).unwrap();
+        assert_eq!(password.as_str(), good);
+    }
+
+    // The secret never leaks through the two formatting traits.
+    let password = Password::new("s3cret").unwrap();
+    assert_eq!(format!("{password:?}"), "Password(<redacted>)");
+    assert_eq!(password.to_string(), "<redacted>");
+
+    // One character apart is still unequal; identical values are equal.
+    assert_eq!(password, Password::new("s3cret").unwrap());
+    assert_ne!(password, Password::new("s3creu").unwrap());
+
+    // Zeroizing wipes the buffer instead of leaving it for the allocator.
+    let mut wipe = Password::new("s3cret").unwrap();
+    wipe.zeroize();
+    assert_eq!(wipe.as_str(), "");
 }
 
 // ------------------------------------------------------------------ handles --

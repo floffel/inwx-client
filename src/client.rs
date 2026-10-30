@@ -17,6 +17,7 @@ use crate::error::{Error, Result};
 use crate::rpc::{RpcRequest, RpcResponse};
 use crate::transport::{Request, Response, Transport};
 use crate::types::de;
+use crate::types::Password;
 
 /// Production endpoint, as documented (`api.domrobot.com`).
 pub const DEFAULT_BASE_URL: &str = "https://api.domrobot.com/jsonrpc/";
@@ -751,6 +752,69 @@ impl<T: Transport> InwxClient<T> {
         serde_json::from_value(data).map_err(Error::from)
     }
 
+    /// Changes the account password (`account.changepassword`).
+    ///
+    /// `current` is the password the account uses today; `new` is a
+    /// [`Password`], so it is validated on the way in, redacted in every
+    /// `Debug`/`Display` rendering and wiped from memory when the caller drops
+    /// it. Both secrets travel in the request body only, never in a URL or a
+    /// header.
+    ///
+    /// Two things happen to the session afterwards, and both are deliberate:
+    ///
+    /// * the locally cached cookie is dropped ([`is_authenticated`] returns
+    ///   `false`), because it was established with a password that no longer
+    ///   works — keeping it would leave a session the client cannot
+    ///   re-establish after an expiry;
+    /// * the credentials held by this client are now stale, so the next call
+    ///   would log in with a password the API rejects. Hand the new password to
+    ///   [`with_credentials`] to build a client that can keep working.
+    ///
+    /// A transport failure after the request was left unconfirmed is
+    /// [`Error::Uncertain`] and is never replayed here: once the old password
+    /// stops working, a retry is not a harmless repeat of a read.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "http")]
+    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// use inwx_client::{InwxClient, Password, ReqwestTransport};
+    ///
+    /// let old = std::env::var("INWX_PASSWORD")?;
+    /// let new = Password::new(std::env::var("INWX_NEW_PASSWORD")?)?;
+    ///
+    /// let client = InwxClient::new(ReqwestTransport::new())
+    ///     .with_credentials("user", old.clone())?;
+    /// client.change_account_password(&old, &new).await?;
+    ///
+    /// // The old password is gone: keep using the client by rebuilding it
+    /// // with the new one.
+    /// assert!(!client.is_authenticated());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `current` is blank, longer than
+    /// [`MAX_PASSWORD_LEN`](crate::MAX_PASSWORD_LEN) characters or contains a
+    /// control character; the usual transport and API errors otherwise.
+    ///
+    /// [`is_authenticated`]: Self::is_authenticated
+    /// [`with_credentials`]: Self::with_credentials
+    pub async fn change_account_password(&self, current: &str, new: &Password) -> Result<()> {
+        let current = Password::new(current)?;
+        self.call(
+            "account.changepassword",
+            json!({
+                "password": current.as_str(),
+                "newPassword": new.as_str(),
+            }),
+        )
+        .await?;
+        self.clear_session();
+        Ok(())
+    }
+
     /// Calls any method and returns its `resData`.
     ///
     /// This is the escape hatch for the parts of the API this crate does not
@@ -1142,6 +1206,16 @@ mod tests {
     fn public_methods_need_no_session() {
         assert!(is_public_method("account.login"));
         assert!(!is_public_method("domain.list"));
+        // Changing the password needs a session, and must never be sent
+        // unauthenticated.
+        assert!(!is_public_method("account.changepassword"));
+    }
+
+    #[test]
+    fn change_password_is_not_read_only() {
+        // It writes, so an unconfirmed attempt must never be replayed.
+        assert!(!is_read_only_method("account.changepassword"));
+        assert!(is_read_only_method("account.info"));
     }
 
     #[test]

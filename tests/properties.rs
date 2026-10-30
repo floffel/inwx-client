@@ -211,13 +211,32 @@ use inwx_client::{
     is_read_only_method, parse_ip, ActionKind, AuthCode, CertificateOrder, CertificateTerm, DnsKey,
     DnssecAlgorithm, DnssecDigestType, DnssecDomainStatus, DnssecFlag, DnssecKeyQuery,
     DnssecKeyStatus, DocumentFormat, Email, Error, Handle, HostingPeriod, Irreversible,
-    NameserverSetType, RecordSet, Timestamp, TransferAnswer, TransportStage, UrlRedirectType,
-    ZoneCreate, ZoneType,
+    NameserverSetType, Password, RecordSet, Timestamp, TransferAnswer, TransportStage,
+    UrlRedirectType, ZoneCreate, ZoneType, MAX_PASSWORD_LEN,
 };
 
 /// Arbitrary text for parsers that must never panic.
 fn arbitrary() -> impl Strategy<Value = String> {
     "\\PC{0,60}"
+}
+
+/// Text for the password validator, including every shape it has to reject:
+/// blanks, control characters and oversized values.
+fn password_text() -> impl Strategy<Value = String> {
+    prop_oneof![
+        arbitrary(),
+        "[ ]{0,5}",
+        "\\p{Cc}{1,10}",
+        "[\\PC\\p{Cc}]{200,300}",
+    ]
+}
+
+/// Passwords the validator is guaranteed to accept: printable ASCII, at most
+/// 41 characters and never blank, because the last class carries at least one
+/// non-space. Tests that compare accepted passwords use this instead of
+/// `password_text`, so no draw can fail validation and be mistaken for a bug.
+fn accepted_password() -> impl Strategy<Value = String> {
+    "[ -~]{0,20}[!-~][ -~]{0,20}"
 }
 
 /// A plausible `namespace.action` method name.
@@ -276,6 +295,7 @@ proptest! {
         let _ = Timestamp::parse(&input);
         let _ = Email::parse(&input);
         let _ = AuthCode::new(&input);
+        let _ = Password::new(&input);
         let _ = DnsKey::parse(&input);
         let _ = inwx_client::DsRecord::parse(&input);
     }
@@ -311,6 +331,59 @@ proptest! {
         let email = Email::parse(&address).unwrap();
         prop_assert_eq!(email.as_str(), address.as_str());
         prop_assert_eq!(Email::parse(email.as_str()).unwrap(), email);
+    }
+
+    /// A password is accepted exactly when it is neither blank, oversized, nor
+    /// carrying a control character — and it is then kept verbatim and stays
+    /// redacted everywhere but on the wire.
+    #[test]
+    fn passwords_are_accepted_exactly_when_safe(input in password_text()) {
+        let expected = !input.trim().is_empty()
+            && input.chars().count() <= MAX_PASSWORD_LEN
+            && !input.chars().any(char::is_control);
+        prop_assert_eq!(Password::new(&input).is_ok(), expected);
+        if let Ok(password) = Password::new(&input) {
+            prop_assert_eq!(password.as_str(), input.as_str());
+            prop_assert_eq!(password.to_string(), "<redacted>");
+            prop_assert_eq!(format!("{password:?}"), "Password(<redacted>)");
+            prop_assert_eq!(
+                serde_json::to_string(&password).unwrap(),
+                serde_json::to_string(&input).unwrap()
+            );
+        }
+    }
+
+    /// The length limit counts characters, not bytes, and sits exactly at
+    /// `MAX_PASSWORD_LEN`: 255 pass, 256 do not.
+    #[test]
+    fn password_length_boundary(count in 0usize..=MAX_PASSWORD_LEN + 2) {
+        let raw = "x".repeat(count);
+        let expected = count > 0 && count <= MAX_PASSWORD_LEN;
+        prop_assert_eq!(Password::new(raw).is_ok(), expected);
+    }
+
+    /// Multibyte secrets are measured in characters, so a 255-character
+    /// non-ASCII password is inside the limit even though it is longer in
+    /// bytes.
+    #[test]
+    fn password_length_counts_characters_not_bytes(count in 1usize..=MAX_PASSWORD_LEN) {
+        let raw = "ö".repeat(count);
+        prop_assert!(raw.len() > count);
+        prop_assert!(Password::new(raw).is_ok());
+    }
+
+    /// Constant-time comparison still means exact comparison: appending
+    /// anything makes two passwords unequal, and an independently built copy of
+    /// the same secret still compares equal.
+    #[test]
+    fn password_equality_is_exact(left in accepted_password(), suffix in "[ -~]{1,20}") {
+        let left = Password::new(&left).unwrap();
+        let right = Password::new(format!("{}{suffix}", left.as_str())).unwrap();
+        let same = Password::new(left.as_str()).unwrap();
+        prop_assert!(left != right);
+        prop_assert_eq!(left == right, left.as_str() == right.as_str());
+        prop_assert!(left == same);
+        prop_assert_eq!(left.as_str(), same.as_str());
     }
 
     #[test]
