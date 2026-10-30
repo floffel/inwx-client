@@ -518,6 +518,15 @@ fn error_helpers_cover_every_branch() {
         body: "bad gateway".into(),
     };
     assert!(http.to_string().contains("502"));
+    // A gateway hiccup is transient; a rejected request is terminal.
+    assert!(http.is_retryable());
+    let forbidden = Error::Http {
+        status: 403,
+        body: "forbidden".into(),
+    };
+    assert!(!forbidden.is_retryable());
+    assert!(!forbidden.is_uncertain());
+    assert_eq!(forbidden.code(), None);
 }
 
 #[test]

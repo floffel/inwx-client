@@ -258,6 +258,28 @@ fn stage() -> impl Strategy<Value = TransportStage> {
     ]
 }
 
+/// The transient HTTP statuses — the "just inside" side of the rule in
+/// `Error::is_retryable`.
+fn transient_status() -> impl Strategy<Value = u16> {
+    prop_oneof![Just(429u16), Just(502u16), Just(503u16), Just(504u16)]
+}
+
+/// The neighbours of those statuses plus the plain client errors — the "just
+/// outside" side, none of which may be reported as retryable.
+fn terminal_status() -> impl Strategy<Value = u16> {
+    prop_oneof![
+        Just(400u16),
+        Just(401),
+        Just(403),
+        Just(404),
+        Just(428),
+        Just(430),
+        Just(500),
+        Just(501),
+        Just(505),
+    ]
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
@@ -465,6 +487,33 @@ proptest! {
             stage == TransportStage::AfterSend
         );
         prop_assert!(error.to_string().contains(&message));
+    }
+
+    /// The HTTP verdict is the boundary pair made explicit: a transient status
+    /// is retryable, the status right next to it is not, and the body never
+    /// changes the answer.
+    #[test]
+    fn http_retryability_boundary_is_exact(
+        inside in transient_status(),
+        outside in terminal_status(),
+        body in arbitrary(),
+    ) {
+        let transient = Error::Http { status: inside, body: body.clone() };
+        prop_assert!(transient.is_retryable());
+        prop_assert!(transient.to_string().contains(&body));
+        prop_assert!(!transient.is_uncertain());
+
+        let terminal = Error::Http { status: outside, body };
+        prop_assert!(!terminal.is_retryable());
+        prop_assert!(!terminal.is_uncertain());
+    }
+
+    /// Sweeping the whole `u16` range keeps the set exactly the four documented
+    /// statuses — a future widening to "all of 5xx" would fail here.
+    #[test]
+    fn only_the_four_http_statuses_are_retryable(status in any::<u16>()) {
+        let error = Error::Http { status, body: String::new() };
+        prop_assert_eq!(error.is_retryable(), matches!(status, 429 | 502 | 503 | 504));
     }
 }
 
