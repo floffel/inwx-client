@@ -788,6 +788,16 @@ pub struct ZoneUpdate {
     testing: bool,
 }
 
+/// Parameter names that only a `FRAME` redirect may carry. Used by
+/// [`ZoneUpdate::params`] to reject a frame field whose type was changed away
+/// from `FRAME` after it was set.
+const FRAME_METADATA_FIELDS: &[&str] = &[
+    "urlRedirectTitle",
+    "urlRedirectDescription",
+    "urlRedirectFavIcon",
+    "urlRedirectKeywords",
+];
+
 impl ZoneUpdate {
     /// An empty update for `domain`.
     ///
@@ -1059,6 +1069,10 @@ impl ZoneUpdate {
 
     /// Runs the command in testing mode (`testing=true`).
     ///
+    /// The flag asks the API to simulate the command; it changes nothing on the
+    /// zone, so `dry_run` on its own does not make an update — see
+    /// [`has_changes`](Self::has_changes).
+    ///
     /// ```
     /// use inwx_client::{DomainName, ZoneType, ZoneUpdate};
     /// let update = ZoneUpdate::new(DomainName::parse("a.de")?)
@@ -1087,27 +1101,75 @@ impl ZoneUpdate {
         }
     }
 
-    /// Whether any change has been set.
+    /// The fields this update sets, as `(parameter name, value)` pairs in the
+    /// order the API documents them.
+    ///
+    /// This is the one definition of "a change" for [`ZoneUpdate`]: both
+    /// [`has_changes`](Self::has_changes) and [`params`](Self::params) derive
+    /// from it, so the guard and the serialiser cannot drift apart. `testing`
+    /// is deliberately absent — see [`dry_run`](Self::dry_run).
+    fn set_fields(&self) -> Vec<(&'static str, Value)> {
+        let mut fields: Vec<(&'static str, Value)> = Vec::new();
+        if let Some(zone_type) = &self.zone_type {
+            fields.push(("type", json!(zone_type)));
+        }
+        if let Some(nameservers) = &self.nameservers {
+            fields.push(("ns", json!(nameservers)));
+        }
+        if let Some(ip) = self.master_ip {
+            fields.push(("masterIp", json!(ip.to_string())));
+        }
+        if let Some(web) = &self.web {
+            fields.push(("web", json!(web)));
+        }
+        if let Some(mail) = &self.mail {
+            fields.push(("mail", json!(mail)));
+        }
+        if let Some(kind) = self.redirect_type {
+            fields.push(("urlRedirectType", json!(kind)));
+        }
+        if let Some(title) = &self.redirect_title {
+            fields.push(("urlRedirectTitle", json!(title)));
+        }
+        if let Some(description) = &self.redirect_description {
+            fields.push(("urlRedirectDescription", json!(description)));
+        }
+        if let Some(favicon) = &self.redirect_favicon {
+            fields.push(("urlRedirectFavIcon", json!(favicon)));
+        }
+        if let Some(keywords) = &self.redirect_keywords {
+            fields.push(("urlRedirectKeywords", json!(keywords)));
+        }
+        fields
+    }
+
+    /// Whether a field has been set.
+    ///
+    /// `dry_run` does not count: `testing` asks the API to simulate the command
+    /// and changes nothing on the zone, so an update that only sets `dry_run`
+    /// is still an empty update, and [`params`](Self::params) refuses to send
+    /// it.
     ///
     /// ```
     /// use inwx_client::{DomainName, ZoneType, ZoneUpdate};
     ///
+    /// // Nothing set at all: not a change.
     /// assert!(!ZoneUpdate::new(DomainName::parse("a.de")?).has_changes());
-    /// assert!(ZoneUpdate::new(DomainName::parse("a.de")?).with_zone_type(ZoneType::Master).has_changes());
+    /// // The dry-run flag alone is not a change either ...
+    /// assert!(!ZoneUpdate::new(DomainName::parse("a.de")?).dry_run().has_changes());
+    /// // ... while one field is, with or without that flag.
+    /// assert!(ZoneUpdate::new(DomainName::parse("a.de")?)
+    ///     .with_zone_type(ZoneType::Master)
+    ///     .has_changes());
+    /// assert!(ZoneUpdate::new(DomainName::parse("a.de")?)
+    ///     .with_zone_type(ZoneType::Master)
+    ///     .dry_run()
+    ///     .has_changes());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     #[must_use]
     pub fn has_changes(&self) -> bool {
-        self.zone_type.is_some()
-            || self.nameservers.is_some()
-            || self.master_ip.is_some()
-            || self.web.is_some()
-            || self.mail.is_some()
-            || self.redirect_type.is_some()
-            || self.redirect_title.is_some()
-            || self.redirect_description.is_some()
-            || self.redirect_favicon.is_some()
-            || self.redirect_keywords.is_some()
+        !self.set_fields().is_empty()
     }
 
     /// The `nameserver.update` parameters.
@@ -1127,19 +1189,20 @@ impl ZoneUpdate {
     /// # Errors
     ///
     /// [`Error::Validation`] when nothing was set (an empty update is a
-    /// guaranteed `2003`), or when a frame field lacks its `FRAME` type.
+    /// guaranteed `2003`; `dry_run` alone does not count as a change), or when
+    /// a frame field lacks its `FRAME` type.
     pub fn params(&self) -> Result<Value> {
-        if !self.has_changes() {
+        let fields = self.set_fields();
+        if fields.is_empty() {
             return Err(Error::validation(
                 "zone.update",
-                "sets no field; add a change or skip the call",
+                "sets no field; add a change or skip the call \
+                 (`dry_run`/`testing` alone is not a change)",
             ));
         }
-        let frame_metadata = self.redirect_title.is_some()
-            || self.redirect_description.is_some()
-            || self.redirect_favicon.is_some()
-            || self.redirect_keywords.is_some();
-        if frame_metadata
+        if fields
+            .iter()
+            .any(|(name, _)| FRAME_METADATA_FIELDS.contains(name))
             && !self
                 .redirect_type
                 .is_some_and(UrlRedirectType::supports_frame_metadata)
@@ -1151,35 +1214,8 @@ impl ZoneUpdate {
         }
         let mut params = Map::new();
         params.insert("domain".to_owned(), json!(self.domain));
-        if let Some(zone_type) = &self.zone_type {
-            params.insert("type".to_owned(), json!(zone_type));
-        }
-        if let Some(nameservers) = &self.nameservers {
-            params.insert("ns".to_owned(), json!(nameservers));
-        }
-        if let Some(ip) = self.master_ip {
-            params.insert("masterIp".to_owned(), json!(ip.to_string()));
-        }
-        if let Some(web) = &self.web {
-            params.insert("web".to_owned(), json!(web));
-        }
-        if let Some(mail) = &self.mail {
-            params.insert("mail".to_owned(), json!(mail));
-        }
-        if let Some(kind) = self.redirect_type {
-            params.insert("urlRedirectType".to_owned(), json!(kind));
-        }
-        if let Some(title) = &self.redirect_title {
-            params.insert("urlRedirectTitle".to_owned(), json!(title));
-        }
-        if let Some(description) = &self.redirect_description {
-            params.insert("urlRedirectDescription".to_owned(), json!(description));
-        }
-        if let Some(favicon) = &self.redirect_favicon {
-            params.insert("urlRedirectFavIcon".to_owned(), json!(favicon));
-        }
-        if let Some(keywords) = &self.redirect_keywords {
-            params.insert("urlRedirectKeywords".to_owned(), json!(keywords));
+        for (name, value) in fields {
+            params.insert((*name).to_owned(), value);
         }
         if self.testing {
             params.insert("testing".to_owned(), json!(true));
