@@ -6,19 +6,14 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use inwx_client::{
-    Application, ApplicationCheckResult, ApplicationType, AuthInfo2Order, AuthInfo2OrderResult,
-    AuthInfo2PriceQuote, Contact, ContactVerificationSettings, Customer, CustomerDownload,
-    DataExport, DnsRecord, DomainCheck, DomainInfo, DocumentEntry, DownloadedDocument,
-    HostCheckResult, HostRecord, Message, NewsItem, NicHandle, PdfFile, PdfHandle, PolledMessage,
-    RecordType, RpcResponse, ZoneInfo,
-    AccountRole, AccountRoleEntry, Application, ApplicationCheckResult, ApplicationType, AuthInfo2,
-    AuthInfo2Record, Contact, ContactVerificationSettings, Customer, CustomerDownload, DataExport,
-    DnsRecord, DomainCheck, DomainInfo, DocumentEntry, DownloadedDocument, HostCheckResult,
-    HostRecord, Message, NewsItem, NicHandle, PdfFile, PdfHandle, PolledMessage, RecordType,
-    RpcResponse, ZoneInfo,
+    AccountRole, AccountRoleEntry, Application, ApplicationCheckResult, ApplicationType,
+    AuthInfo2Order, AuthInfo2OrderResult, AuthInfo2PriceQuote, Contact,
+    ContactVerificationSettings, Customer, CustomerDownload, DataExport, DnsRecord, DocumentEntry,
+    DomainCheck, DomainInfo, DownloadedDocument, HostCheckResult, HostRecord, Message, NewsItem,
+    NicHandle, PdfFile, PdfHandle, PolledMessage, RecordType, RpcResponse, ZoneInfo,
 };
+use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     // The framing layer: any byte string either parses or returns a Json error.
