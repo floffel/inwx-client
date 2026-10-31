@@ -6,7 +6,7 @@ use common::{client, MockTransport};
 use inwx_client::{
     is_read_only_method, ClientHoldResult, ContactQuery, ContactRequest, ContactType,
     ContactUpdate, DomainCreate, DomainListQuery, DomainName, DomainRenew, DomainUpdate, Error,
-    Hostname, Period, PriceType, RemoveClientHold, RenewalMode, SetClientHold,
+    ExtraDataRule, Hostname, Period, PriceType, RemoveClientHold, RenewalMode, SetClientHold,
 };
 use serde_json::json;
 
@@ -773,4 +773,282 @@ async fn a_domain_price_quote_also_accepts_a_flat_answer() {
         .unwrap();
 
     assert_eq!(quote.price, Some(8.9));
+}
+
+#[tokio::test]
+async fn the_full_price_table_is_paged_and_normalises_its_tld_list() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "count": 3,
+        "price": [
+            {"tld": "de", "currency": "EUR", "createPrice": 8.9, "createPeriod": 1},
+            {"tld": "com", "createPrice": "12.50"}
+        ]
+    }));
+
+    let client = client(transport.clone());
+    let prices = client
+        .all_domain_prices(&[".DE", " COM"], 2, 2)
+        .await
+        .unwrap();
+
+    let call = transport.only_call();
+    assert_eq!(call.method, "domain.getalldomainprices");
+    assert_eq!(call.params["tld"], json!(["de", "com"]));
+    assert_eq!(call.params["page"], 2);
+    assert_eq!(call.params["pagelimit"], 2);
+
+    assert_eq!(prices.len(), 2);
+    assert_eq!(prices.find("com").unwrap().create, Some(12.5));
+    assert!(
+        prices.has_more(),
+        "count 3 with 2 entries means another page"
+    );
+}
+
+#[tokio::test]
+async fn the_full_price_table_leaves_out_an_empty_tld_list_and_pages_from_one() {
+    let transport = MockTransport::new();
+    transport.ok(json!({"count": 0, "price": []}));
+
+    let client = client(transport.clone());
+    let prices = client
+        .all_domain_prices(&["", " . "], 0, 250)
+        .await
+        .unwrap();
+
+    let call = transport.only_call();
+    assert!(
+        call.params.get("tld").is_none(),
+        "nothing left after the blanks are dropped: {:?}",
+        call.params
+    );
+    assert_eq!(
+        call.params["page"], 1,
+        "page 0 is clamped to the first page"
+    );
+    assert_eq!(call.params["pagelimit"], 250);
+    assert!(prices.is_empty());
+    assert!(!prices.has_more());
+}
+
+#[tokio::test]
+async fn a_paged_price_method_refuses_a_page_size_of_zero() {
+    for limit in [0, 1] {
+        let transport = MockTransport::new();
+        transport.ok(json!({"count": 0, "price": []}));
+        let client = client(transport.clone());
+        let result = client.all_domain_prices(&[], 1, limit).await;
+        if limit == 0 {
+            assert!(
+                result.unwrap_err().is_validation(),
+                "a page size of zero is refused locally"
+            );
+            assert_eq!(transport.call_count(), 0, "nothing may be sent");
+        } else {
+            assert!(result.is_ok(), "one is the smallest valid page size");
+            assert_eq!(transport.call_count(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_rows_of_the_full_price_table_are_read_under_each_documented_spelling() {
+    for key in ["price", "prices", "domain"] {
+        let transport = MockTransport::new();
+        transport.ok(json!({key: [{"tld": "de", "renewal_price": "8.90"}]}));
+        let client = client(transport);
+        let prices = client.all_domain_prices(&["de"], 1, 10).await.unwrap();
+        assert_eq!(prices.len(), 1, "rows under `{key}` must be found");
+        assert_eq!(prices.find("de").unwrap().renewal, Some(8.9));
+    }
+}
+
+#[tokio::test]
+async fn extra_data_rules_send_the_tld_and_the_order_type() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "extradata": [
+            {"tld": "de", "key": "X_FN_INDUSTRY", "type": "select", "required": 1,
+             "orderType": "reg", "values": ["retail", "craft"]},
+            {"tld": "de", "key": "X_FN_VAT", "type": "text", "required": 0,
+             "pattern": "^DE[0-9]{9}$", "unknownRegistryFlag": true}
+        ]
+    }));
+
+    let client = client(transport.clone());
+    let rules = client
+        .extra_data_rules(Some(".DE"), Some(PriceType::Reg))
+        .await
+        .unwrap();
+
+    let call = transport.only_call();
+    assert_eq!(call.method, "domain.getextradatarules");
+    assert_eq!(call.params["tld"], "de");
+    assert_eq!(call.params["pricetype"], "reg");
+
+    assert_eq!(rules.len(), 2);
+    assert_eq!(rules[0].key.as_deref(), Some("X_FN_INDUSTRY"));
+    assert_eq!(rules[0].required, Some(true));
+    assert_eq!(rules[0].price_type(), Some(PriceType::Reg));
+    assert_eq!(rules[0].values, ["retail", "craft"]);
+    assert!(rules[1].is_text(), "a `text` rule is the free-text kind");
+    assert_eq!(rules[1].required, Some(false));
+}
+
+#[tokio::test]
+async fn extra_data_rules_read_a_single_object_and_an_absent_answer() {
+    let transport = MockTransport::new();
+    transport.ok(json!({"extradataRules": {"key": "X_A", "orderType": "refund"}}));
+
+    let rules = client(transport.clone())
+        .extra_data_rules(None, None)
+        .await
+        .unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(
+        rules[0].order_type.as_deref(),
+        Some("refund"),
+        "an order type this crate does not know is carried, not dropped"
+    );
+    assert_eq!(rules[0].price_type(), None);
+    assert_eq!(transport.call_count(), 1);
+
+    let empty = MockTransport::new();
+    empty.ok_empty();
+    let none = client(empty.clone())
+        .extra_data_rules(None, None)
+        .await
+        .unwrap();
+    assert_eq!(none, Vec::<ExtraDataRule>::new());
+    assert_eq!(empty.call_count(), 1);
+}
+
+#[tokio::test]
+async fn a_blank_tld_filter_is_refused_without_calling_the_api() {
+    for blank in ["", " ", "."] {
+        let transport = MockTransport::new();
+        let client = client(transport.clone());
+        assert!(
+            client
+                .extra_data_rules(Some(blank), None)
+                .await
+                .unwrap_err()
+                .is_validation(),
+            "{blank:?} names no TLD"
+        );
+        assert!(client
+            .promo_codes(Some(blank), 1, 10)
+            .await
+            .unwrap_err()
+            .is_validation());
+        assert!(client
+            .price_changes(Some(blank), 1, 10)
+            .await
+            .unwrap_err()
+            .is_validation());
+        assert_eq!(transport.call_count(), 0, "{blank:?} must not be sent");
+    }
+}
+
+#[tokio::test]
+async fn promo_codes_accept_amounts_as_numbers_and_as_strings() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "promo": [
+            {"code": "SPRING26", "price": "1.00", "currency": "EUR", "tld": ["de"],
+             "validFrom": "2026-01-01", "validUntil": "2026-03-31", "orderType": "reg"},
+            {"promoCode": "SUMMER26", "price": 0, "discount": "10", "period": "2",
+             "type": "nonsense", "order": "renewal"}
+        ]
+    }));
+
+    let client = client(transport.clone());
+    let promos = client.promo_codes(Some(".DE"), 3, 50).await.unwrap();
+
+    let call = transport.only_call();
+    assert_eq!(call.method, "domain.getpromos");
+    assert_eq!(call.params["tld"], "de");
+    assert_eq!(call.params["page"], 3);
+    assert_eq!(call.params["pagelimit"], 50);
+
+    assert_eq!(promos.len(), 2);
+    assert_eq!(promos[0].price, Some(1.0));
+    assert_eq!(promos[0].valid_until.as_deref(), Some("2026-03-31"));
+    assert_eq!(promos[0].price_type(), Some(PriceType::Reg));
+    assert_eq!(promos[1].code.as_deref(), Some("SUMMER26"));
+    assert_eq!(promos[1].period, Some(2));
+    assert_eq!(promos[1].price_type(), Some(PriceType::Renewal));
+}
+
+#[tokio::test]
+async fn a_promo_answer_that_is_empty_or_unknown_is_no_promos() {
+    for answer in [
+        json!({"promo": []}),
+        json!({"promos": []}),
+        json!({"count": 0}),
+        json!({}),
+    ] {
+        let transport = MockTransport::new();
+        transport.ok(answer.clone());
+        let client = client(transport);
+        assert!(
+            client.promo_codes(None, 1, 10).await.unwrap().is_empty(),
+            "{answer} carries no promo"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_scheduled_price_change_keeps_its_direction_and_its_unknown_vocabulary() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "pricechange": [
+            {"tld": "com", "type": "renewal", "period": 1, "price": "13.90",
+             "oldPrice": 12.5, "currency": "EUR", "startDate": "2026-01-01"},
+            {"tld": "de", "action": "restoreFee", "price": "100.00", "old_price": "100.00"}
+        ]
+    }));
+
+    let client = client(transport.clone());
+    let changes = client.price_changes(Some("com"), 1, 10).await.unwrap();
+
+    let call = transport.only_call();
+    assert_eq!(call.method, "domain.pricechanges");
+    assert_eq!(call.params["tld"], "com");
+    assert_eq!(call.params["page"], 1);
+    assert_eq!(call.params["pagelimit"], 10);
+
+    assert_eq!(changes.len(), 2);
+    assert_eq!(changes[0].is_increase(), Some(true));
+    assert_eq!(changes[0].effective.as_deref(), Some("2026-01-01"));
+    assert_eq!(changes[0].price_type(), Some(PriceType::Renewal));
+    assert_eq!(changes[1].price_type(), None);
+    assert_eq!(changes[1].action.as_deref(), Some("restoreFee"));
+    assert_eq!(
+        changes[1].is_increase(),
+        None,
+        "the same amount under both spellings is neither"
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_price_in_a_scheduled_change_is_none_not_an_error() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "pricechanges": [{"tld": "de", "price": "n/a", "oldPrice": {"amount": 1}}]
+    }));
+
+    let client = client(transport);
+    let changes = client.price_changes(None, 1, 10).await.unwrap();
+
+    assert_eq!(
+        changes.len(),
+        1,
+        "the row survives an amount it cannot read"
+    );
+    assert_eq!(changes[0].tld.as_deref(), Some("de"));
+    assert_eq!(changes[0].price, None);
+    assert_eq!(changes[0].old_price, None);
+    assert_eq!(changes[0].is_increase(), None);
 }
