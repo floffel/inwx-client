@@ -36,7 +36,7 @@
 //! | Area | Methods |
 //! | --- | --- |
 //! | Session | `account.login`, `account.logout`, `account.check` (implicit), `account.info`, `account.unlock`, `account.changepassword` |
-//! | Domains | `domain.check`, `domain.create`, `domain.info`, `domain.list`, `domain.update`, `domain.renew`, `domain.delete`, `domain.whois` |
+//! | Domains | `domain.check`, `domain.create`, `domain.info`, `domain.list`, `domain.update`, `domain.renew`, `domain.delete`, `domain.whois`, `domain.setClientHold`, `domain.removeClientHold` |
 //! | Ownership | `domain.transfer`, `domain.trade`, `domain.push`, `domain.restore`, `domain.transfercancel`, `domain.transferOut` |
 //! | DNS records | `nameserver.info` (read), `nameserver.createRecord`, `nameserver.updateRecord`, `nameserver.deleteRecord` |
 //! | Zones | `nameserver.create`, `nameserver.update`, `nameserver.delete`, `nameserver.list`, `nameserver.info`, `nameserver.check`, `nameserver.clone`, `nameserver.export`, `nameserver.exportlist`, `nameserver.exportrecords` |
@@ -193,8 +193,8 @@ pub use document::{
     DocumentEntry, DocumentQuery, DocumentUpload, DownloadedDocument, MAX_DOCUMENT_BYTES,
 };
 pub use domain::{
-    DomainCheck, DomainCreate, DomainInfo, DomainListPage, DomainListQuery, DomainRenew,
-    DomainUpdate, Registration, RenewalResult,
+    ClientHoldResult, DomainCheck, DomainCreate, DomainInfo, DomainListPage, DomainListQuery,
+    DomainRenew, DomainUpdate, Registration, RemoveClientHold, RenewalResult, SetClientHold,
 };
 pub use dyndns::{
     DynDnsAccount, DynDnsAccountInfo, DynDnsAccountRef, DynDnsCheck, DynDnsCreated, DynDnsLog,

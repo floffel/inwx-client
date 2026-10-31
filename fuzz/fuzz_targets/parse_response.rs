@@ -12,6 +12,7 @@ use inwx_client::{
     ContactVerificationSettings, Customer, CustomerDownload, DataExport, DnsRecord, DocumentEntry,
     DomainCheck, DomainInfo, DownloadedDocument, HostCheckResult, HostRecord, Message, NewsItem,
     NicHandle, PdfFile, PdfHandle, PolledMessage, RecordType, RpcResponse, ZoneInfo,
+    ClientHoldResult,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -33,6 +34,7 @@ fuzz_target!(|data: &[u8]| {
         let _ = serde_json::from_value::<DomainInfo>(payload.clone());
         let _ = serde_json::from_value::<DomainCheck>(payload.clone());
         let _ = serde_json::from_value::<Contact>(payload.clone());
+        let _ = serde_json::from_value::<ClientHoldResult>(payload.clone());
         let _ = serde_json::from_value::<Vec<DnsRecord>>(payload.clone());
 
         // The reseller/partner objects (issue #22) decode the same way, and the

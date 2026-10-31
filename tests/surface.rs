@@ -12,11 +12,12 @@ use inwx_client::{
     is_read_only_method,
     rpc::{self, Detail, RpcRequest, RpcResponse},
     transport::{Request, Response, TransportStage},
-    AccountInfo, AccountUnlock, Contact, ContactQuery, ContactRequest, ContactType, ContactUpdate,
-    Credentials, DnsRecord, DomainCheck, DomainCreate, DomainInfo, DomainListPage, DomainListQuery,
-    DomainName, DomainPriceQuote, DomainRenew, DomainUpdate, Error, Hostname, InwxClient, Language,
-    NameserverCheck, Period, PriceList, PriceType, RecordId, RecordSpec, RecordType, RecordUpdate,
-    RenewalMode, RetryPolicy, TldPrice, UnlockAccount, ZoneInfo, ZoneListPage, ZoneSummary,
+    AccountInfo, AccountUnlock, ClientHoldResult, Contact, ContactQuery, ContactRequest,
+    ContactType, ContactUpdate, Credentials, DnsRecord, DomainCheck, DomainCreate, DomainInfo,
+    DomainListPage, DomainListQuery, DomainName, DomainPriceQuote, DomainRenew, DomainUpdate,
+    Error, Hostname, InwxClient, Language, NameserverCheck, Period, PriceList, PriceType, RecordId,
+    RecordSpec, RecordType, RecordUpdate, RemoveClientHold, RenewalMode, RetryPolicy,
+    SetClientHold, TldPrice, UnlockAccount, ZoneInfo, ZoneListPage, ZoneSummary,
     MAX_SUBACCOUNT_USERNAME_LEN,
 };
 use serde_json::json;
@@ -293,6 +294,31 @@ fn domain_renew_params_and_query_paging() {
     let contact_query = ContactQuery::new().with_search("x").with_page(3, 7);
     assert_eq!(contact_query.params()["page"], 3);
     assert_eq!(ContactQuery::new().params(), json!({}));
+}
+
+#[test]
+fn client_hold_requests_and_result() {
+    let set = SetClientHold::new(domain("a.de"));
+    assert_eq!(set.domain(), &domain("a.de"));
+    assert_eq!(set.clone(), set);
+    assert_eq!(set.params()["testing"], false);
+    assert_ne!(set.clone().dry_run(), set);
+    assert!(format!("{set:?}").contains("SetClientHold"));
+
+    let remove = RemoveClientHold::new(domain("a.de"));
+    assert_eq!(remove.domain(), &domain("a.de"));
+    assert_eq!(remove.clone(), remove);
+    assert_eq!(remove.clone().dry_run().params()["testing"], true);
+    assert!(format!("{remove:?}").contains("RemoveClientHold"));
+
+    let held: ClientHoldResult = serde_json::from_str(r#"{"roId":42}"#).unwrap();
+    assert_eq!(held.ro_id, Some(42));
+    assert_eq!(held.clone(), held);
+    assert_eq!(
+        ClientHoldResult::default(),
+        ClientHoldResult { ro_id: None }
+    );
+    assert!(format!("{held:?}").contains("42"));
 }
 
 #[test]

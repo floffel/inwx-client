@@ -490,6 +490,24 @@ in `AccountRole::Other`, so a role INWX adds later still decodes. Reading is in
 the read-only table and may therefore be replayed after an uncertain failure;
 granting and revoking are not, because replaying them would duplicate a
 permission change, so such an outcome surfaces as `Error::Uncertain`.
+## 0.2.0 — registry status (`src/domain.rs`)
+Source: <https://account.inwx.com/en/help/apidoc/f/ch02s09.html> — §2.9.16
+(`domain.setClientHold`) and §2.9.19 (`domain.removeClientHold`).
+| Method | Wrapper | Input table | Output table | Notes |
+| --- | --- | --- | --- | --- |
+| `domain.setClientHold` | `SetClientHold` → `set_client_hold` | §2.9.16, anchor **unverified** | §2.9.16, anchor **unverified** | `domain` `token255` required, `testing` `boolean` default `false`; output `roId` `int` |
+| `domain.removeClientHold` | `RemoveClientHold` → `remove_client_hold` | §2.9.19, anchor **unverified** | §2.9.19, anchor **unverified** | same input; output `roId` `int`. Documented note: removal only succeeds when the hold was set by the same account |
+Both methods take the identical parameter pair, so the body is built in one
+place and always carries both fields — `testing` explicitly, so a call never
+inherits the API default by accident. `domain` is a `DomainName`, which applies
+the `token255` limits (253 characters total, 63 per label) before the wire.
+`ClientHoldResult.ro_id` is `Option<i64>`: a command that changes nothing
+measurable is answered with an empty `resData`, and ids also arrive as strings.
+Two separate request types rather than one with a flag, so set and remove cannot
+be swapped at a call site. Both are mutations and stay out of
+`READ_ONLY_METHODS`, so an `Error::Uncertain` (timeout or reset after the
+request was written) is handed back after exactly one attempt instead of being
+replayed; `domain_info` decides whether the hold is already in place.
 
 ## Unverified
 
@@ -498,6 +516,7 @@ flagged here; none is a guess about an endpoint's existence.
 
 | Item | Status | Why |
 | --- | --- | --- |
+| `domain.setClientHold` / `domain.removeClientHold` table anchors | **unverified** | The methods, their parameters and the `roId` output are from ch02s09 §2.9.16/§2.9.19; the `Table 2.NNN` anchor numbers for those two blocks were not readable from the offline copy, so they are cited by section instead. |
 | `nameserver.create` with `type=MASTER` and no `ns` | **unverified** | `ns` is documented as optional (Table 2.195) and the description does not say what happens then; INWX presumably assigns its own nameservers. The crate sends the request as documented. |
 | `dyndns.updateRecord` account selection | **unverified** | Table 2.159 lists only `ipAddress` and `ipAddressV6`; how the account is identified is not documented in the public chapter. The crate sends exactly those two parameters. |
 | `hosting.create` id type | **partially documented** | `hostingId`/`productId` are `token255` there (Table 2.180) but `int` elsewhere (§2.13); the crate takes `i64` and sends strings for `hosting.create`, numbers for the `int` methods. |

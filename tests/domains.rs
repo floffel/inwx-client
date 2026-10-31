@@ -4,8 +4,9 @@ mod common;
 
 use common::{client, MockTransport};
 use inwx_client::{
-    ContactQuery, ContactRequest, ContactType, ContactUpdate, DomainCreate, DomainListQuery,
-    DomainName, DomainRenew, DomainUpdate, Error, Hostname, Period, PriceType, RenewalMode,
+    is_read_only_method, ClientHoldResult, ContactQuery, ContactRequest, ContactType,
+    ContactUpdate, DomainCreate, DomainListQuery, DomainName, DomainRenew, DomainUpdate, Error,
+    Hostname, Period, PriceType, RemoveClientHold, RenewalMode, SetClientHold,
 };
 use serde_json::json;
 
@@ -274,6 +275,178 @@ async fn auth_code_and_whois_return_their_payloads() {
         "Domain Name: a.de"
     );
     assert_eq!(transport.calls()[1].method, "domain.whois");
+}
+
+// ---------------------------------------------------------- registry hold
+
+#[tokio::test]
+async fn setting_a_registry_hold_sends_the_domain_and_the_testing_flag() {
+    let transport = MockTransport::new();
+    transport.ok(json!({"roId": 42}));
+
+    let client = client(transport.clone());
+    let held = client
+        .set_client_hold(&SetClientHold::new(domain("a.de")))
+        .await
+        .unwrap();
+
+    let call = transport.only_call();
+    assert_eq!(call.method, "domain.setClientHold");
+    assert_eq!(call.params, json!({"domain": "a.de", "testing": false}));
+    assert_eq!(held.ro_id, Some(42));
+}
+
+#[tokio::test]
+async fn lifting_a_registry_hold_uses_its_own_method() {
+    let transport = MockTransport::new();
+    transport.ok(json!({"roId": 42}));
+
+    let client = client(transport.clone());
+    let released = client
+        .remove_client_hold(&RemoveClientHold::new(domain("a.de")))
+        .await
+        .unwrap();
+
+    let call = transport.only_call();
+    assert_eq!(call.method, "domain.removeClientHold");
+    assert_eq!(call.params, json!({"domain": "a.de", "testing": false}));
+    assert_eq!(released.ro_id, Some(42));
+}
+
+#[tokio::test]
+async fn a_registry_hold_dry_run_validates_without_changing_anything() {
+    let transport = MockTransport::new();
+    transport.ok_empty();
+    transport.ok_empty();
+
+    let client = client(transport.clone());
+    client
+        .set_client_hold(&SetClientHold::new(domain("a.de")).dry_run())
+        .await
+        .unwrap();
+    client
+        .remove_client_hold(&RemoveClientHold::new(domain("a.de")).dry_run())
+        .await
+        .unwrap();
+
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 2);
+    for call in calls {
+        assert_eq!(call.params["testing"], true);
+        assert_eq!(call.params["domain"], "a.de");
+    }
+}
+
+#[tokio::test]
+async fn a_registry_hold_answer_is_decoded_permissively() {
+    // The id as a string, plus a field nobody has seen before.
+    let transport = MockTransport::new();
+    transport.ok(json!({"roId": "42", "brandNewField": {"a": 1}}));
+    // A success that reports nothing at all.
+    transport.ok_empty();
+
+    let client = client(transport.clone());
+    let held = client
+        .set_client_hold(&SetClientHold::new(domain("a.de")))
+        .await
+        .unwrap();
+    let released = client
+        .remove_client_hold(&RemoveClientHold::new(domain("a.de")))
+        .await
+        .unwrap();
+
+    assert_eq!(held, ClientHoldResult { ro_id: Some(42) });
+    assert_eq!(released.ro_id, None);
+    assert_eq!(transport.call_count(), 2);
+}
+
+#[tokio::test]
+async fn a_hold_for_a_domain_that_is_not_mine_reports_the_api_code() {
+    let transport = MockTransport::new();
+    transport.api_error(2303, "Object does not exist");
+
+    let client = client(transport);
+    let error = client
+        .set_client_hold(&SetClientHold::new(domain("not-mine.de")))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, Error::Api { code: 2303, .. }));
+    assert!(!error.is_retryable());
+}
+
+/// An answer that is a bare scalar cannot be read as a `ClientHoldResult`. The
+/// command already ran and the API said it succeeded, so this is a terminal
+/// decode error — retryable would mean replaying a mutation because the body
+/// looked unexpected. A sequence is not covered here: serde accepts it as the
+/// struct's seq form, so `[{…}]` decodes into a result instead of failing.
+#[tokio::test]
+async fn a_registry_hold_answer_that_is_not_an_object_is_a_terminal_json_error() {
+    let transport = MockTransport::new();
+    transport.ok(json!("held"));
+    transport.ok(json!(7));
+
+    let client = client(transport.clone());
+    let set = client
+        .set_client_hold(&SetClientHold::new(domain("a.de")))
+        .await
+        .unwrap_err();
+    let removed = client
+        .remove_client_hold(&RemoveClientHold::new(domain("a.de")))
+        .await
+        .unwrap_err();
+
+    for error in [set, removed] {
+        assert!(matches!(error, Error::Json { .. }), "{error:?}");
+        assert!(!error.is_retryable(), "{error:?}");
+        assert!(!error.is_uncertain(), "{error:?}");
+    }
+    assert_eq!(transport.call_count(), 2);
+}
+
+/// A hold is a mutation: a timeout may already have parked the domain at the
+/// registry, so the client reports the ambiguity instead of replaying it.
+#[tokio::test]
+async fn an_uncertain_registry_hold_is_never_replayed() {
+    let transport = MockTransport::new();
+    transport.uncertain_failure("timeout waiting for response");
+    transport.ok(json!({"roId": 42}));
+    let error = client(transport.clone())
+        .set_client_hold(&SetClientHold::new(domain("a.de")))
+        .await
+        .unwrap_err();
+    assert_uncertain_after_one_attempt("set_client_hold", &error, &transport);
+
+    let transport = MockTransport::new();
+    transport.uncertain_failure("timeout waiting for response");
+    transport.ok(json!({"roId": 42}));
+    let error = client(transport.clone())
+        .remove_client_hold(&RemoveClientHold::new(domain("a.de")))
+        .await
+        .unwrap_err();
+    assert_uncertain_after_one_attempt("remove_client_hold", &error, &transport);
+}
+
+/// The failure happened after the request was written, so exactly one attempt
+/// may have been made — and the scripted success behind it must stay unused.
+fn assert_uncertain_after_one_attempt(label: &str, error: &Error, transport: &MockTransport) {
+    assert!(error.is_uncertain(), "{label}: {error:?}");
+    assert!(!error.is_retryable(), "{label}: {error:?}");
+    assert_eq!(transport.call_count(), 1, "{label} must not be replayed");
+}
+
+/// Both commands change registry state, so they must stay outside the read-only
+/// table that authorises a replay.
+#[test]
+fn registry_hold_commands_are_not_read_only() {
+    for method in [
+        "domain.setClientHold",
+        "domain.removeClientHold",
+        "DOMAIN.SETCLIENTHOLD",
+        " domain.removeClientHold ",
+    ] {
+        assert!(!is_read_only_method(method), "{method} is not read-only");
+    }
 }
 
 // --------------------------------------------------------------- contacts
