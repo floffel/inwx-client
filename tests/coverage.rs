@@ -9,19 +9,19 @@ mod common;
 
 use common::{client, MockTransport};
 use inwx_client::{
-    parse_ip, AccountBalance, AddDnsKeyRequest, ApplicationCheck, ApplicationCreate,
-    ApplicationQuery, ApplicationType, ApplicationUpdate, AuthCode, AuthInfo2Order,
-    AuthInfo2OrderResult, AuthInfo2PriceQuote, Certificate, CertificateLogEntry, CertificateOrder,
-    CertificateProduct, CertificateProductQuery, CertificateQuery, CertificateUpdate,
-    CertificateValidationMethod, ContactVerificationSettings, ContactVerificationSettingsUpdate,
-    CustomerUpdate, DataExport, DnsKey, DnssecAlgorithm, DnssecDigestType, DnssecDomainStatus,
-    DnssecFlag, DnssecKeyQuery, DnssecKeyStatus, Document, DocumentFormat, DocumentQuery,
-    DocumentUpload, DomainName, DownloadedDocument, DsRecord, DynDnsAccount, DynDnsAccountRef,
-    DynDnsRecord, Email, Handle, HostCheck, HostCreate, HostUpdate, HostingOrder, HostingPeriod,
-    Hostname, Irreversible, NameserverSet, NameserverSetType, NameserverSetUpdate, NewsItem,
-    NicHandle, NicHandleQuery, PdfFile, PdfRender, PostalDelivery, RecordSet, RecordSpec,
-    RefundRequest, StatementQuery, TagUpdate, Timestamp, TransferAnswer, UrlRedirectType,
-    ZoneCreate, ZoneType, ZoneUpdate,
+    parse_ip, AccountBalance, AccountRole, AccountRoleEntry, AddDnsKeyRequest, ApplicationCheck,
+    ApplicationCreate, ApplicationQuery, ApplicationType, ApplicationUpdate, AuthCode, AuthInfo2,
+    AuthInfo2Order, AuthInfo2OrderResult, AuthInfo2PriceQuote, Certificate, CertificateLogEntry,
+    CertificateOrder, CertificateProduct, CertificateProductQuery, CertificateQuery,
+    CertificateUpdate, CertificateValidationMethod, ContactVerificationSettings,
+    ContactVerificationSettingsUpdate, CustomerUpdate, DataExport, DnsKey, DnssecAlgorithm,
+    DnssecDigestType, DnssecDomainStatus, DnssecFlag, DnssecKeyQuery, DnssecKeyStatus, Document,
+    DocumentFormat, DocumentQuery, DocumentUpload, DomainName, DownloadedDocument, DsRecord,
+    DynDnsAccount, DynDnsAccountRef, DynDnsRecord, Email, Handle, HostCheck, HostCreate,
+    HostUpdate, HostingOrder, HostingPeriod, Hostname, Irreversible, NameserverSet,
+    NameserverSetType, NameserverSetUpdate, NewsItem, NicHandle, NicHandleQuery, PdfFile,
+    PdfRender, PostalDelivery, RecordSet, RecordSpec, RefundRequest, StatementQuery, TagUpdate,
+    Timestamp, TransferAnswer, UrlRedirectType, ZoneCreate, ZoneType, ZoneUpdate,
 };
 use serde_json::json;
 
@@ -1056,4 +1056,133 @@ fn reseller_hosts_cover_the_testing_and_rename_fields() {
     )
     .is_ok());
     assert!(HostCheck::new(long_domain, Hostname::parse(&"n".repeat(58)).unwrap()).is_err());
+}
+
+// --------------------------------------------------------- account roles (#74)
+
+#[tokio::test]
+async fn account_roles_reads_both_spellings_of_the_answer_list() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "roles": [
+            {"handle": "4711", "role": "TECH", "customer": "example"},
+            {"handle": 4712, "role": "TRUSTEE", "username": "other", "extra": true}
+        ]
+    }));
+    let client = client(transport.clone());
+    let rows = client.account_roles().await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].handle, Some(4711));
+    assert_eq!(rows[0].role, Some(AccountRole::Tech));
+    assert_eq!(rows[0].customer.as_deref(), Some("example"));
+    assert_eq!(rows[1].role, Some(AccountRole::Other("TRUSTEE".into())));
+    assert_eq!(rows[1].customer.as_deref(), Some("other"));
+
+    // A single object arrives as one row ...
+    transport.ok(json!({ "role": { "handle": 1, "role": "OWNER" } }));
+    let rows = client.account_roles().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].role, Some(AccountRole::Owner));
+
+    // ... and an answer without either key is simply empty.
+    transport.ok(json!({}));
+    let rows = client.account_roles().await.unwrap();
+    assert_eq!(rows, Vec::new());
+}
+
+#[tokio::test]
+async fn add_role_and_remove_role_send_the_expected_command() {
+    let transport = MockTransport::new();
+    transport.ok_empty();
+    let client = client(transport.clone());
+    client.add_role(4711, &AccountRole::Tech).await.unwrap();
+    let call = transport.only_call();
+    assert_eq!(call.method, "account.addrole");
+    assert_eq!(call.params, json!({"handle": 4711, "role": "TECH"}));
+
+    transport.ok_empty();
+    client.remove_role(4711, &AccountRole::None).await.unwrap();
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[1].method, "account.removerole");
+    assert_eq!(calls[1].params, json!({"handle": 4711, "role": "NONE"}));
+}
+
+#[tokio::test]
+async fn an_account_role_command_stops_at_the_handle_and_role_limits() {
+    let transport = MockTransport::new();
+    let client = client(transport.clone());
+
+    // Just inside the 255-character role limit: the request goes out.
+    transport.ok_empty();
+    client
+        .add_role(1, &AccountRole::Other("x".repeat(255)))
+        .await
+        .unwrap();
+    assert_eq!(transport.call_count(), 1);
+
+    // Just outside it, and a handle that is not positive: refused before the
+    // socket is touched.
+    assert!(client
+        .add_role(1, &AccountRole::Other("x".repeat(256)))
+        .await
+        .is_err());
+    assert!(client.add_role(0, &AccountRole::Tech).await.is_err());
+    assert!(client.remove_role(-1, &AccountRole::Tech).await.is_err());
+    assert!(client
+        .remove_role(1, &AccountRole::Other(" ".into()))
+        .await
+        .is_err());
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
+async fn an_uncertain_failure_replays_getroles_but_not_removerole() {
+    let transport = MockTransport::new();
+    transport.uncertain_failure("timeout waiting for response");
+    transport.ok(json!({ "roles": [] }));
+
+    let client = client(transport.clone());
+    let rows = client.account_roles().await.unwrap();
+    assert_eq!(rows, Vec::new());
+    assert_eq!(transport.call_count(), 2);
+
+    transport.uncertain_failure("timeout waiting for response");
+    transport.ok_empty();
+    let error = client
+        .remove_role(4711, &AccountRole::Tech)
+        .await
+        .unwrap_err();
+    assert!(error.is_uncertain());
+    assert_eq!(transport.call_count(), 3);
+}
+
+#[test]
+fn account_role_display_and_serde_cover_the_error_branches() {
+    assert_eq!(
+        " admin ".parse::<AccountRole>().unwrap(),
+        AccountRole::Admin
+    );
+    assert!("".parse::<AccountRole>().is_err());
+    assert_eq!(
+        serde_json::to_string(&AccountRole::Tech).unwrap(),
+        "\"TECH\""
+    );
+    assert_eq!(
+        serde_json::to_string(&AccountRole::Other("TRUSTEE".into())).unwrap(),
+        "\"TRUSTEE\""
+    );
+    assert_eq!(
+        serde_json::from_str::<AccountRole>("\"trustee\"").unwrap(),
+        AccountRole::Other("TRUSTEE".into())
+    );
+    // Empty and non-string inputs fail instead of silently becoming a role.
+    assert!(serde_json::from_str::<AccountRole>("\"\"").is_err());
+    assert!(serde_json::from_str::<AccountRole>("null").is_err());
+    assert!(serde_json::from_str::<AccountRole>("7").is_err());
+
+    // The row model accepts nulls and ignores unknown fields.
+    let row: AccountRoleEntry =
+        serde_json::from_str(r#"{"handle":null,"role":null,"customer":null,"extra":1}"#).unwrap();
+    assert_eq!(row, AccountRoleEntry::default());
 }

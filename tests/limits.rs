@@ -4,8 +4,8 @@
 use inwx_client::{
     parse_ip, AuthCode, CertificateId, CertificateOrder, CertificateTerm, CertificateUpdate,
     Credentials, DnsKey, DnssecKeyQuery, DomainName, DsRecord, Email, Error, Handle, HostingPeriod,
-    Hostname, NameserverSetCreate, NameserverSetType, PostalDelivery, RefundRequest, StatementQuery,
-    TagUpdate, Timestamp, ZoneCreate, ZoneUpdate, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
+    Hostname, NameserverSetCreate, NameserverSetType, PostalDelivery, RefundRequest,
+    StatementQuery, TagUpdate, Timestamp, ZoneCreate, ZoneUpdate, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
 };
 
 fn domain(name: &str) -> DomainName {
