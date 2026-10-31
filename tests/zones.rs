@@ -230,6 +230,42 @@ async fn an_empty_update_never_reaches_the_wire() {
     assert_eq!(transport.call_count(), 0);
 }
 
+/// Issue #193: `has_changes` and `params` must agree on whether `testing`
+/// (set by `dry_run`) counts as a change — and the error has to say so.
+#[tokio::test]
+async fn dry_run_alone_is_not_a_change() {
+    // Just outside the limit: the flag alone is still an empty update, and the
+    // message names the flag instead of pointing at an unrelated field.
+    let dry_run_only = ZoneUpdate::new(domain("a.de")).dry_run();
+    assert!(!dry_run_only.has_changes());
+    let error = dry_run_only.params().unwrap_err();
+    assert!(error.is_validation());
+    let text = error.to_string();
+    assert_eq!(
+        text,
+        "invalid zone.update: sets no field; add a change or skip the call \
+         (`dry_run`/`testing` alone is not a change)"
+    );
+
+    let transport = MockTransport::new();
+    let error = client_without_retries(transport.clone())
+        .update_zone(&dry_run_only)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Validation { .. }));
+    assert_eq!(transport.call_count(), 0);
+
+    // Just inside the limit: one field plus the flag is a real update, and the
+    // flag is still serialised next to the change.
+    let update = ZoneUpdate::new(domain("a.de"))
+        .with_zone_type(ZoneType::Master)
+        .dry_run();
+    assert!(update.has_changes());
+    let params = update.params().unwrap();
+    assert_eq!(params["type"], "MASTER");
+    assert_eq!(params["testing"], true);
+}
+
 #[tokio::test]
 async fn frame_fields_require_a_frame_redirect() {
     let mut update = ZoneUpdate::new(domain("a.de"))
