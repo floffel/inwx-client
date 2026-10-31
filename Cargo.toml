@@ -24,10 +24,12 @@ base64 = "0.22"
 idna = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+subtle = "2.6"
 thiserror = "2"
 # ISO-8601 parsing for the `timestamp` parameters (scheduled execution dates,
 # accounting ranges). A maintained parser beats a hand-rolled shape check.
 time = { version = "0.3", default-features = false, features = ["parsing", "macros", "std"] }
+zeroize = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
 tokio = { version = "1", default-features = false, features = ["time"], optional = true }
 

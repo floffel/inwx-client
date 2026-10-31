@@ -3,13 +3,37 @@
 
 use inwx_client::{
     parse_ip, AuthCode, CertificateId, CertificateOrder, CertificateTerm, CertificateUpdate,
-    DnsKey, DnssecKeyQuery, DomainName, DsRecord, Email, Error, Handle, HostingPeriod, Hostname,
-    NameserverSetCreate, NameserverSetType, PostalDelivery, RefundRequest, StatementQuery,
+    Credentials, DnsKey, DnssecKeyQuery, DomainName, DsRecord, Email, Error, Handle, HostingPeriod,
+    Hostname, NameserverSetCreate, NameserverSetType, PostalDelivery, RefundRequest, StatementQuery,
     TagUpdate, Timestamp, ZoneCreate, ZoneUpdate, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
 };
 
 fn domain(name: &str) -> DomainName {
     DomainName::parse(name).unwrap()
+}
+
+// ------------------------------------------------------------- credentials --
+
+#[test]
+fn usernames_of_64_characters_are_accepted_and_65_are_not() {
+    let shortest = "u";
+    let longest = "u".repeat(64);
+    let too_long = "u".repeat(65);
+
+    assert!(Credentials::new(shortest, "pass").is_ok());
+    assert!(Credentials::new(longest.as_str(), "pass").is_ok());
+    assert!(matches!(
+        Credentials::new(too_long.as_str(), "pass").unwrap_err(),
+        inwx_client::Error::Validation {
+            field: "credentials.username",
+            ..
+        }
+    ));
+
+    // `text64` counts characters, not UTF-8 bytes.
+    let unicode = "ü".repeat(64);
+    assert!(Credentials::new(unicode.as_str(), "pass").is_ok());
+    assert!(Credentials::new(format!("{unicode}ü").as_str(), "pass").is_err());
 }
 
 // ------------------------------------------------------------------ labels --

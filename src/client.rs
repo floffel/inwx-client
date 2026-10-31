@@ -12,11 +12,16 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+use subtle::ConstantTimeEq;
+use zeroize::Zeroize;
 
 use crate::error::{Error, Result};
 use crate::rpc::{RpcRequest, RpcResponse};
 use crate::transport::{Request, Response, Transport};
 use crate::types::de;
+
+/// Longest account username accepted by the `account.login` `text64` field.
+const MAX_USERNAME_LEN: usize = 64;
 
 /// Production endpoint, as documented (`api.domrobot.com`).
 pub const DEFAULT_BASE_URL: &str = "https://api.domrobot.com/jsonrpc/";
@@ -86,53 +91,75 @@ impl std::str::FromStr for Language {
 ///
 /// Both fields are checked at construction: an empty username or password would
 /// make every call fail with a confusing API error, and a control character
-/// would let a value escape its JSON string into a header.
+/// would let a value escape its JSON string into a header. The username is the
+/// API's `text64`, so it is limited to 64 characters; validation happens on the
+/// borrowed input before either value is copied into owned storage.
+///
+/// The password is kept in a private wrapper that is deliberately not
+/// `Clone`, is zeroed when the credentials are dropped, and compares in
+/// constant time. This means credentials cannot be duplicated accidentally and
+/// equality checks do not leak the position of the first differing byte.
 ///
 /// ```
 /// use inwx_client::Credentials;
 ///
 /// let credentials = Credentials::new("florian", "s3cret")?;
 /// assert_eq!(credentials.username(), "florian");
+/// assert_eq!(credentials, Credentials::new("florian", "s3cret")?);
+/// assert_ne!(credentials, Credentials::new("florian", "other")?);
 /// assert!(Credentials::new("", "s3cret").is_err());
 /// assert!(Credentials::new("florian", "with\nnewline").is_err());
+///
+/// let longest = "u".repeat(64);
+/// let too_long = "u".repeat(65);
+/// assert!(Credentials::new(longest.as_str(), "s3cret").is_ok());
+/// assert!(Credentials::new(too_long.as_str(), "s3cret").is_err());
 /// # Ok::<(), inwx_client::Error>(())
 /// ```
-#[derive(Clone, PartialEq, Eq)]
+///
+/// Cloning is intentionally unavailable:
+///
+/// ```compile_fail
+/// # fn main() -> Result<(), inwx_client::Error> {
+/// use inwx_client::Credentials;
+///
+/// let credentials = Credentials::new("florian", "s3cret")?;
+/// let duplicate = credentials.clone();
+/// # Ok(())
+/// # }
+/// ```
 pub struct Credentials {
     username: String,
-    password: String,
+    password: Password,
 }
 
 impl Credentials {
     /// Validates and stores credentials.
     ///
+    /// ```
+    /// use inwx_client::Credentials;
+    ///
+    /// let credentials = Credentials::new("user", "pass")?;
+    /// assert_eq!(credentials.username(), "user");
+    /// assert!(Credentials::new("user", "").is_err());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when either value is empty or contains control
-    /// characters (the username is `text64` on the wire, the password is
-    /// unbounded — neither is truncated here).
-    pub fn new(username: impl Into<String>, password: impl Into<String>) -> Result<Self> {
-        let username = username.into();
-        let password = password.into();
-        if username.trim().is_empty() {
-            return Err(Error::validation(
-                "credentials.username",
-                "must not be empty",
-            ));
-        }
-        if password.is_empty() {
-            return Err(Error::validation(
-                "credentials.password",
-                "must not be empty",
-            ));
-        }
-        if username.chars().any(char::is_control) || password.chars().any(char::is_control) {
-            return Err(Error::validation(
-                "credentials",
-                "must not contain control characters",
-            ));
-        }
-        Ok(Self { username, password })
+    /// [`Error::Validation`] when either value is empty, the username is longer
+    /// than 64 characters, or either value contains control characters. The
+    /// username is `text64` on the wire; the password is unbounded. Neither is
+    /// truncated here.
+    pub fn new(
+        username: impl Into<String> + AsRef<str>,
+        password: impl Into<String> + AsRef<str>,
+    ) -> Result<Self> {
+        validate_credentials(username.as_ref(), password.as_ref())?;
+        Ok(Self {
+            username: username.into(),
+            password: Password::new(password.into()),
+        })
     }
 
     /// The username.
@@ -146,6 +173,74 @@ impl Credentials {
     pub fn username(&self) -> &str {
         &self.username
     }
+}
+
+/// Compares both fields. The password comparison is constant-time and always
+/// runs, regardless of whether the usernames match.
+impl PartialEq for Credentials {
+    fn eq(&self, other: &Self) -> bool {
+        let usernames_match = self.username == other.username;
+        let passwords_match = self.password == other.password;
+        usernames_match && passwords_match
+    }
+}
+
+impl Eq for Credentials {}
+
+/// Password storage that cannot be cloned and erases its contents on drop.
+struct Password(String);
+
+impl Password {
+    fn new(password: String) -> Self {
+        Self(password)
+    }
+
+    fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq for Password {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.as_bytes().ct_eq(other.0.as_bytes()).into()
+    }
+}
+
+impl Eq for Password {}
+
+impl Drop for Password {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+/// Checks borrowed credentials before either value is converted into a `String`.
+fn validate_credentials(username: &str, password: &str) -> Result<()> {
+    if username.trim().is_empty() {
+        return Err(Error::validation(
+            "credentials.username",
+            "must not be empty",
+        ));
+    }
+    if username.chars().count() > MAX_USERNAME_LEN {
+        return Err(Error::validation(
+            "credentials.username",
+            format!("must be at most {MAX_USERNAME_LEN} characters"),
+        ));
+    }
+    if password.is_empty() {
+        return Err(Error::validation(
+            "credentials.password",
+            "must not be empty",
+        ));
+    }
+    if username.chars().any(char::is_control) || password.chars().any(char::is_control) {
+        return Err(Error::validation(
+            "credentials",
+            "must not contain control characters",
+        ));
+    }
+    Ok(())
 }
 
 /// `Debug` redacts the password: a credential that reaches a log line is a
@@ -436,8 +531,8 @@ impl<T: Transport> InwxClient<T> {
     /// [`Error::Validation`] from [`Credentials::new`].
     pub fn with_credentials(
         mut self,
-        username: impl Into<String>,
-        password: impl Into<String>,
+        username: impl Into<String> + AsRef<str>,
+        password: impl Into<String> + AsRef<str>,
     ) -> Result<Self> {
         self.credentials = Some(Credentials::new(username, password)?);
         Ok(self)
@@ -675,7 +770,7 @@ impl<T: Transport> InwxClient<T> {
         );
         params.insert(
             "pass".to_owned(),
-            Value::String(credentials.password.clone()),
+            Value::String(credentials.password.expose().to_owned()),
         );
         self.add_language(&mut params);
 
@@ -1123,6 +1218,88 @@ mod tests {
         assert!(Credentials::new("us\ner", "pass").is_err());
         assert!(Credentials::new("user", "pa\rss").is_err());
         assert!(Credentials::new("  ", "pass").is_err());
+    }
+
+    #[test]
+    fn credentials_are_validated_before_conversion() {
+        use std::cell::Cell;
+
+        struct Tracked<'a> {
+            text: &'a str,
+            conversions: &'a Cell<usize>,
+        }
+
+        impl AsRef<str> for Tracked<'_> {
+            fn as_ref(&self) -> &str {
+                self.text
+            }
+        }
+
+        impl From<Tracked<'_>> for String {
+            fn from(value: Tracked<'_>) -> Self {
+                value.conversions.set(value.conversions.get() + 1);
+                value.text.to_owned()
+            }
+        }
+
+        let username_conversions = Cell::new(0);
+        let password_conversions = Cell::new(0);
+        let too_long = "u".repeat(MAX_USERNAME_LEN + 1);
+        let error = Credentials::new(
+            Tracked {
+                text: &too_long,
+                conversions: &username_conversions,
+            },
+            Tracked {
+                text: "pass",
+                conversions: &password_conversions,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Validation {
+                field: "credentials.username",
+                ..
+            }
+        ));
+        assert_eq!(username_conversions.get(), 0);
+        assert_eq!(password_conversions.get(), 0);
+
+        let error = Credentials::new(
+            Tracked {
+                text: "user",
+                conversions: &username_conversions,
+            },
+            Tracked {
+                text: "with\nnewline",
+                conversions: &password_conversions,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Validation {
+                field: "credentials",
+                ..
+            }
+        ));
+        assert_eq!(username_conversions.get(), 0);
+        assert_eq!(password_conversions.get(), 0);
+
+        Credentials::new(
+            Tracked {
+                text: "user",
+                conversions: &username_conversions,
+            },
+            Tracked {
+                text: "pass",
+                conversions: &password_conversions,
+            },
+        )
+        .unwrap();
+        assert_eq!(username_conversions.get(), 1);
+        assert_eq!(password_conversions.get(), 1);
     }
 
     #[test]
