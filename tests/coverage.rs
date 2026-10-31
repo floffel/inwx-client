@@ -11,7 +11,7 @@ use common::{client, MockTransport};
 use inwx_client::{
     parse_ip, AccountBalance, AccountRole, AccountRoleEntry, AccountUnlock, AddDnsKeyRequest,
     ApplicationCheck, ApplicationCreate, ApplicationQuery, ApplicationType, ApplicationUpdate,
-    AuthCode, AuthInfo2, AuthInfo2Order, AuthInfo2OrderResult, AuthInfo2PriceQuote, Certificate,
+    AuthCode, AuthInfo2Order, AuthInfo2OrderResult, AuthInfo2PriceQuote, Certificate,
     CertificateLogEntry, CertificateOrder, CertificateProduct, CertificateProductQuery,
     CertificateQuery, CertificateUpdate, CertificateValidationMethod, ContactVerificationSettings,
     ContactVerificationSettingsUpdate, CustomerUpdate, DataExport, DnsKey, DnssecAlgorithm,
