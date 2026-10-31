@@ -22,7 +22,7 @@ settle. It is modelled as documented and flagged rather than guessed at.
 
 | Area | Methods | Source |
 | --- | --- | --- |
-| Session | `account.login`, `account.logout`, `account.check`, `account.info` | ch02 §2.1, Tables 2.1–2.17 |
+| Session | `account.login`, `account.logout`, `account.check`, `account.info`, `account.unlock` | ch02 §2.1, Tables 2.1–2.17 |
 | Domains | `domain.check`, `create`, `info`, `list`, `update`, `renew`, `delete`, `whois` | ch02 §2.9 |
 | DNS records | `nameserver.info`, `createRecord`, `updateRecord`, `deleteRecord` | ch02 §2.15, Tables 2.197–2.212 |
 | Zones (read) | `nameserver.list`, `nameserver.info`, `nameserver.delete`, `nameserver.check` | ch02 §2.15 |
@@ -497,6 +497,7 @@ flagged here; none is a guess about an endpoint's existence.
 | `account.getroles`/`addrole`/`removerole` tables | **not read** | ch02 §2.1 could not be fetched offline, so this section claims no table number; the method names come from the issue and must be confirmed against the page. |
 | Account role request and answer keys | **unverified** | The request sends `handle` and `role`; the answer is read under `roles` and, if that is absent, under `role`, and the customer field under `customer` or `username`. Every response field is `Option` and unknown keys are ignored, so a different spelling costs a `None`, not a failed parse — but the request keys must be checked against the live page. |
 | Account role vocabulary | **unverified** | `OWNER`/`ADMIN`/`TECH`/`BILLING`/`NONE` are the roles the product describes; the page was not read, so unknown values are carried in `AccountRole::Other` instead of being rejected. |
+| `account.unlock` request and answer | **derived, not read** | The public chapter does not settle the shape, so the request is `{"user": text64}` — the same key and datatype `account.login` uses for a login name — and every answer field (`username`, `state`) is `Option`, ignores unknown keys and accepts snake_case as well as camelCase. Network access was unavailable, so neither key was confirmed against a live page; a wrong response key costs a `None`, but the *request* key must be checked before unlocking is used in production. |
 
 ## Deliberately not modelled
 
