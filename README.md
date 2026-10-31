@@ -69,6 +69,7 @@ Every method below is implemented against the published INWX API documentation
 | Area | Methods / types | Notes |
 | --- | --- | --- |
 | Session | `account.login`, `account.logout`, `account.check` (implicit), `account.info`, `account.unlock` | cookie session, lazy login, one re-login on `2200`/`2201`/`2202`; `account.unlock` clears the lock of a sub-account and is never replayed |
+| Session | `account.login`, `account.logout`, `account.check` (implicit), `account.info`, `account.changepassword` | cookie session, lazy login, one re-login on `2200`/`2201`/`2202`; the new password is a `Password` that redacts and zeroizes itself |
 | Domains | `domain.check`, `domain.create`, `domain.info`, `domain.list`, `domain.update`, `domain.renew`, `domain.delete`, `domain.whois` | auth code (`authCode`) via `domain.info wide=1`; renewal mode and transfer lock via `domain.update` |
 | Ownership | `domain.transfer`, `domain.trade`, `domain.push`, `domain.restore`, `domain.transfercancel`, `domain.transferOut` | typed builders behind an `Irreversible` acknowledgement that names the action and the domain; auth codes redacted in `Debug` |
 | Zones | `nameserver.create`, `nameserver.update`, `nameserver.delete`, `nameserver.clone`, `nameserver.list`, `nameserver.info`, `nameserver.check`, `nameserver.export`, `nameserver.exportlist`, `nameserver.exportrecords` | `ZoneCreate`/`ZoneUpdate` builders; an update sends only what changed and can never touch a record |
@@ -188,7 +189,8 @@ documented API and were replaced: `domain.cancel` (use `domain.delete` or
 * `#![forbid(unsafe_code)]`, `#![deny(missing_docs)]`.
 * The password is sent only in the `account.login` body — never in a URL, never
   in a header. Afterwards the opaque session cookie is the only credential on the
-  wire.
+  wire. The same holds for `account.changepassword`: the current and the new
+  password stay in the body of that one request.
 * `Debug` redacts: `Credentials` prints `<redacted>` for the password, and
   `InwxClient` prints only whether a session exists. Session cookies never reach
   a log line through this crate.
@@ -203,6 +205,12 @@ documented API and were replaced: `domain.cancel` (use `domain.delete` or
 * `AuthCode` (the EPP transfer code) prints `<redacted>` in `Debug` and
   `Display`; `DynDnsAccount` redacts its password. A certificate CSR is refused
   if it contains a private key — the field takes a signing request only.
+* `Password` (the new password of `account.changepassword`) goes further: it
+  also refuses blank values, control characters and more than 255 characters,
+  compares in constant time, is overwritten when dropped, and has no
+  `Deserialize` — a secret is an input and is never parsed back out of a
+  response. Both passwords of the change travel in the request body only, and
+  the call is never retried once it has been written.
 * Retries are bounded and only apply to transient failures that happened before
   the request was written, so a rejected registration cannot be submitted three
   times. After the request was written the method decides: a read-only method is

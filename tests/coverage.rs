@@ -19,10 +19,10 @@ use inwx_client::{
     DocumentFormat, DocumentQuery, DocumentUpload, DomainName, DownloadedDocument, DsRecord,
     DynDnsAccount, DynDnsAccountRef, DynDnsRecord, Email, Handle, HostCheck, HostCreate,
     HostUpdate, HostingOrder, HostingPeriod, Hostname, Irreversible, NameserverSet,
-    NameserverSetType, NameserverSetUpdate, NewsItem, NicHandle, NicHandleQuery, PdfFile,
+    NameserverSetType, NameserverSetUpdate, NewsItem, NicHandle, NicHandleQuery, Password, PdfFile,
     PdfRender, PostalDelivery, RecordSet, RecordSpec, RefundRequest, StatementQuery, TagUpdate,
     Timestamp, TransferAnswer, UnlockAccount, UrlRedirectType, ZoneCreate, ZoneType, ZoneUpdate,
-    MAX_SUBACCOUNT_USERNAME_LEN,
+    MAX_PASSWORD_LEN, MAX_SUBACCOUNT_USERNAME_LEN,
 };
 use serde_json::json;
 
@@ -1238,4 +1238,53 @@ fn account_role_display_and_serde_cover_the_error_branches() {
     let row: AccountRoleEntry =
         serde_json::from_str(r#"{"handle":null,"role":null,"customer":null,"extra":1}"#).unwrap();
     assert_eq!(row, AccountRoleEntry::default());
+}
+
+#[test]
+fn password_surface_redacts_compares_and_wipes() {
+    use zeroize::Zeroize as _;
+    assert_eq!(MAX_PASSWORD_LEN, 255);
+    let password = Password::new("p4ss wörd").unwrap();
+    assert_eq!(password.as_str(), "p4ss wörd");
+    // Neither formatting path may leak the secret.
+    assert_eq!(format!("{password:?}"), "Password(<redacted>)");
+    assert_eq!(password.to_string(), "<redacted>");
+    assert!(!format!("{password:?}").contains("wörd"));
+    assert!(!password.to_string().contains("wörd"));
+    assert_eq!(serde_json::to_string(&password).unwrap(), "\"p4ss wörd\"");
+    // FromStr runs the same validator as `new`.
+    assert_eq!("p4ss wörd".parse::<Password>().unwrap(), password);
+    assert!("   ".parse::<Password>().is_err());
+    // Constant-time equality, checked in both directions, and cloning.
+    let clone = password.clone();
+    assert_eq!(clone, password);
+    assert_eq!(password, clone);
+    assert_ne!(password, Password::new("p4ss word").unwrap());
+    assert_ne!(Password::new("p4ss word").unwrap(), password);
+    // Explicit wiping leaves an empty password behind.
+    let mut wiped = Password::new("s3cret").unwrap();
+    wiped.zeroize();
+    assert_eq!(wiped.as_str(), "");
+    // The `Drop` path runs on every value that goes out of scope; it must
+    // tolerate a value that was already wiped.
+    drop(wiped);
+    drop(password);
+    drop(clone);
+    {
+        let temporary = Password::new("temporary").unwrap();
+        assert_eq!(temporary.as_str(), "temporary");
+    }
+    // Every rejection branch: blank, one character too long, control byte.
+    for blank in ["", " ", "  \n "] {
+        let error = Password::new(blank).unwrap_err();
+        assert!(
+            matches!(error, inwx_client::Error::Validation { .. }),
+            "blank {blank:?} was accepted"
+        );
+    }
+    assert!(Password::new("x".repeat(MAX_PASSWORD_LEN)).is_ok());
+    let too_long = Password::new("x".repeat(MAX_PASSWORD_LEN + 1)).unwrap_err();
+    assert!(matches!(too_long, inwx_client::Error::Validation { .. }));
+    assert!(Password::new("a\u{0}b").is_err());
+    assert!(Password::new("a\nb").is_err());
 }

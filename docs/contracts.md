@@ -30,6 +30,25 @@ settle. It is modelled as documented and flagged rather than guessed at.
 | Prices | `domain.getPrices`, `domain.getdomainprice` | ch02 §2.9 |
 | Envelope | `{"method":…,"params":…}` / `{"code":…,"resData":…}` | ch02 §1.2, §1.4; codes ch04 |
 
+## 0.2.0 — account (`src/client.rs`)
+
+Source: <https://account.inwx.com/en/help/apidoc/f/ch02s01.html>
+
+| Method | Wrapper | Input table | Output table |
+| --- | --- | --- | --- |
+| `account.changepassword` | `change_account_password` | unverified | — |
+
+The 0.1.x session row already covers `account.login`, `account.logout`,
+`account.check` and `account.info`; this section exists for the one account
+mutation. The current password is a plain `&str` that the client validates
+through `Password` before it is sent, the new one is a `Password`: a validated,
+redacted, zeroizing newtype with no `Deserialize`. Both secrets go in the
+request body, never in a URL or a header, and the locally cached session cookie
+is dropped afterwards because it was established with a password that no longer
+works. `account.unlock`, an `account.check` wrapper, `account.update`,
+sub-accounts and roles are deliberately out of scope here (issue #76, split of
+#71).
+
 ## 0.2.0 — zone lifecycle (`src/zone.rs`)
 
 Source: <https://account.inwx.com/en/help/apidoc/f/ch02s15.html>
@@ -498,6 +517,8 @@ flagged here; none is a guess about an endpoint's existence.
 | Account role request and answer keys | **unverified** | The request sends `handle` and `role`; the answer is read under `roles` and, if that is absent, under `role`, and the customer field under `customer` or `username`. Every response field is `Option` and unknown keys are ignored, so a different spelling costs a `None`, not a failed parse — but the request keys must be checked against the live page. |
 | Account role vocabulary | **unverified** | `OWNER`/`ADMIN`/`TECH`/`BILLING`/`NONE` are the roles the product describes; the page was not read, so unknown values are carried in `AccountRole::Other` instead of being rejected. |
 | `account.unlock` request and answer | **derived, not read** | The public chapter does not settle the shape, so the request is `{"user": text64}` — the same key and datatype `account.login` uses for a login name — and every answer field (`username`, `state`) is `Option`, ignores unknown keys and accepts snake_case as well as camelCase. Network access was unavailable, so neither key was confirmed against a live page; a wrong response key costs a `None`, but the *request* key must be checked before unlocking is used in production. |
+| `account.changepassword` parameter keys | **unverified** | The account chapter (ch02 §2.1) was not reachable in the run that added the wrapper, so the request sends `password` (the current one) plus `newPassword` (the new one), the spelling `dyndns.changepassword` (Table 2.147) and `password`/`passwordConfirm` elsewhere in the API suggest. The alternative reading — that `password` alone carries the *new* value because the session already proves the old one — cannot be ruled out offline. Check both keys against the live page. A wrong key costs an API error (a change without a new password cannot succeed), never a silent no-op. |
+| `account.changepassword` answer | **unverified** | Treated like every other mutation: `code == 1000` means done and `resData` is ignored. If the API does return data there, nothing is lost — `call` still exposes it. |
 
 ## Deliberately not modelled
 

@@ -7,7 +7,7 @@ mod common;
 use common::{anonymous_client, client, client_without_retries, no_wait, MockTransport, Reply};
 use inwx_client::{
     transport::{Response, Transport},
-    DomainListQuery, DomainName, Error, InwxClient, RetryPolicy, UnlockAccount,
+    DomainListQuery, DomainName, Error, InwxClient, Password, RetryPolicy, UnlockAccount,
 };
 use serde_json::json;
 
@@ -186,6 +186,132 @@ async fn logout_drops_the_session_even_when_the_call_fails() {
 
     assert_eq!(error.code(), Some(2303));
     assert!(!client.is_authenticated());
+}
+
+/// Both secrets belong in the JSON body. A password in a URL ends up in access
+/// logs, and one in a header is easy to echo back, so neither is allowed.
+#[tokio::test]
+async fn change_password_sends_both_secrets_in_the_body_only() {
+    let transport = MockTransport::new();
+    transport.ok_empty();
+
+    let client = client(transport.clone());
+    client
+        .change_account_password("old secret", &Password::new("brand new secret").unwrap())
+        .await
+        .unwrap();
+
+    let call = transport.only_call();
+    assert_eq!(call.method, "account.changepassword");
+    assert_eq!(call.params["password"], "old secret");
+    assert_eq!(call.params["newPassword"], "brand new secret");
+    assert!(call
+        .params
+        .as_object()
+        .is_some_and(|params| params.len() == 2));
+    assert!(
+        !call.url.contains("secret"),
+        "url leaked a secret: {}",
+        call.url
+    );
+    for (name, value) in &call.headers {
+        assert!(!value.contains("secret"), "header `{name}` leaked a secret");
+    }
+}
+
+/// Changing the password invalidates the cookie that was established with
+/// the old one, so the client must not keep a session it cannot re-establish.
+#[tokio::test]
+async fn change_password_drops_the_session_after_success() {
+    let transport = MockTransport::new();
+    transport.ok_empty();
+
+    let client = client(transport.clone());
+    assert!(client.is_authenticated());
+    client
+        .change_account_password("old", &Password::new("brand new").unwrap())
+        .await
+        .unwrap();
+
+    assert!(!client.is_authenticated());
+    assert_eq!(transport.call_count(), 1);
+}
+
+/// Without a session the wrapper logs in first, exactly like any other
+/// non-public method.
+#[tokio::test]
+async fn change_password_logs_in_first_when_there_is_no_session() {
+    let transport = MockTransport::new();
+    transport.login("domrobot=abc123");
+    transport.ok_empty();
+
+    let client = anonymous_client(transport.clone());
+    client
+        .change_account_password("test-pass", &Password::new("brand new").unwrap())
+        .await
+        .unwrap();
+
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].method, "account.login");
+    assert_eq!(calls[1].header("cookie"), Some("domrobot=abc123"));
+    assert!(!client.is_authenticated());
+}
+
+/// A refusal means the password is unchanged, so the session is still valid
+/// and has to survive — unlike the success path, which wipes it on purpose.
+#[tokio::test]
+async fn a_rejected_change_keeps_the_session() {
+    let transport = MockTransport::new();
+    transport.api_error(2005, "Parameter value syntax error");
+
+    let client = client(transport.clone());
+    let error = client
+        .change_account_password("old", &Password::new("brand new").unwrap())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), Some(2005));
+    assert!(client.is_authenticated());
+    assert_eq!(transport.call_count(), 1);
+}
+
+/// Once the old password stops working, a replay is not a harmless repeat of a
+/// read: an unconfirmed change is reported as `Uncertain` and never retried.
+#[tokio::test]
+async fn an_uncertain_change_password_is_not_retried() {
+    let transport = MockTransport::new();
+    transport.uncertain_failure("timeout waiting for response");
+    transport.ok_empty();
+
+    let client = client(transport.clone());
+    let error = client
+        .change_account_password("old", &Password::new("brand new").unwrap())
+        .await
+        .unwrap_err();
+
+    assert!(error.is_uncertain());
+    assert!(!error.is_retryable());
+    assert_eq!(transport.call_count(), 1);
+    assert!(client.is_authenticated());
+}
+
+/// The current password goes through the same validator as the new one, and a
+/// blank one is refused before a byte leaves the process.
+#[tokio::test]
+async fn a_blank_current_password_is_refused_before_the_call() {
+    let transport = MockTransport::new();
+    transport.ok_empty();
+
+    let client = client(transport.clone());
+    let error = client
+        .change_account_password("   ", &Password::new("brand new").unwrap())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, Error::Validation { .. }));
+    assert_eq!(transport.call_count(), 0);
+    assert!(client.is_authenticated());
 }
 
 #[tokio::test]

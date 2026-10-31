@@ -12,6 +12,8 @@ use base64::Engine as _;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
+use subtle::ConstantTimeEq as _;
+use zeroize::Zeroize as _;
 
 use crate::{Error, Result};
 
@@ -48,6 +50,25 @@ pub const MAX_DOMAIN_LEN: usize = 253;
 /// assert!(DomainName::parse(&over_limit).is_err());
 /// ```
 pub const MAX_LABEL_LEN: usize = 63;
+
+/// Longest password the crate accepts, in characters.
+///
+/// INWX types its password fields as `token255`, so a longer value cannot be
+/// stored by the API and is rejected before the request is built.
+///
+/// ```
+/// use inwx_client::{MAX_PASSWORD_LEN, Password};
+///
+/// assert_eq!(MAX_PASSWORD_LEN, 255);
+///
+/// let at_limit = Password::new("x".repeat(MAX_PASSWORD_LEN))?;
+/// assert_eq!(at_limit.as_str().chars().count(), MAX_PASSWORD_LEN);
+///
+/// // One character longer is refused without touching the network.
+/// assert!(Password::new("x".repeat(MAX_PASSWORD_LEN + 1)).is_err());
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+pub const MAX_PASSWORD_LEN: usize = 255;
 
 /// A domain name, validated and converted to its ASCII (punycode) form.
 ///
@@ -1005,6 +1026,152 @@ impl Serialize for AuthCode {
     }
 }
 
+/// A new account password: validated, redacted everywhere it could be
+/// printed, and wiped from memory when it is dropped.
+///
+/// Unlike [`AuthCode`] a password may contain spaces and non-ASCII
+/// characters, so only emptiness and control characters are rejected; the
+/// value is stored exactly as given (a leading or trailing space is part of
+/// the secret, not padding). `Debug` and `Display` print `<redacted>` so a
+/// password can never reach a log line, comparisons run in constant time, and
+/// [`Zeroize`](zeroize::Zeroize) plus the `Drop` implementation overwrite the
+/// bytes instead of leaving them in freed memory.
+///
+/// There is deliberately **no** `Deserialize`: a secret is an input, and
+/// parsing one back out of a response would let a server plant a credential.
+///
+/// ```
+/// use inwx_client::Password;
+///
+/// let password = Password::new("p4ss wörd")?;
+/// assert_eq!(password.as_str(), "p4ss wörd");
+/// assert_eq!(format!("{password:?}"), "Password(<redacted>)");
+/// assert_eq!(password.to_string(), "<redacted>");
+///
+/// // Fail closed: an empty or blank secret is never accepted.
+/// assert!(Password::new("").is_err());
+/// assert!(Password::new("   ").is_err());
+/// assert!(Password::new("no\nnewlines").is_err());
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Clone)]
+pub struct Password(String);
+
+impl Password {
+    /// Validates a password without changing it.
+    ///
+    /// Whitespace is only inspected to decide whether the value is blank; it
+    /// is never trimmed away, because a space inside a password is part of it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the value is blank, longer than
+    /// [`MAX_PASSWORD_LEN`] characters, or contains a control character.
+    ///
+    /// ```
+    /// use inwx_client::Password;
+    ///
+    /// let password = Password::new("  kept  ")?;
+    /// assert_eq!(password.as_str(), "  kept  ");
+    /// assert!(Password::new("x".repeat(256)).is_err());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    pub fn new(raw: impl Into<String>) -> Result<Self> {
+        let raw = raw.into();
+        if raw.trim().is_empty() {
+            return Err(Error::validation("password", "must not be empty"));
+        }
+        let length = raw.chars().count();
+        if length > MAX_PASSWORD_LEN {
+            return Err(Error::validation(
+                "password",
+                format!("must be at most {MAX_PASSWORD_LEN} characters, got {length}"),
+            ));
+        }
+        if raw.chars().any(char::is_control) {
+            return Err(Error::validation(
+                "password",
+                "must not contain control characters",
+            ));
+        }
+        Ok(Self(raw))
+    }
+
+    /// The password as sent on the wire.
+    ///
+    /// Keep the returned `&str` short-lived: it borrows the buffer that
+    /// `Drop` wipes.
+    ///
+    /// ```
+    /// use inwx_client::Password;
+    /// assert_eq!(Password::new("s3cret")?.as_str(), "s3cret");
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Password {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Password(<redacted>)")
+    }
+}
+
+impl fmt::Display for Password {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<redacted>")
+    }
+}
+
+impl FromStr for Password {
+    type Err = Error;
+
+    fn from_str(input: &str) -> Result<Self> {
+        Self::new(input)
+    }
+}
+
+/// Constant time, so comparing two passwords cannot leak how far apart they
+/// are through an early return.
+impl PartialEq for Password {
+    fn eq(&self, other: &Self) -> bool {
+        bool::from(self.0.as_bytes().ct_eq(other.0.as_bytes()))
+    }
+}
+
+impl Eq for Password {}
+
+impl Serialize for Password {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl zeroize::Zeroize for Password {
+    /// Overwrites the secret and leaves an empty password behind.
+    ///
+    /// ```
+    /// use inwx_client::Password;
+    /// use zeroize::Zeroize;
+    ///
+    /// let mut password = Password::new("s3cret")?;
+    /// password.zeroize();
+    /// assert!(password.as_str().is_empty());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl Drop for Password {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 /// A point in time for the parameters INWX types as `timestamp`
 /// (`2004-05-23T14:25:10`, ISO-8601).
 ///
@@ -1652,5 +1819,110 @@ mod tests {
         assert!(odd.id.is_none());
         assert!(odd.flag.is_none());
         assert_eq!(odd.names.len(), 0);
+    }
+
+    #[test]
+    fn password_keeps_the_value_verbatim() {
+        // A space is part of a secret, so nothing is trimmed, and unlike an
+        // auth code a password may contain spaces and non-ASCII characters.
+        for allowed in ["  kept  ", "p4ss wörd", "x"] {
+            let password = Password::new(allowed).unwrap();
+            assert_eq!(password.as_str(), allowed);
+        }
+    }
+
+    #[test]
+    fn password_rejects_blank_and_control_characters() {
+        for blank in ["", " ", "  \n "] {
+            let error = Password::new(blank).unwrap_err();
+            let Error::Validation { field, message } = error else {
+                panic!("expected a validation error, got {error}");
+            };
+            assert_eq!(field, "password");
+            assert_eq!(message, "must not be empty");
+        }
+
+        for control in ["no\nnewline", "no\ttab", "no\0nul"] {
+            let error = Password::new(control).unwrap_err();
+            let Error::Validation { field, message } = error else {
+                panic!("expected a validation error, got {error}");
+            };
+            assert_eq!(field, "password");
+            assert_eq!(message, "must not contain control characters");
+        }
+    }
+
+    #[test]
+    fn password_enforces_the_length_limit() {
+        let at_limit = Password::new("x".repeat(MAX_PASSWORD_LEN)).unwrap();
+        assert_eq!(at_limit.as_str().chars().count(), MAX_PASSWORD_LEN);
+
+        let over_limit_input = "x".repeat(MAX_PASSWORD_LEN + 1);
+        let error = Password::new(over_limit_input.clone()).unwrap_err();
+        let Error::Validation { field, message } = error else {
+            panic!("expected a validation error, got {error}");
+        };
+        assert_eq!(field, "password");
+        assert_eq!(
+            message,
+            format!(
+                "must be at most {MAX_PASSWORD_LEN} characters, got {}",
+                over_limit_input.chars().count()
+            )
+        );
+
+        // The limit counts characters, not bytes, so a multi-byte secret is
+        // measured the way the API measures it.
+        assert!(Password::new("ö".repeat(MAX_PASSWORD_LEN)).is_ok());
+        assert!(Password::new("ö".repeat(MAX_PASSWORD_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn password_redacts_itself_in_debug_and_display() {
+        let password = Password::new("s3cret").unwrap();
+        assert_eq!(format!("{password:?}"), "Password(<redacted>)");
+        assert_eq!(password.to_string(), "<redacted>");
+        assert!(!format!("{password:?}").contains("s3cret"));
+        assert!(!password.to_string().contains("s3cret"));
+    }
+
+    #[test]
+    fn password_equality_compares_values() {
+        let left = Password::new("s3cret").unwrap();
+        assert_eq!(left, Password::new("s3cret").unwrap());
+        assert_eq!(left, left.clone());
+        assert_ne!(left, Password::new("s3creu").unwrap());
+        assert_ne!(left, Password::new("s3cret ").unwrap());
+    }
+
+    #[test]
+    fn password_parses_from_str() {
+        assert_eq!(
+            "s3cret".parse::<Password>().unwrap(),
+            Password::new("s3cret").unwrap()
+        );
+        assert!("".parse::<Password>().is_err());
+    }
+
+    #[test]
+    fn password_serializes_as_a_plain_string() {
+        let password = Password::new("s3cret").unwrap();
+        assert_eq!(
+            serde_json::to_value(&password).unwrap(),
+            Value::String("s3cret".into())
+        );
+    }
+
+    #[test]
+    fn password_can_be_zeroized_on_demand() {
+        use zeroize::Zeroize;
+
+        let mut password = Password::new("s3cret").unwrap();
+        assert_eq!(password.as_str(), "s3cret");
+        password.zeroize();
+        assert_eq!(password.as_str(), "");
+        // Wiping twice must not resurrect anything nor abort.
+        password.zeroize();
+        assert_eq!(password.as_str(), "");
     }
 }
