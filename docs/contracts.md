@@ -587,3 +587,39 @@ guess about an endpoint's existence.
   `message.*`, `news.list`, `nichandle.list`, `pdf.*`) are modelled since
   issue #22; `authinfo2.*` was re-checked against the page in issue #54. See the
   sections above for what is still unverified about the rest.
+
+## 0.2.x — diagnostics (`src/diagnostics.rs`)
+
+Source: <https://account.inwx.com/en/help/apidoc/f/ch02s09.html> — ch02 §2.9,
+the `domain` object, the same page as `domain.create` and `domain.info`.
+
+| Method | Wrapper | Parameters sent | Output table |
+| --- | --- | --- | --- |
+| `domain.log` | `DomainLogQuery` → `domain_log` | `domain` (required), `page` (int, starts at 1), `pagelimit` (int), `dateFrom`/`dateTo` (datetime) | not recorded |
+| `domain.stats` | `domain_stats` | `domain` (optional; omit it for the whole account) | not recorded |
+| `domain.getRules` | `tld_rules` | `tld` (one label, punycode, no leading dot) | not recorded |
+| `domain.getTldGroups` | `tld_groups` | — | not recorded |
+
+"not recorded" is literal: the `resData` field lists of these four methods were
+not written down here with a `Table 2.NNN` anchor, and there is no live call to
+check them against, so no number is invented. The consequence lives in the types
+rather than in a comment: every response field is optional, a result set arrives
+either as a JSON array or as the numerically keyed object INWX produces for a
+one-entry set, `domain.stats` additionally answers with a flat object that puts
+each counter under its own key, and unknown fields are kept in `extra` instead
+of being dropped.
+
+Validation before the wire: `domain` is a `DomainName` (punycode, 253/63 label
+rules, no control characters), the `TLD` of `domain.getRules` goes through the
+same normalisation and is refused above `MAX_LABEL_LEN` (63) bytes or when it
+contains a dot, `page` must be at least 1, and `pagelimit` must be between 1 and
+`MAX_PAGE_LIMIT`. `MAX_PAGE_LIMIT` (1 000) is the crate's own bound, not a
+documented one — `pagelimit` is a plain `int` and no maximum is recorded for it
+here — and the cap keeps a mistyped `100_000` from asking for a response nobody
+can hold.
+`dateTo` must be strictly after `dateFrom` — an empty window is a mistake, not
+a query.
+
+These four are read-only, so they sit outside the `Irreversible` acknowledgement
+that the write commands require, and they are idempotent, so they are retried on
+a transient failure like any other read.

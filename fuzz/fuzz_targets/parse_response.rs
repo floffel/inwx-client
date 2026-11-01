@@ -8,11 +8,11 @@
 
 use inwx_client::{
     AccountRole, AccountRoleEntry, Application, ApplicationCheckResult, ApplicationType,
-    AuthInfo2Order, AuthInfo2OrderResult, AuthInfo2PriceQuote, Contact,
+    AuthInfo2Order, AuthInfo2OrderResult, AuthInfo2PriceQuote, ClientHoldResult, Contact,
     ContactVerificationSettings, Customer, CustomerDownload, DataExport, DnsRecord, DocumentEntry,
-    DomainCheck, DomainInfo, DownloadedDocument, HostCheckResult, HostRecord, Message, NewsItem,
-    NicHandle, PdfFile, PdfHandle, PolledMessage, RecordType, RpcResponse, ZoneInfo,
-    ClientHoldResult,
+    DomainCheck, DomainInfo, DomainLog, DomainLogEntry, DomainRule, DomainStat, DomainStats,
+    DownloadedDocument, HostCheckResult, HostRecord, Message, NewsItem, NicHandle, PdfFile,
+    PdfHandle, PolledMessage, RecordType, RpcResponse, TldGroup, TldGroupList, TldRules, ZoneInfo,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -61,6 +61,16 @@ fuzz_target!(|data: &[u8]| {
         let _ = serde_json::from_value::<PdfHandle>(payload.clone());
         let _ = serde_json::from_value::<PdfFile>(payload.clone()).map(|file| file.bytes());
         // Account roles (#74): the row model and the role vocabulary inside it.
+        // The diagnostics reads answer with a list, an indexed map or a flat
+        // object, so all three shapes reach the same decoder.
+        let _ = serde_json::from_value::<DomainLog>(payload.clone());
+        let _ = serde_json::from_value::<DomainLogEntry>(payload.clone());
+        let _ = serde_json::from_value::<DomainStat>(payload.clone());
+        let _ = serde_json::from_value::<DomainStats>(payload.clone());
+        let _ = serde_json::from_value::<DomainRule>(payload.clone());
+        let _ = serde_json::from_value::<TldGroup>(payload.clone());
+        let _ = serde_json::from_value::<TldGroupList>(payload.clone());
+        let _ = serde_json::from_value::<TldRules>(payload.clone());
         let _ = serde_json::from_value::<AccountRoleEntry>(payload.clone());
         let _ = serde_json::from_value::<Vec<AccountRoleEntry>>(payload.clone());
 

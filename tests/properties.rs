@@ -958,3 +958,156 @@ fn decode_every_price_row(payload: &Value) {
         .map(|change| change.is_increase().unwrap_or(false) || change.price_type().is_some());
     let _ = serde_json::from_value::<Vec<PriceChange>>(payload.clone());
 }
+
+// ---------------------------------------- 0.2.x diagnostics (issue #14)
+
+use inwx_client::{
+    DomainLog, DomainLogEntry, DomainLogQuery, DomainRule, DomainStat, DomainStats, TldGroup,
+    TldGroupList, TldRules, MAX_PAGE_LIMIT,
+};
+
+/// A `TLD`-shaped timestamp string, valid in every month.
+fn timestamps() -> impl Strategy<Value = Timestamp> {
+    (2000u16..2100, 1u8..13, 1u8..29, 0u8..24, 0u8..60, 0u8..60).prop_map(
+        |(year, month, day, hour, minute, second)| {
+            Timestamp::parse(&format!(
+                "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}"
+            ))
+            .unwrap()
+        },
+    )
+}
+
+/// Arbitrary JSON, shallow enough to stay cheap and deep enough to reach the
+/// nested shapes the diagnostics answers can take.
+fn json_values() -> impl Strategy<Value = Value> {
+    let leaf = prop_oneof![
+        Just(Value::Null),
+        any::<bool>().prop_map(Value::Bool),
+        any::<i64>().prop_map(Value::from),
+        any::<f64>().prop_map(Value::from),
+        "\\PC{0,12}".prop_map(Value::String),
+    ];
+    let keys = "[A-Za-z_][A-Za-z0-9_]{0,8}";
+    leaf.prop_recursive(3, 24, 4, move |inner| {
+        prop_oneof![
+            proptest::collection::vec(inner.clone(), 0..4).prop_map(Value::Array),
+            proptest::collection::vec((keys, inner), 0..4).prop_map(|entries| {
+                let mut map = serde_json::Map::new();
+                for (key, value) in entries {
+                    map.insert(key, value);
+                }
+                Value::Object(map)
+            }),
+        ]
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// `with_page` accepts exactly pages from 1 and limits up to
+    /// `MAX_PAGE_LIMIT`, and rejects everything else without panicking.
+    #[test]
+    fn log_pages_follow_the_documented_window(
+        page in 0u32..(MAX_PAGE_LIMIT + 2),
+        limit in 0u32..(MAX_PAGE_LIMIT + 2),
+    ) {
+        let query = DomainLogQuery::new(DomainName::parse("example.com").unwrap());
+        let accepted = page >= 1 && (1..=MAX_PAGE_LIMIT).contains(&limit);
+        let built = query.with_page(page, limit);
+        prop_assert_eq!(built.is_ok(), accepted);
+        if let Ok(built) = built {
+            let params = built.params();
+            prop_assert_eq!(params["page"].as_u64(), Some(u64::from(page)));
+            prop_assert_eq!(params["pagelimit"].as_u64(), Some(u64::from(limit)));
+            prop_assert_eq!(params["domain"].as_str(), Some("example.com"));
+        }
+    }
+
+    /// A range is accepted exactly when it spans at least one second.
+    #[test]
+    fn log_ranges_need_a_positive_span(
+        from in timestamps(),
+        to in timestamps(),
+    ) {
+        let query = DomainLogQuery::new(DomainName::parse("example.com").unwrap());
+        let accepted = to.as_str() > from.as_str();
+        let built = query.with_range(from.clone(), to.clone());
+        prop_assert_eq!(built.is_ok(), accepted);
+        if let Ok(built) = built {
+            let params = built.params();
+            prop_assert_eq!(params["dateFrom"].as_str(), Some(from.as_str()));
+            prop_assert_eq!(params["dateTo"].as_str(), Some(to.as_str()));
+        }
+    }
+
+    /// Every diagnostics decoder survives any payload, and the derived helpers
+    /// agree with the fields they read.
+    #[test]
+    fn diagnostics_decodes_never_panic(payload in json_values()) {
+        if let Ok(log) = serde_json::from_value::<DomainLog>(payload.clone()) {
+            prop_assert_eq!(log.len(), log.entries.len());
+            prop_assert_eq!(log.is_empty(), log.entries.is_empty());
+            prop_assert_eq!(
+                log.has_more(),
+                log.count.is_some_and(|count| i64::try_from(log.len()).unwrap_or(i64::MAX) < count)
+            );
+            for entry in &log.entries {
+                let _ = entry.occurred_at();
+            }
+        }
+        if let Ok(stats) = serde_json::from_value::<DomainStats>(payload.clone()) {
+            prop_assert_eq!(stats.len(), stats.stats.len());
+            prop_assert_eq!(stats.is_empty(), stats.stats.is_empty());
+            if let Some(name) = stats.stats.first().and_then(|stat| stat.name.as_deref()) {
+                prop_assert!(stats.find(name).is_some());
+            }
+            for stat in &stats.stats {
+                let _ = (stat.count, stat.amount, &stat.text);
+            }
+        }
+        if let Ok(rules) = serde_json::from_value::<TldRules>(payload.clone()) {
+            prop_assert_eq!(rules.len(), rules.rules.len());
+            prop_assert_eq!(rules.is_empty(), rules.rules.is_empty());
+            if let Some(name) = rules.rules.first().and_then(|rule| rule.name.as_deref()) {
+                prop_assert!(rules.find(name).is_some());
+            }
+            for rule in &rules.rules {
+                let _ = (rule.integer(), rule.number(), rule.flag());
+            }
+        }
+        if let Ok(groups) = serde_json::from_value::<TldGroupList>(payload.clone()) {
+            prop_assert_eq!(groups.len(), groups.groups.len());
+            prop_assert_eq!(groups.is_empty(), groups.groups.is_empty());
+            if let Some(name) = groups.groups.first().and_then(|group| group.name.as_deref()) {
+                prop_assert!(groups.find(name).is_some());
+            }
+            for group in &groups.groups {
+                prop_assert_eq!(group.tld_count(), group.tlds.len());
+                prop_assert_eq!(group.is_empty(), group.tlds.is_empty());
+                if let Some(tld) = group.tlds.first() {
+                    prop_assert!(group.contains(tld));
+                }
+            }
+        }
+        // The single-entry shapes only have to not panic.
+        let _ = serde_json::from_value::<DomainLogEntry>(payload.clone());
+        let _ = serde_json::from_value::<DomainStat>(payload.clone());
+        let _ = serde_json::from_value::<DomainRule>(payload.clone());
+        let _ = serde_json::from_value::<TldGroup>(payload);
+    }
+
+    /// A decoded entry keeps whatever date text arrived, and only converts a
+    /// well-formed one to a timestamp.
+    #[test]
+    fn log_entry_dates_stay_verbatim(date in "\\PC{0,25}") {
+        let entry: DomainLogEntry =
+            serde_json::from_value(serde_json::json!({ "date": date.clone() })).unwrap();
+        prop_assert_eq!(entry.date.as_deref(), Some(date.as_str()));
+        prop_assert_eq!(
+            entry.occurred_at().is_some(),
+            Timestamp::parse(&date).is_ok()
+        );
+    }
+}

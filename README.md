@@ -84,6 +84,7 @@ Every method below is implemented against the published INWX API documentation
 | DynDNS | `dyndns.changepassword`, `check`, `create`, `delete`, `info`, `list`, `log`, `updateRecord`; `dyndnssubscription.create`, `cancel`, `list`, `listProducts` | usernames restricted to the documented 5–42 characters |
 | Accounting | `accounting.accountBalance`, `creditLogById`, `getInvoice`, `getPreviewInvoice`, `getReceipt`, `getstatement`, `listInvoices`, `lockedFunds`, `log`, `refund`, `sendbypost` | PDFs decoded from base64 (`Document::pdf_bytes`); `refund` needs the acknowledgement |
 | Contacts | `contact.create`, `contact.info`, `contact.list`, `contact.update`, `contact.delete` | documented field lengths and country codes enforced |
+| Diagnostics | `domain.log`, `domain.stats`, `domain.getRules`, `domain.getTldGroups` | read-only: why an action was rejected and what a `TLD` requires |
 | Prices | `domain.getPrices`, `domain.getdomainprice` | `f64` quotes, not amounts to sum |
 | Reseller: applications | `application.check`, `create`, `delete`, `info`, `list`, `update` | types are validated tokens, not a frozen enum; a check needs a selector, an update needs a change |
 | Reseller: customers | `customer.info`, `update`, `delete`, `contactverificationsettingsinfo`, `contactverificationsettingsupdate`, `listdownloads`, `requestdataexport` | e-mail, country code and address lengths checked; the data export is what copies personal data out |

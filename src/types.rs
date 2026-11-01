@@ -317,7 +317,7 @@ impl<'de> Deserialize<'de> for Hostname {
 }
 
 /// Shared label validation for [`DomainName`] and [`Hostname`].
-fn validate_dns_name(field: &'static str, ascii: &str, require_dot: bool) -> Result<()> {
+pub(crate) fn validate_dns_name(field: &'static str, ascii: &str, require_dot: bool) -> Result<()> {
     if ascii.is_empty() {
         return Err(Error::validation(field, "must not be empty"));
     }

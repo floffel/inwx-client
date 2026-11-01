@@ -1288,3 +1288,54 @@ fn password_surface_redacts_compares_and_wipes() {
     assert!(Password::new("a\u{0}b").is_err());
     assert!(Password::new("a\nb").is_err());
 }
+
+#[test]
+fn domain_read_helpers_read_every_scalar_shape() {
+    // Numbers, numeric strings, non-numeric strings and non-scalars all reach
+    // a defined answer from the flat `domain.stats` shape.
+    let stats: inwx_client::DomainStats = serde_json::from_str(
+        r#"{"totalDomains":"12","totalAmount":"108.50","state":"active",
+            "plain":7,"flagged":true,"nested":{"a":1},"badCount":"many"}"#,
+    )
+    .unwrap();
+    assert_eq!(stats.counter("totalDomains"), Some(12));
+    assert_eq!(stats.counter("plain"), Some(7));
+    assert_eq!(stats.counter("badCount"), None);
+    assert_eq!(stats.counter("flagged"), None);
+    assert_eq!(stats.counter("nested"), None);
+    assert_eq!(stats.amount_for("totalAmount"), Some(108.5));
+    assert_eq!(stats.amount_for("nested"), None);
+    assert_eq!(stats.text_for("state"), Some("active"));
+    assert_eq!(stats.text_for("plain"), None);
+    // Lookup ignores case, surrounding whitespace and a leading dot.
+    assert_eq!(stats.counter(" TotalDomains "), Some(12));
+    assert_eq!(stats.counter(".totaldomains"), Some(12));
+
+    // A flag value in any of the four spellings, and one that is not a flag.
+    for (raw, expected) in [
+        ("1", Some(true)),
+        ("TRUE", Some(true)),
+        (" yes ", Some(true)),
+        ("on", Some(true)),
+        ("0", Some(false)),
+        ("no", Some(false)),
+        ("OFF", Some(false)),
+        ("01", None),
+    ] {
+        let rule: inwx_client::DomainRule =
+            serde_json::from_str(&format!(r#"{{"value":"{raw}"}}"#)).unwrap();
+        assert_eq!(rule.flag(), expected, "{raw:?}");
+    }
+
+    // Timestamps that are not timestamps, and the absent case.
+    let blank: inwx_client::DomainLogEntry = serde_json::from_str("{}").unwrap();
+    assert!(blank.occurred_at().is_none());
+    let odd: inwx_client::DomainLogEntry = serde_json::from_str(r#"{"date":1700000000}"#).unwrap();
+    assert_eq!(odd.date.as_deref(), Some("1700000000"));
+    assert!(odd.occurred_at().is_none());
+
+    // A group with a single `TLD` string is still a one-element list.
+    let group: inwx_client::TldGroup = serde_json::from_str(r#"{"tld":"de"}"#).unwrap();
+    assert!(group.contains("de"));
+    assert!(!group.contains("at"));
+}
