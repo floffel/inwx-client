@@ -97,9 +97,22 @@ pub const MAX_PASSWORD_LEN: usize = 255;
 /// ```
 /// use inwx_client::DomainName;
 ///
-/// for bad in ["", " ", "localhost", "exa mple.com", "-bad.com", "bad-.com", "a..b"] {
+/// assert_eq!(DomainName::parse("a.com.")?.as_str(), "a.com");
+/// for bad in [
+///     "",
+///     " ",
+///     ".",
+///     "localhost",
+///     "exa mple.com",
+///     "-bad.com",
+///     "bad-.com",
+///     "a..",
+///     "a..b",
+///     "a.com..",
+/// ] {
 ///     assert!(DomainName::parse(bad).is_err(), "{bad:?} should be rejected");
 /// }
+/// # Ok::<(), inwx_client::Error>(())
 /// ```
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DomainName(String);
@@ -118,7 +131,7 @@ impl DomainName {
     ///
     /// [`Error::Validation`] when the name is not a syntactically valid domain.
     pub fn parse(input: &str) -> Result<Self> {
-        let trimmed = input.trim().trim_end_matches('.');
+        let trimmed = input.trim().strip_suffix('.').unwrap_or(input.trim());
         let ascii = idna::domain_to_ascii(trimmed).map_err(|error| {
             Error::validation(
                 "domain",
@@ -253,7 +266,7 @@ impl Hostname {
     /// is empty or exceeds [`MAX_LABEL_LEN`], a label starts or ends with a
     /// hyphen, or contains a character outside `[a-z0-9-]`.
     pub fn parse(input: &str) -> Result<Self> {
-        let trimmed = input.trim().trim_end_matches('.');
+        let trimmed = input.trim().strip_suffix('.').unwrap_or(input.trim());
         let ascii = idna::domain_to_ascii(trimmed).map_err(|error| {
             Error::validation(
                 "hostname",
