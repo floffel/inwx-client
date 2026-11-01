@@ -8,6 +8,7 @@ use serde_json::{json, Map, Value};
 
 use crate::client::InwxClient;
 use crate::error::{Error, Result};
+use crate::pagination::{self, Listing, Page, Pages, Pagination};
 use crate::transport::Transport;
 use crate::types::{de, DomainName, Hostname, Period, RenewalMode};
 
@@ -247,6 +248,38 @@ impl DomainListPage {
     pub fn has_more(&self) -> bool {
         self.count
             .is_some_and(|count| i64::try_from(self.domains.len()).unwrap_or(i64::MAX) < count)
+    }
+}
+
+/// The page rules [`Pages`] needs to walk `domain.list`.
+///
+/// ```
+/// use inwx_client::{DomainListPage, Page};
+///
+/// let page: DomainListPage = serde_json::from_str(
+///     r#"{"count":9,"domain":[{"domain":"a.de"},{"domain":"b.de"}]}"#,
+/// )?;
+/// assert_eq!(page.total(), Some(9));
+/// assert_eq!(page.len(), 2);
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+impl Page for DomainListPage {
+    type Item = DomainInfo;
+
+    fn total(&self) -> Option<i64> {
+        self.count
+    }
+
+    fn len(&self) -> usize {
+        self.domains.len()
+    }
+
+    fn truncate_to(&mut self, len: usize) {
+        self.domains.truncate(len);
+    }
+
+    fn into_items(self) -> Vec<DomainInfo> {
+        self.domains
     }
 }
 
@@ -847,6 +880,66 @@ impl DomainListQuery {
     }
 }
 
+/// The `domain.list` command, ready to be walked page by page with
+/// [`Pages`].
+///
+/// The query's own `page`/`pagelimit` are overridden by the walker — a walk
+/// owns its cursor.
+///
+/// ```
+/// use inwx_client::{DomainListing, DomainListQuery, Listing};
+///
+/// let listing = DomainListing::new(DomainListQuery::new().with_filter("example"));
+/// assert_eq!(<DomainListing as Listing>::METHOD, "domain.list");
+/// let params = listing.params(3, 50);
+/// assert_eq!(params["domain"][0], "example");
+/// assert_eq!(params["page"], 3);
+/// assert_eq!(params["pagelimit"], 50);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DomainListing {
+    query: DomainListQuery,
+}
+
+impl DomainListing {
+    /// The listing for one filter.
+    ///
+    /// ```
+    /// use inwx_client::{DomainListing, DomainListQuery, Listing};
+    ///
+    /// let listing = DomainListing::new(DomainListQuery::new().with_status(["ok"]));
+    /// assert_eq!(listing.params(1, 10)["status"][0], "ok");
+    /// assert_eq!(DomainListing::default().params(1, 10)["status"], serde_json::Value::Null);
+    /// ```
+    #[must_use]
+    pub fn new(query: DomainListQuery) -> Self {
+        Self { query }
+    }
+
+    /// The filter the walk is using.
+    ///
+    /// ```
+    /// use inwx_client::{DomainListing, DomainListQuery};
+    ///
+    /// let query = DomainListQuery::new().with_filter("acme");
+    /// assert_eq!(DomainListing::new(query.clone()).query(), &query);
+    /// ```
+    #[must_use]
+    pub fn query(&self) -> &DomainListQuery {
+        &self.query
+    }
+}
+
+impl Listing for DomainListing {
+    type Page = DomainListPage;
+
+    const METHOD: &'static str = "domain.list";
+
+    fn params(&self, page: u32, page_size: u32) -> Value {
+        pagination::with_paging(self.query.params(), page, page_size)
+    }
+}
+
 /// A manual renewal (`domain.renew`).
 ///
 /// The API requires the current expiry date alongside the period, so a renewal
@@ -1318,7 +1411,10 @@ impl<T: Transport> InwxClient<T> {
         serde_json::from_value(data).map_err(Error::from)
     }
 
-    /// Lists the account's domains (`domain.list`).
+    /// Lists one page of the account's domains (`domain.list`).
+    ///
+    /// For more than one page use
+    /// [`InwxClient::list_all_domains`], which walks them.
     ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
@@ -1341,6 +1437,66 @@ impl<T: Transport> InwxClient<T> {
     pub async fn list_domains(&self, query: &DomainListQuery) -> Result<DomainListPage> {
         let data = self.call("domain.list", query.params()).await?;
         serde_json::from_value(data).map_err(Error::from)
+    }
+
+    /// Walks every page of the account's domains (`domain.list`).
+    ///
+    /// [`InwxClient::list_domains`] answers one page; this is the cursor for
+    /// accounts with more domains than fit into one request. The bound in
+    /// `pagination` decides how far the walk goes, and it is checked before the
+    /// first request.
+    ///
+    /// ```
+    /// # use inwx_client::{
+    /// #     DomainListQuery, InwxClient, Pagination, Result,
+    /// #     transport::{Request, Response, Transport},
+    /// # };
+    /// # use std::sync::{Arc, Mutex};
+    /// #[derive(Clone)]
+    /// struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+    ///
+    /// impl Transport for Scripted {
+    ///     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    ///         let body = self.0.lock().unwrap().remove(0);
+    ///         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    ///     }
+    /// }
+    ///
+    /// # async fn demo() -> Result<Vec<String>> {
+    /// let transport = Scripted(Arc::new(Mutex::new(vec![
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"domain":[{"domain":"a.de"},{"domain":"b.de"}]}}"#,
+    ///     r#"{"code":1000,"msg":"ok","resData":{"domain":[{"domain":"c.de"}]}}"#,
+    /// ])));
+    /// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+    /// let names = client
+    ///     .list_all_domains(
+    ///         &DomainListQuery::new().with_filter(".de"),
+    ///         &Pagination::new().with_page_size(2)?,
+    ///     )
+    ///     .collect_all()
+    ///     .await?
+    ///     .iter()
+    ///     .map(|domain| domain.domain.clone())
+    ///     .collect();
+    /// # Ok(names)
+    /// # }
+    /// # assert_eq!(
+    /// #     tokio::runtime::Runtime::new().unwrap().block_on(demo()).unwrap(),
+    /// #     ["a.de", "b.de", "c.de"]
+    /// # );
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The bound is validated when it is built (see
+    /// [`Pagination::with_page_size`]); the walk itself reports the usual
+    /// transport and API errors.
+    pub fn list_all_domains(
+        &self,
+        query: &DomainListQuery,
+        pagination: &Pagination,
+    ) -> Pages<'_, T, DomainListing> {
+        Pages::new(self, DomainListing::new(query.clone()), *pagination)
     }
 
     /// Changes contacts, nameservers, lock or renewal mode (`domain.update`).

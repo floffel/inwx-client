@@ -10,6 +10,7 @@ use serde_json::{json, Map, Value};
 
 use crate::client::InwxClient;
 use crate::error::{Error, Result};
+use crate::pagination::{self, Listing, Page, Pages, Pagination};
 use crate::transport::Transport;
 use crate::types::{de, reject_control_chars, ContactType};
 
@@ -645,6 +646,38 @@ pub struct ContactListPage {
     pub contacts: Vec<Contact>,
 }
 
+/// The page rules [`Pages`] needs to walk `contact.list`.
+///
+/// ```
+/// use inwx_client::{ContactListPage, Page};
+///
+/// let page: ContactListPage = serde_json::from_str(
+///     r#"{"count":4,"contact":[{"roId":991},{"roId":992}]}"#,
+/// )?;
+/// assert_eq!(page.total(), Some(4));
+/// assert_eq!(page.len(), 2);
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+impl Page for ContactListPage {
+    type Item = Contact;
+
+    fn total(&self) -> Option<i64> {
+        self.count
+    }
+
+    fn len(&self) -> usize {
+        self.contacts.len()
+    }
+
+    fn truncate_to(&mut self, len: usize) {
+        self.contacts.truncate(len);
+    }
+
+    fn into_items(self) -> Vec<Contact> {
+        self.contacts
+    }
+}
+
 /// A search + paging for `contact.list`.
 ///
 /// ```
@@ -717,6 +750,64 @@ impl ContactQuery {
             params.insert("pagelimit".to_owned(), json!(limit));
         }
         Value::Object(params)
+    }
+}
+
+/// The `contact.list` command, ready to be walked page by page with
+/// [`Pages`].
+///
+/// The query's own `page`/`pagelimit` are overridden by the walker — a walk
+/// owns its cursor.
+///
+/// ```
+/// use inwx_client::{ContactListing, ContactQuery, Listing};
+///
+/// let listing = ContactListing::new(ContactQuery::new().with_search("Mustermann"));
+/// assert_eq!(<ContactListing as Listing>::METHOD, "contact.list");
+/// let params = listing.params(2, 25);
+/// assert_eq!(params["search"], "Mustermann");
+/// assert_eq!(params["page"], 2);
+/// assert_eq!(params["pagelimit"], 25);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContactListing {
+    query: ContactQuery,
+}
+
+impl ContactListing {
+    /// The listing for one search.
+    ///
+    /// ```
+    /// use inwx_client::{ContactListing, ContactQuery};
+    ///
+    /// let query = ContactQuery::new().with_search("acme");
+    /// assert_eq!(ContactListing::new(query.clone()).query(), &query);
+    /// ```
+    #[must_use]
+    pub fn new(query: ContactQuery) -> Self {
+        Self { query }
+    }
+
+    /// The search the walk is using.
+    ///
+    /// ```
+    /// use inwx_client::{ContactListing, ContactQuery};
+    ///
+    /// assert_eq!(ContactListing::default().query(), &ContactQuery::new());
+    /// ```
+    #[must_use]
+    pub fn query(&self) -> &ContactQuery {
+        &self.query
+    }
+}
+
+impl Listing for ContactListing {
+    type Page = ContactListPage;
+
+    const METHOD: &'static str = "contact.list";
+
+    fn params(&self, page: u32, page_size: u32) -> Value {
+        pagination::with_paging(self.query.params(), page, page_size)
     }
 }
 
@@ -858,7 +949,10 @@ impl<T: Transport> InwxClient<T> {
         serde_json::from_value(contact).map_err(Error::from)
     }
 
-    /// Lists handles (`contact.list`).
+    /// Lists one page of handles (`contact.list`).
+    ///
+    /// For more than one page use
+    /// [`InwxClient::list_all_contacts`], which walks them.
     ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
@@ -880,6 +974,66 @@ impl<T: Transport> InwxClient<T> {
     pub async fn list_contacts(&self, query: &ContactQuery) -> Result<ContactListPage> {
         let data = self.call("contact.list", query.params()).await?;
         serde_json::from_value(data).map_err(Error::from)
+    }
+
+    /// Walks every page of the account's handles (`contact.list`).
+    ///
+    /// [`InwxClient::list_contacts`] answers one page; this is the cursor for
+    /// accounts with more handles than fit into one request. The bound in
+    /// `pagination` decides how far the walk goes, and it is checked before the
+    /// first request.
+    ///
+    /// ```
+    /// # use inwx_client::{
+    /// #     ContactQuery, InwxClient, Pagination, Result,
+    /// #     transport::{Request, Response, Transport},
+    /// # };
+    /// # use std::sync::{Arc, Mutex};
+    /// #[derive(Clone)]
+    /// struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+    ///
+    /// impl Transport for Scripted {
+    ///     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    ///         let body = self.0.lock().unwrap().remove(0);
+    ///         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    ///     }
+    /// }
+    ///
+    /// # async fn demo() -> Result<Vec<i64>> {
+    /// let transport = Scripted(Arc::new(Mutex::new(vec![
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"contact":[{"roId":991},{"roId":992}]}}"#,
+    ///     r#"{"code":1000,"msg":"ok","resData":{"contact":[{"roId":993}]}}"#,
+    /// ])));
+    /// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+    /// let handles = client
+    ///     .list_all_contacts(
+    ///         &ContactQuery::new().with_search("ACME"),
+    ///         &Pagination::new().with_page_size(2)?,
+    ///     )
+    ///     .collect_all()
+    ///     .await?
+    ///     .iter()
+    ///     .filter_map(inwx_client::Contact::handle)
+    ///     .collect();
+    /// # Ok(handles)
+    /// # }
+    /// # assert_eq!(
+    /// #     tokio::runtime::Runtime::new().unwrap().block_on(demo()).unwrap(),
+    /// #     [991, 992, 993]
+    /// # );
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The bound is validated when it is built (see
+    /// [`Pagination::with_page_size`]); the walk itself reports the usual
+    /// transport and API errors.
+    pub fn list_all_contacts(
+        &self,
+        query: &ContactQuery,
+        pagination: &Pagination,
+    ) -> Pages<'_, T, ContactListing> {
+        Pages::new(self, ContactListing::new(query.clone()), *pagination)
     }
 
     /// Updates a handle (`contact.update`).

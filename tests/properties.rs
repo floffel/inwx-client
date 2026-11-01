@@ -4,8 +4,9 @@
 mod common;
 
 use inwx_client::{
-    Credentials, DomainName, Hostname, Period, RecordId, RecordSpec, RecordType, RemoveClientHold,
-    RpcResponse, SetClientHold, MAX_TTL,
+    ContactListing, ContactQuery, Credentials, DomainListQuery, DomainListing, DomainName,
+    Hostname, Listing, Pagination, Period, RecordId, RecordSpec, RecordType, RemoveClientHold,
+    RpcResponse, SetClientHold, ZoneListing, MAX_ITEMS, MAX_PAGES, MAX_PAGE_SIZE, MAX_TTL,
 };
 use proptest::prelude::*;
 use serde_json::Value;
@@ -1109,5 +1110,72 @@ proptest! {
             entry.occurred_at().is_some(),
             Timestamp::parse(&date).is_ok()
         );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+
+    /// The paging limits accept exactly `1..=MAX_*` and nothing else, so the
+    /// boundary pair is covered for every value near the edge.
+    #[test]
+    fn pagination_limits_accept_exactly_their_range(
+        page_size in 0u32..=MAX_PAGE_SIZE + 1,
+        max_pages in 0u32..=MAX_PAGES + 1,
+        max_items in 0usize..=MAX_ITEMS + 1,
+    ) {
+        prop_assert_eq!(
+            Pagination::new().with_page_size(page_size).is_ok(),
+            (1..=MAX_PAGE_SIZE).contains(&page_size)
+        );
+        prop_assert_eq!(
+            Pagination::new().with_max_pages(max_pages).is_ok(),
+            (1..=MAX_PAGES).contains(&max_pages)
+        );
+        prop_assert_eq!(
+            Pagination::new().with_max_items(max_items).is_ok(),
+            (1..=MAX_ITEMS).contains(&max_items)
+        );
+        if let Ok(pagination) = Pagination::new().with_page_size(page_size) {
+            prop_assert_eq!(pagination.page_size(), page_size);
+        }
+        if let Ok(pagination) = Pagination::new().with_max_items(max_items) {
+            prop_assert_eq!(pagination.max_items(), Some(max_items));
+        }
+    }
+
+    /// A walk owns the cursor: whatever the query asked for, the parameters of
+    /// a page carry the walker's page and page size, and keep the filter.
+    #[test]
+    fn a_page_carries_the_cursor_and_keeps_the_filter(
+        page in 1u32..u32::MAX,
+        page_size in 1u32..=MAX_PAGE_SIZE,
+        filter in "[a-z0-9.*-]{0,30}",
+    ) {
+        let listing = DomainListing::new(DomainListQuery::new().with_filter(filter.clone()));
+        let params = listing.params(page, page_size);
+        prop_assert_eq!(params["page"].as_u64().unwrap(), u64::from(page));
+        prop_assert_eq!(params["pagelimit"].as_u64().unwrap(), u64::from(page_size));
+        prop_assert_eq!(params["domain"][0].as_str().unwrap(), filter.as_str());
+
+        let listing = ContactListing::new(ContactQuery::new().with_search(filter.clone()));
+        let params = listing.params(page, page_size);
+        prop_assert_eq!(params["page"].as_u64().unwrap(), u64::from(page));
+        prop_assert_eq!(params["search"].as_str().unwrap(), filter);
+    }
+
+    /// A zone filter is refused exactly when it is empty after trimming, so a
+    /// walk never sends an empty `domain`.
+    #[test]
+    fn a_zone_filter_is_refused_exactly_when_empty(filter in "[a-z*.-]{0,20} {0,3}") {
+        let blank = filter.trim().is_empty();
+        prop_assert_eq!(ZoneListing::with_filter(&filter).is_ok(), !blank);
+        if let Ok(listing) = ZoneListing::with_filter(&filter) {
+            prop_assert_eq!(listing.filter(), Some(filter.trim()));
+            let params = listing.params(3, 7);
+            prop_assert_eq!(params["domain"].as_str().unwrap(), filter.trim());
+            prop_assert_eq!(params["wide"].as_u64().unwrap(), 1);
+            prop_assert_eq!(params["page"].as_u64().unwrap(), 3);
+        }
     }
 }
