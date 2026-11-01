@@ -136,9 +136,12 @@ fn a_client_hold_request_carries_the_longest_name_and_refuses_longer_ones() {
 #[test]
 fn an_empty_label_is_refused_everywhere() {
     assert!(DomainName::parse("a..com").is_err());
+    assert!(DomainName::parse("a..").is_err());
     assert!(DomainName::parse(".com").is_err());
     assert!(DomainName::parse("a.com.").is_ok()); // the root dot is trimmed
+    assert!(DomainName::parse("a.com..").is_err());
     assert!(Hostname::parse("ns1..example.com").is_err());
+    assert!(Hostname::parse("ns1...").is_err());
     assert!(Email::parse("a@.example.com").is_err());
     assert!(ZoneCreate::master(domain("example.com")).is_ok());
 }
