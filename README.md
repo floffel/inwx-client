@@ -326,7 +326,10 @@ cargo +nightly fuzz run parse_response
   pending, error and hostile-shape bodies.
   Since issue #22 that list includes the reseller decoders and the user-input
   parsers they rely on (`ApplicationType`, `DomainName` for an AuthInfo2 order,
-  `DocumentUpload`).
+  `DocumentUpload`). `fuzz/fuzz_targets/parse_types.rs` covers the value parsers
+  that tokenize on their own — `Period`, `RenewalMode`, `ContactType` and
+  `PriceType` — and `tests/fuzz_fixtures.rs` replays its corpus with the exact
+  expected outcome, so CI pins behaviour and not merely the absence of a panic.
 
 ## License
 
