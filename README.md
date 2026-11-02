@@ -20,12 +20,19 @@ inwx-client = "0.2"
 
 ## Quickstart
 
+Start in the free OTE sandbox. `InwxClient::sandbox` sends every command to
+`SANDBOX_BASE_URL` (`https://api.ote.domrobot.com/jsonrpc/`): same command
+surface, no live zone, nothing billed. The record below is written and removed
+again in the sandbox.
+
 ```rust,no_run
-use inwx_client::{DomainName, InwxClient, RecordSpec, ReqwestTransport};
+use inwx_client::{DomainName, InwxClient, RecordSpec, ReqwestTransport, SANDBOX_BASE_URL};
 
 # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
-let client = InwxClient::new(ReqwestTransport::new())
-    .with_credentials("username", std::env::var("INWX_PASSWORD")?)?;
+// Sandbox credentials (an OTE test account), never the production password.
+let client = InwxClient::sandbox(ReqwestTransport::new())
+    .with_credentials("username", std::env::var("INWX_SANDBOX_PASSWORD")?)?;
+assert_eq!(client.base_url(), SANDBOX_BASE_URL);
 
 let domain = DomainName::parse("example.com")?;
 
@@ -33,7 +40,7 @@ let domain = DomainName::parse("example.com")?;
 let check = client.check_domain(&domain).await?;
 println!("available: {}", check.is_available());
 
-// DNS: create, list, update, delete.
+// DNS: create, list, delete — sandbox data only.
 let record = RecordSpec::a("www", "203.0.113.7")?.with_ttl(3600)?;
 let id = client.create_record(&domain, &record).await?;
 
@@ -41,24 +48,29 @@ for existing in client.list_records(&domain).await? {
     println!("{} {} {}", existing.name_or_apex(), existing.record_type, existing.content);
 }
 
+// Destructive step, kept explicit: this removes the record created above.
 client.delete_record(&id).await?;
 # Ok(())
 # }
 ```
 
-The sandbox costs nothing and has the same API surface:
+Production is a deliberate swap, not the next line to uncomment — on
+`api.domrobot.com` the same `create_record` / `delete_record` pair edits a zone
+that is serving traffic:
 
 ```rust,no_run
 # use inwx_client::{InwxClient, ReqwestTransport};
 # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
-let client = InwxClient::sandbox(ReqwestTransport::new())
-    .with_credentials("user", "pass")?;
+let client = InwxClient::new(ReqwestTransport::new())
+    .with_credentials("username", std::env::var("INWX_PASSWORD")?)?;
 # Ok(())
 # }
 ```
 
-Nothing above needs a socket to compile or test: the HTTP layer sits behind the
-`Transport` trait, and the whole test suite drives a scripted mock.
+The examples above need a socket and credentials; the crate itself does not.
+Every command is built and parsed behind the `Transport` trait, and the
+integration tests drive their own scripted transport (`tests/common`) for each
+of them.
 
 ## Listing everything (pagination)
 
