@@ -284,7 +284,11 @@ impl DynDnsAccount {
             ));
         }
         for (index, hostname) in hostnames.iter().enumerate() {
-            if hostnames[..index].contains(hostname) {
+            if hostnames
+                .iter()
+                .take(index)
+                .any(|earlier| earlier == hostname)
+            {
                 return Err(Error::validation(
                     "dyndns.hostname",
                     format!("{hostname} is listed twice"),

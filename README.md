@@ -254,6 +254,11 @@ documented API and were replaced: `domain.cancel` (use `domain.delete` or
 ## Security
 
 * `#![forbid(unsafe_code)]`, `#![deny(missing_docs)]`.
+* Panic-freedom is enforced by the lint gate, not by review: the crate root
+  denies `clippy::unwrap_used`, `clippy::expect_used`, `clippy::panic`,
+  `clippy::todo`, `clippy::unimplemented` and `clippy::indexing_slicing`, and
+  `cargo clippy --all-targets -- -D warnings` runs in CI. The exception is
+  `cfg(test)` only, so a new `unwrap()` in library code fails the build.
 * The password is sent only in the `account.login` body — never in a URL, never
   in a header. Afterwards the opaque session cookie is the only credential on the
   wire. The same holds for `account.changepassword`: the current and the new

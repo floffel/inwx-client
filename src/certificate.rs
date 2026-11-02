@@ -744,7 +744,7 @@ impl CertificateOrder {
             return Err(Error::validation("certificate.san", "must not be empty"));
         }
         for (index, domain) in domains.iter().enumerate() {
-            if domains[..index].contains(domain) {
+            if domains.iter().take(index).any(|earlier| earlier == domain) {
                 return Err(Error::validation(
                     "certificate.san",
                     format!("{domain} is listed twice"),
@@ -1130,7 +1130,7 @@ impl CertificateUpdate {
             return Err(Error::validation("certificate.san", "must not be empty"));
         }
         for (index, domain) in domains.iter().enumerate() {
-            if domains[..index].contains(domain) {
+            if domains.iter().take(index).any(|earlier| earlier == domain) {
                 return Err(Error::validation(
                     "certificate.san",
                     format!("{domain} is listed twice"),

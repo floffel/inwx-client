@@ -18,7 +18,9 @@ Coverage must stay at or above 95 % lines (`cargo llvm-cov --fail-under-lines 95
 ## Rules
 
 - **No `unwrap`/`expect`/`panic!` in library code.** Doctest examples may unwrap; `src/` may not.
-  `#![forbid(unsafe_code)]` and `#![deny(missing_docs)]` stay.
+  `#![forbid(unsafe_code)]` and `#![deny(missing_docs)]` stay, and the crate root denies
+  `clippy::unwrap_used`, `clippy::expect_used`, `clippy::panic`, `clippy::todo`,
+  `clippy::unimplemented` and `clippy::indexing_slicing` (`cfg(test)` is the only allow).
 - **Doctest on every public item**, and a runnable example for every new public type or method.
 - **Tests prove, they do not sample.** Every fix needs: the valid value, the value just inside the
   limit, and the value just outside it. Property tests (`proptest`) for pure functions, a fuzz target
