@@ -563,21 +563,24 @@ impl DnsKey {
             ));
         }
         let tokens = raw.split_whitespace().collect::<Vec<_>>();
-        if tokens.len() < 7 {
+        // One slice pattern instead of a length check plus `tokens[1..]`: the
+        // bound and the field extraction cannot drift apart, so a short record
+        // is an error instead of a panic.
+        let Some([owner, class, kind, flag, protocol, algorithm, _key, ..]) = tokens.get(..) else {
             return Err(Error::validation(
                 "dnssec.dnskey",
                 "needs `<owner> IN DNSKEY <flag> 3 <algorithm> <key>`",
             ));
-        }
-        if !tokens[1].eq_ignore_ascii_case("IN") || !tokens[2].eq_ignore_ascii_case("DNSKEY") {
+        };
+        if !class.eq_ignore_ascii_case("IN") || !kind.eq_ignore_ascii_case("DNSKEY") {
             return Err(Error::validation(
                 "dnssec.dnskey",
                 "the record class and type must be `IN DNSKEY`",
             ));
         }
-        let flag: u16 = tokens[3].parse().map_err(|_| {
-            Error::validation("dnssec.dnskey", format!("{:?} is not a flag", tokens[3]))
-        })?;
+        let flag: u16 = flag
+            .parse()
+            .map_err(|_| Error::validation("dnssec.dnskey", format!("{flag:?} is not a flag")))?;
         let flag = DnssecFlag::from_u16(flag)?;
         if flag != DnssecFlag::ZoneSep {
             return Err(Error::validation(
@@ -585,21 +588,21 @@ impl DnsKey {
                 "only ZONE+SEP keys (flag 257) are accepted by dnssec.adddnskey",
             ));
         }
-        if tokens[4] != "3" {
+        if *protocol != "3" {
             return Err(Error::validation(
                 "dnssec.dnskey",
                 "the protocol must be 3 (DNSSEC)",
             ));
         }
-        let algorithm: u8 = tokens[5].parse().map_err(|_| {
+        let algorithm: u8 = algorithm.parse().map_err(|_| {
             Error::validation(
                 "dnssec.dnskey",
-                format!("{:?} is not an algorithm id", tokens[5]),
+                format!("{algorithm:?} is not an algorithm id"),
             )
         })?;
         Ok(Self {
             raw: raw.to_owned(),
-            owner: tokens[0].to_owned(),
+            owner: owner.to_string(),
             flag,
             algorithm: DnssecAlgorithm::from_u8(algorithm)?,
         })
@@ -722,28 +725,31 @@ impl DsRecord {
             return Err(Error::validation("dnssec.ds", "must not be empty"));
         }
         let tokens = raw.split_whitespace().collect::<Vec<_>>();
-        if tokens.len() < 7 {
+        // One slice pattern for the seven fields: the bound and the extraction
+        // are the same step, so a short record is an error instead of a panic.
+        let Some([_, class, kind, key_tag, algorithm, digest_type, digest, ..]) = tokens.get(..)
+        else {
             return Err(Error::validation(
                 "dnssec.ds",
                 "needs `<owner> IN DS <keytag> <algorithm> <digesttype> <digest>`",
             ));
-        }
-        if !tokens[1].eq_ignore_ascii_case("IN") || !tokens[2].eq_ignore_ascii_case("DS") {
+        };
+        if !class.eq_ignore_ascii_case("IN") || !kind.eq_ignore_ascii_case("DS") {
             return Err(Error::validation(
                 "dnssec.ds",
                 "the record class and type must be `IN DS`",
             ));
         }
-        let key_tag: u16 = tokens[3].parse().map_err(|_| {
-            Error::validation("dnssec.ds", format!("{:?} is not a key tag", tokens[3]))
+        let key_tag: u16 = key_tag
+            .parse()
+            .map_err(|_| Error::validation("dnssec.ds", format!("{key_tag:?} is not a key tag")))?;
+        let algorithm: u8 = algorithm.parse().map_err(|_| {
+            Error::validation("dnssec.ds", format!("{algorithm:?} is not an algorithm"))
         })?;
-        let algorithm: u8 = tokens[4].parse().map_err(|_| {
-            Error::validation("dnssec.ds", format!("{:?} is not an algorithm", tokens[4]))
+        let digest_type: u8 = digest_type.parse().map_err(|_| {
+            Error::validation("dnssec.ds", format!("{digest_type:?} is not a digest type"))
         })?;
-        let digest_type: u8 = tokens[5].parse().map_err(|_| {
-            Error::validation("dnssec.ds", format!("{:?} is not a digest type", tokens[5]))
-        })?;
-        if !tokens[6].chars().all(|c| c.is_ascii_hexdigit()) {
+        if !digest.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(Error::validation(
                 "dnssec.ds",
                 "the digest must be hexadecimal",

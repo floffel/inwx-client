@@ -109,6 +109,12 @@
 //! # Security
 //!
 //! * `#![forbid(unsafe_code)]`, `#![deny(missing_docs)]`.
+//! * Panic-freedom is a lint, not a review habit: `clippy::unwrap_used`,
+//!   `clippy::expect_used`, `clippy::panic`, `clippy::todo`,
+//!   `clippy::unimplemented` and `clippy::indexing_slicing` are denied at the
+//!   crate root, so a new `unwrap()` in library code fails `cargo clippy`
+//!   instead of reaching a Lambda. Tests are the only exception — the allow is
+//!   scoped to `cfg(test)` and cannot leak into the library build.
 //! * Credentials and session cookies are redacted in `Debug` — [`Credentials`]
 //!   prints `<redacted>` for the password, [`InwxClient`] prints only whether a
 //!   session exists.
@@ -151,6 +157,31 @@
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+// Panic-freedom is a gate, not a review habit: the restriction lints are absent
+// from `clippy::all`/`clippy::pedantic`, so without these lines a new `unwrap()`
+// on an API-controlled value would compile and ship.
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::indexing_slicing
+)]
+// Tests may unwrap: a panic in a test is a failure, and the alternative would
+// bury every assertion in a `match`. The allow is scoped to `cfg(test)`, so it
+// cannot leak into the library build.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::indexing_slicing
+    )
+)]
 // `record::RecordSpec` and friends read better than a flattened module.
 #![allow(clippy::module_name_repetitions)]
 

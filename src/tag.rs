@@ -268,7 +268,7 @@ fn validate_ids(field: &'static str, ids: &[i64]) -> Result<()> {
                 format!("domain ids must be positive, got {id}"),
             ));
         }
-        if ids[..index].contains(id) {
+        if ids.iter().take(index).any(|earlier| earlier == id) {
             return Err(Error::validation(
                 field,
                 format!("domain id {id} is listed twice"),

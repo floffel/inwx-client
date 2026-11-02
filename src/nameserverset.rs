@@ -809,7 +809,11 @@ fn validate_nameservers(nameservers: &[Hostname]) -> Result<()> {
         ));
     }
     for (index, nameserver) in nameservers.iter().enumerate() {
-        if nameservers[..index].contains(nameserver) {
+        if nameservers
+            .iter()
+            .take(index)
+            .any(|earlier| earlier == nameserver)
+        {
             return Err(Error::validation(
                 "nameserverset.ns",
                 format!("{nameserver} is listed twice"),

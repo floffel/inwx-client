@@ -391,7 +391,11 @@ impl ZoneCreate {
             ));
         }
         for (index, nameserver) in nameservers.iter().enumerate() {
-            if nameservers[..index].contains(nameserver) {
+            if nameservers
+                .iter()
+                .take(index)
+                .any(|earlier| earlier == nameserver)
+            {
                 return Err(Error::validation(
                     "zone.ns",
                     format!("{nameserver} is listed twice"),
@@ -878,7 +882,11 @@ impl ZoneUpdate {
             ));
         }
         for (index, nameserver) in nameservers.iter().enumerate() {
-            if nameservers[..index].contains(nameserver) {
+            if nameservers
+                .iter()
+                .take(index)
+                .any(|earlier| earlier == nameserver)
+            {
                 return Err(Error::validation(
                     "zone.ns",
                     format!("{nameserver} is listed twice"),

@@ -14,7 +14,7 @@
 //! them.
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::cmp::Ordering;
 
 use crate::client::InwxClient;
@@ -683,12 +683,16 @@ impl<T: Transport> InwxClient<T> {
         limit: u32,
     ) -> Result<PriceList> {
         let limit = validate_page_limit(limit)?;
-        let mut params = json!({ "page": page.max(1), "pagelimit": limit });
+        let mut params = Map::new();
+        params.insert("page".to_owned(), json!(page.max(1)));
+        params.insert("pagelimit".to_owned(), json!(limit));
         let tlds = normalise_tlds(tlds);
         if !tlds.is_empty() {
-            params["tld"] = json!(tlds);
+            params.insert("tld".to_owned(), json!(tlds));
         }
-        let data = self.call("domain.getalldomainprices", params).await?;
+        let data = self
+            .call("domain.getalldomainprices", Value::Object(params))
+            .await?;
         serde_json::from_value(data).map_err(Error::from)
     }
 
@@ -718,14 +722,15 @@ impl<T: Transport> InwxClient<T> {
         price_type: PriceType,
         period: Option<Period>,
     ) -> Result<DomainPriceQuote> {
-        let mut params = json!({
-            "domain": [domain.as_str()],
-            "pricetype": price_type.as_str(),
-        });
+        let mut params = Map::new();
+        params.insert("domain".to_owned(), json!([domain.as_str()]));
+        params.insert("pricetype".to_owned(), json!(price_type.as_str()));
         if let Some(period) = period {
-            params["period"] = json!(period);
+            params.insert("period".to_owned(), json!(period));
         }
-        let data = self.call("domain.getdomainprice", params).await?;
+        let data = self
+            .call("domain.getdomainprice", Value::Object(params))
+            .await?;
         // The documented shape is `resData.domain[0]`; older responses put the
         // quote directly in `resData`, and `domain` may then be the name itself.
         let entry = match data.get("domain") {
@@ -774,14 +779,16 @@ impl<T: Transport> InwxClient<T> {
         tld: Option<&str>,
         order: Option<PriceType>,
     ) -> Result<Vec<ExtraDataRule>> {
-        let mut params = json!({});
+        let mut params = Map::new();
         if let Some(tld) = normalise_tld(tld)? {
-            params["tld"] = json!(tld);
+            params.insert("tld".to_owned(), json!(tld));
         }
         if let Some(order) = order {
-            params["pricetype"] = json!(order.as_str());
+            params.insert("pricetype".to_owned(), json!(order.as_str()));
         }
-        let data = self.call("domain.getextradatarules", params).await?;
+        let data = self
+            .call("domain.getextradatarules", Value::Object(params))
+            .await?;
         Ok(parse_any_rows(
             &data,
             &["extradata", "extradataRules", "rules"],
@@ -820,11 +827,13 @@ impl<T: Transport> InwxClient<T> {
         limit: u32,
     ) -> Result<Vec<PromoCode>> {
         let limit = validate_page_limit(limit)?;
-        let mut params = json!({ "page": page.max(1), "pagelimit": limit });
+        let mut params = Map::new();
+        params.insert("page".to_owned(), json!(page.max(1)));
+        params.insert("pagelimit".to_owned(), json!(limit));
         if let Some(tld) = normalise_tld(tld)? {
-            params["tld"] = json!(tld);
+            params.insert("tld".to_owned(), json!(tld));
         }
-        let data = self.call("domain.getpromos", params).await?;
+        let data = self.call("domain.getpromos", Value::Object(params)).await?;
         Ok(parse_any_rows(&data, &["promo", "promos"]))
     }
 
@@ -861,11 +870,15 @@ impl<T: Transport> InwxClient<T> {
         limit: u32,
     ) -> Result<Vec<PriceChange>> {
         let limit = validate_page_limit(limit)?;
-        let mut params = json!({ "page": page.max(1), "pagelimit": limit });
+        let mut params = Map::new();
+        params.insert("page".to_owned(), json!(page.max(1)));
+        params.insert("pagelimit".to_owned(), json!(limit));
         if let Some(tld) = normalise_tld(tld)? {
-            params["tld"] = json!(tld);
+            params.insert("tld".to_owned(), json!(tld));
         }
-        let data = self.call("domain.pricechanges", params).await?;
+        let data = self
+            .call("domain.pricechanges", Value::Object(params))
+            .await?;
         Ok(parse_any_rows(&data, &["pricechange", "pricechanges"]))
     }
 }

@@ -1784,7 +1784,11 @@ fn validate_nameservers(nameservers: &[Hostname]) -> Result<()> {
         return Err(Error::validation("ns", "must list at least one nameserver"));
     }
     for (index, nameserver) in nameservers.iter().enumerate() {
-        if nameservers[..index].contains(nameserver) {
+        if nameservers
+            .iter()
+            .take(index)
+            .any(|earlier| earlier == nameserver)
+        {
             return Err(Error::validation(
                 "ns",
                 format!("{nameserver} is listed twice"),
