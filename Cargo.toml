@@ -17,10 +17,13 @@ all-features = true
 
 [features]
 default = ["http"]
-http = ["dep:reqwest", "dep:tokio"]
+# `bytes` is only the chunk type of the reqwest adapter; it is already in the
+# tree through reqwest, so this names it instead of copying every chunk.
+http = ["dep:bytes", "dep:reqwest", "dep:tokio"]
 
 [dependencies]
 base64 = "0.22"
+bytes = { version = "1", optional = true }
 # UTS-46 ToASCII with STD3 rules, the hyphen rule and `VerifyDNSLength`: name
 # validation belongs in a maintained IDNA implementation, not in this crate.
 idna = "1"
