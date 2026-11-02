@@ -36,7 +36,7 @@
 //! | Area | Methods |
 //! | --- | --- |
 //! | Session | `account.login`, `account.logout`, `account.check` (implicit), `account.info`, `account.unlock`, `account.changepassword` |
-//! | Domains | `domain.check`, `domain.create`, `domain.info`, `domain.list`, `domain.update`, `domain.renew`, `domain.delete`, `domain.whois`, `domain.setClientHold`, `domain.removeClientHold` |
+//! | Domains | `domain.check`, `domain.create`, `domain.info`, `domain.list`, `domain.update`, `domain.renew`, `domain.delete`, `domain.whois`, `domain.setClientHold`, `domain.removeClientHold`, `domain.setAuthInfo`, `domain.setDomainTransferCode`, `domain.block`, `domain.unblock` |
 //! | Ownership | `domain.transfer`, `domain.trade`, `domain.push`, `domain.restore`, `domain.transfercancel`, `domain.transferOut` |
 //! | DNS records | `nameserver.info` (read), `nameserver.createRecord`, `nameserver.updateRecord`, `nameserver.deleteRecord` |
 //! | Zones | `nameserver.create`, `nameserver.update`, `nameserver.delete`, `nameserver.list`, `nameserver.info`, `nameserver.check`, `nameserver.clone`, `nameserver.export`, `nameserver.exportlist`, `nameserver.exportrecords` |
@@ -117,7 +117,11 @@
 //! * Session cookies and credentials are rejected if they contain control
 //!   characters, so a value cannot smuggle a second header.
 //! * [`AuthCode`] (the EPP transfer code) prints `<redacted>` in `Debug` and
-//!   `Display`; the DynDNS account type redacts its password.
+//!   `Display`, and its length is checked on the caller's string before the
+//!   value is copied; the transfer controls (`domain.setAuthInfo`,
+//!   `domain.setDomainTransferCode`) take it as a typed value, so a code cannot
+//!   be sent unvalidated or leak through an error message. The DynDNS account
+//!   type redacts its password.
 //! * A certificate CSR is refused if it contains a private key: the field takes a
 //!   signing request, and anything else would upload a secret to a third party.
 //! * Retries are bounded (three attempts, exponential backoff) and only apply to
@@ -129,7 +133,8 @@
 //! * A transport failure after the request was written (a timeout, a reset
 //!   mid-response) is [`Error::Uncertain`]: the command may have run. It is
 //!   replayed only for a read-only method ([`is_read_only_method`]), never for a
-//!   mutating one, so a registration cannot be submitted twice.
+//!   mutating one, so a registration cannot be submitted twice and a transfer
+//!   code or a domain block cannot be applied twice.
 //! * [`Password`] (the new password of `account.changepassword`) redacts itself
 //!   in `Debug` and `Display`, compares in constant time, is zeroized when it is
 //!   dropped and has no `Deserialize`: a secret is an input and is never parsed
@@ -212,9 +217,9 @@ pub use document::{
     DocumentEntry, DocumentQuery, DocumentUpload, DownloadedDocument, MAX_DOCUMENT_BYTES,
 };
 pub use domain::{
-    ClientHoldResult, DomainCheck, DomainCreate, DomainInfo, DomainListPage, DomainListQuery,
-    DomainListing, DomainRenew, DomainUpdate, Registration, RemoveClientHold, RenewalResult,
-    SetClientHold,
+    AuthInfoUpdate, ClientHoldResult, DomainCheck, DomainControlResult, DomainCreate, DomainInfo,
+    DomainListPage, DomainListQuery, DomainListing, DomainRenew, DomainUpdate, Registration,
+    RemoveClientHold, RenewalResult, SetClientHold, TransferCodeUpdate,
 };
 pub use dyndns::{
     DynDnsAccount, DynDnsAccountInfo, DynDnsAccountRef, DynDnsCheck, DynDnsCreated, DynDnsLog,
@@ -254,6 +259,7 @@ pub use transport::ReqwestTransport;
 pub use transport::{Response, Transport, TransportStage};
 pub use types::{
     parse_ip, AuthCode, ContactType, DocumentFormat, DomainName, Email, Handle, Hostname, Password,
-    Period, PriceType, RenewalMode, Timestamp, MAX_DOMAIN_LEN, MAX_LABEL_LEN, MAX_PASSWORD_LEN,
+    Period, PriceType, RenewalMode, Timestamp, MAX_AUTH_CODE_LEN, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
+    MAX_PASSWORD_LEN,
 };
 pub use zone::{RecordExport, UrlRedirectType, ZoneCreate, ZoneExport, ZoneType, ZoneUpdate};

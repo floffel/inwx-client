@@ -7,12 +7,13 @@
 #![no_main]
 
 use inwx_client::{
-    AccountRole, AccountRoleEntry, Application, ApplicationCheckResult, ApplicationType,
+    AccountRole, AccountRoleEntry, Application, ApplicationCheckResult, ApplicationType, AuthCode,
     AuthInfo2Order, AuthInfo2OrderResult, AuthInfo2PriceQuote, ClientHoldResult, Contact,
     ContactVerificationSettings, Customer, CustomerDownload, DataExport, DnsRecord, DocumentEntry,
-    DomainCheck, DomainInfo, DomainLog, DomainLogEntry, DomainRule, DomainStat, DomainStats,
-    DownloadedDocument, HostCheckResult, HostRecord, Message, NewsItem, NicHandle, PdfFile,
-    PdfHandle, PolledMessage, RecordType, RpcResponse, TldGroup, TldGroupList, TldRules, ZoneInfo,
+    DomainCheck, DomainControlResult, DomainInfo, DomainLog, DomainLogEntry, DomainRule, DomainStat,
+    DomainStats, DownloadedDocument, HostCheckResult, HostRecord, Message, NewsItem, NicHandle,
+    PdfFile, PdfHandle, PolledMessage, RecordType, RpcResponse, TldGroup, TldGroupList, TldRules,
+    ZoneInfo,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -33,6 +34,8 @@ fuzz_target!(|data: &[u8]| {
         let _ = serde_json::from_value::<ZoneInfo>(payload.clone());
         let _ = serde_json::from_value::<DomainInfo>(payload.clone());
         let _ = serde_json::from_value::<DomainCheck>(payload.clone());
+        let _ = serde_json::from_value::<DomainControlResult>(payload.clone());
+        let _ = serde_json::from_value::<Vec<DomainControlResult>>(payload.clone());
         let _ = serde_json::from_value::<Contact>(payload.clone());
         let _ = serde_json::from_value::<ClientHoldResult>(payload.clone());
         let _ = serde_json::from_value::<Vec<DnsRecord>>(payload.clone());
@@ -97,6 +100,9 @@ fuzz_target!(|data: &[u8]| {
         if let Ok(order_domain) = text.parse::<inwx_client::DomainName>() {
             let _ = AuthInfo2Order::new(order_domain, true).params();
         }
+        // Transfer auth codes are user input too, and the size cap has to hold
+        // against anything at all (issue #60).
+        let _ = AuthCode::new(text);
         let _ = inwx_client::DocumentUpload::new(text, b"x");
         let _ = AccountRole::parse(text);
     }
