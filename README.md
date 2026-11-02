@@ -230,6 +230,7 @@ documentation does not state:
 | Every 0.2.0 write against a live endpoint | **unverified** — no credentials in CI; method names, parameters and datatypes come from the tables in `docs/contracts.md`. |
 | The reseller/partner objects (`application.*`, `customer.*`, `document.*`, `host.*`, `message.*`, `news.list`, `nichandle.list`, `pdf.*`) | **unverified** — added without network access, so chapter 2 §2.3–§2.21 could not be re-read. Request keys follow the spellings the rest of the API uses; every response field is optional and tolerant, so a wrong key costs a `None`. The `Table 2.NNN` numbers in `docs/contracts.md` are derived from the anchors of the earlier sections, not read from the pages. `authinfo2.*` is no longer on this list: issue #54 read ch02s04, so its `domain` request key and its `product`/`net_price`/`price`/`currency`/`message` output fields are from the page (the table numbers there are still derived). |
 | Unicode → punycode | UTS-46 mapping via `idna`, so emoji become punycode and characters the mapping deletes disappear. The ACE form (`DomainName::as_str`) is what is sent, logged and compared. |
+| DNS name validation | delegated to `idna` as well: UTS-46 ToASCII with the STD3 ASCII rules, the hyphen-position rule and `VerifyDNSLength` (63 characters per label, 253 in total). The only rule this crate adds on top is the INWX-specific one — a domain needs a dot, i.e. a TLD. |
 
 Two methods the predecessor implementation called do **not** exist in the
 documented API and were replaced: `domain.cancel` (use `domain.delete` or
@@ -281,6 +282,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --no-deps --all-features
 cargo llvm-cov --no-default-features --summary-only --fail-under-lines 95
 cargo +nightly fuzz run parse_response
+cargo +nightly fuzz run parse_name
 ```
 
 * **Unit** — permissive scalars, cookie collection, retry backoff, record and
@@ -294,10 +296,10 @@ cargo +nightly fuzz run parse_response
   Every 0.2.0 method has its own recording test asserting the method name and the
   exact parameters (`tests/zones.rs`, `tests/ownership.rs`, `tests/services.rs`,
   `tests/certificates.rs`, `tests/reseller.rs`); `tests/limits.rs` is the boundary
-  matrix (63/64-byte label, 253/254-byte name, empty label, TTL bounds, IDN form,
-  per-type record
-  values, CSR size, auth-code and email shapes) and `tests/coverage.rs` calls the
-  `Display`/`FromStr`/serde impls and error branches that doctests exercise —
+  matrix (63/64-byte label, 253/254-byte name, empty label, hyphen edges, STD3
+  alphabet, TTL bounds, IDN form, per-type record values, CSR size, auth-code and
+  email shapes) and `tests/coverage.rs` calls the `Display`/`FromStr`/serde impls
+  and error branches that doctests exercise —
   `cargo llvm-cov` does not count doctests.
   `tests/pagination.rs` is the pagination matrix: every page of each of the three
   list commands, filters carried on every request, the cursor owned by the walk,
@@ -314,6 +316,8 @@ cargo +nightly fuzz run parse_response
   that upper-cases and reparses up to exactly 64 characters, a document file name
   is never a path or an empty string, an uploaded body survives base64, a host
   takes 1 to 13 addresses, ids are positive and paging stays one-based.
+  Accepted domain names and host names are canonical on the first pass, so
+  re-parsing them is a no-op.
 * **Coverage** — 98.5 % lines / 99.4 % functions without the `http` feature. CI
   builds the request whose action it names; the paging limits accept exactly
   `1..=MAX_PAGE_SIZE` / `1..=MAX_ITEMS` / `1..=MAX_PAGES` and nothing else; a page
@@ -330,6 +334,11 @@ cargo +nightly fuzz run parse_response
   that tokenize on their own — `Period`, `RenewalMode`, `ContactType` and
   `PriceType` — and `tests/fuzz_fixtures.rs` replays its corpus with the exact
   expected outcome, so CI pins behaviour and not merely the absence of a panic.
+  `fuzz/fuzz_targets/parse_name.rs` feeds arbitrary bytes through the name
+  parsers: nothing may panic, and every accepted name must already be canonical
+  (ASCII, lower-case, in length, no empty label, no edge hyphen) and survive a
+  second pass unchanged, with `DomainName` and `Hostname` agreeing wherever the
+  canonical form has a TLD.
 
 ## License
 

@@ -21,6 +21,8 @@ http = ["dep:reqwest", "dep:tokio"]
 
 [dependencies]
 base64 = "0.22"
+# UTS-46 ToASCII with STD3 rules, the hyphen rule and `VerifyDNSLength`: name
+# validation belongs in a maintained IDNA implementation, not in this crate.
 idna = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
