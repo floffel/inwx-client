@@ -991,7 +991,7 @@ impl<T: Transport> InwxClient<T> {
     /// Changes the account password (`account.changepassword`).
     ///
     /// `current` is the password the account uses today; `new` is a
-    /// [`Password`], so it is validated on the way in, redacted in every
+    /// [`Password`](crate::types::Password), so it is validated on the way in, redacted in every
     /// `Debug`/`Display` rendering and wiped from memory when the caller drops
     /// it. Both secrets travel in the request body only, never in a URL or a
     /// header.
