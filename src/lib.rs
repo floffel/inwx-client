@@ -12,6 +12,8 @@
 //!
 //! # Quickstart
 //!
+//! Against the real endpoint, with the default `http` feature:
+//!
 //! ```no_run
 //! # #[cfg(feature = "http")]
 //! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
@@ -27,6 +29,69 @@
 //! let record = RecordSpec::a("www", "203.0.113.7")?.with_ttl(3600)?;
 //! let id = client.create_record(&domain, &record).await?;
 //! client.delete_record(&id).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! The same sequence runs without a socket and without the `http` feature: the
+//! HTTP layer is the one-method [`Transport`] trait, so a mock that answers each
+//! JSON-RPC method from a canned body is all it takes. This example is compiled
+//! and executed in every feature configuration (`cargo test --doc`, including
+//! `--no-default-features`), so the login, the parsed answer and the mock path
+//! are checked rather than only described:
+//!
+//! ```
+//! use inwx_client::transport::{Request, Response, Transport};
+//! use inwx_client::{DomainName, InwxClient, RecordSpec, Result};
+//! use serde_json::{json, Value};
+//!
+//! /// Answers each JSON-RPC method from a canned envelope — no socket involved.
+//! struct Scripted;
+//!
+//! impl Transport for Scripted {
+//!     async fn execute(&self, request: Request<'_>) -> Result<Response> {
+//!         let method = serde_json::from_slice::<Value>(request.body)
+//!             .ok()
+//!             .and_then(|body| body.get("method")?.as_str().map(str::to_owned));
+//!         let (headers, payload) = match method.as_deref() {
+//!             // The login answer has to carry the session cookie; that header
+//!             // is the only credential on every later call.
+//!             Some("account.login") => (
+//!                 vec![("Set-Cookie".to_owned(), "domrobot=token; Path=/".to_owned())],
+//!                 json!({ "code": 1000, "msg": "Login successful" }),
+//!             ),
+//!             Some("domain.check") => (
+//!                 Vec::new(),
+//!                 json!({
+//!                     "code": 1000,
+//!                     "msg": "ok",
+//!                     "resData": { "domain": [{ "domain": "example.com", "avail": 1, "status": "free" }] },
+//!                 }),
+//!             ),
+//!             Some("nameserver.createRecord") => (
+//!                 Vec::new(),
+//!                 json!({ "code": 1000, "msg": "ok", "resData": { "id": "4711" } }),
+//!             ),
+//!             _ => (Vec::new(), json!({ "code": 1000, "msg": "ok" })),
+//!         };
+//!         Ok(Response::new(200, headers, payload.to_string().into_bytes()))
+//!     }
+//! }
+//!
+//! # fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+//! # tokio::runtime::Runtime::new()?.block_on(async {
+//! let client = InwxClient::new(Scripted).with_credentials("user", "secret")?;
+//!
+//! let domain = DomainName::parse("example.com")?;
+//! let check = client.check_domain(&domain).await?;
+//! assert!(check.is_available());
+//!
+//! let record = RecordSpec::a("www", "203.0.113.7")?;
+//! let id = client.create_record(&domain, &record).await?;
+//! assert_eq!(id.as_str(), "4711");
+//! client.delete_record(&id).await?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! # })?;
 //! # Ok(())
 //! # }
 //! ```
@@ -94,8 +159,9 @@
 //!   they are set, the last page is cut at the bound, and
 //!   [`Pages::bound_reached`] says whether the listing ended or the walk stopped
 //!   early.
-//! * **No socket needed.** The HTTP layer sits behind [`Transport`]; the test
-//!   suite and the examples in these docs drive a scripted mock.
+//! * **No socket needed.** The HTTP layer sits behind [`Transport`]; the
+//!   quickstart above runs end to end against an inline scripted transport, and
+//!   the test suite drives the same mock for every command.
 //! * **Cap what arrives.** [`read_capped_body`] bounds a response before it is
 //!   buffered, so a huge answer or a header that lies about its size costs an
 //!   error instead of memory.
