@@ -611,6 +611,23 @@ be swapped at a call site. Both are mutations and stay out of
 `READ_ONLY_METHODS`, so an `Error::Uncertain` (timeout or reset after the
 request was written) is handed back after exactly one attempt instead of being
 replayed; `domain_info` decides whether the hold is already in place.
+## Rules the API does not define
+
+Not shapes from the documentation, but limits this crate imposes anyway:
+
+- **Response size cap (`src/transport.rs`).** One answer may not exceed
+  `DEFAULT_MAX_RESPONSE_BYTES` (4 MiB). INWX does not bound a body, so without a
+  cap a misbehaving or compromised endpoint decides how much memory the process
+  allocates before the parser sees a byte. The limit is checked against
+  `Content-Length` before the body is read and against a running total while it
+  streams, so a header that lies too small still fails at the chunk that crosses
+  it. Documented answers sit far below the cap — a record list or an export page
+  is tens to hundreds of kilobytes — and `nameserver.export` with `zonefile=true`
+  (Table 2.202, the whole zone in one `text` field) is the one shape that could
+  plausibly need more; that caller builds its transport with
+  `ReqwestTransport::with_max_response_bytes`. Crossing the cap is
+  `Error::ResponseTooLarge`, terminal on purpose: the command behind that
+  response may already have been executed, so repeating it duplicates work.
 
 ## Unverified
 

@@ -179,6 +179,45 @@ pub enum Error {
         /// Body, truncated to 512 characters.
         body: String,
     },
+
+    /// A response body crossed the transport's size cap, so it was discarded
+    /// before the JSON parser ever saw a byte.
+    ///
+    /// The reqwest transport refuses a body larger than
+    /// [`DEFAULT_MAX_RESPONSE_BYTES`](crate::DEFAULT_MAX_RESPONSE_BYTES) — or
+    /// whatever `ReqwestTransport::with_max_response_bytes` was given — by
+    /// honouring `Content-Length` first and then watching a running total while
+    /// the body streams in, so a lying header still fails fast. The message
+    /// carries sizes only: a body from a misbehaving endpoint must never reach a
+    /// log line.
+    ///
+    /// Terminal by design, not retryable. The cap is a property of the answer,
+    /// not a transient fault, so another attempt would fetch the same oversized
+    /// body; worse, the command may already have been executed server-side
+    /// before the read was cut short, and repeating a non-idempotent request
+    /// duplicates the work. Raise the cap deliberately or let the call fail.
+    ///
+    /// ```
+    /// use inwx_client::{Error, DEFAULT_MAX_RESPONSE_BYTES};
+    ///
+    /// let err = Error::ResponseTooLarge {
+    ///     limit: 4 * 1024 * 1024,
+    ///     observed: Some(4 * 1024 * 1024 + 1),
+    /// };
+    /// assert_eq!(err.to_string(), "response body exceeds the 4194304-byte cap");
+    /// assert!(!err.is_retryable());
+    /// assert!(DEFAULT_MAX_RESPONSE_BYTES >= 4 * 1024 * 1024);
+    /// ```
+    #[error("response body exceeds the {limit}-byte cap")]
+    ResponseTooLarge {
+        /// Cap that was crossed, in bytes.
+        limit: u64,
+        /// How much of the body is accounted for: the declared
+        /// `Content-Length` when the header alone broke the cap, otherwise the
+        /// bytes read before the abort (the true body may be larger — reading
+        /// stopped). `None` when no size was ever measured.
+        observed: Option<u64>,
+    },
 }
 
 impl Error {
@@ -308,7 +347,9 @@ impl Error {
     ///
     /// Transport failures carry their own flag; an API error is retryable only
     /// for `2300` (object pending transfer), everything else is terminal.
-    /// Validation, decoding and authentication errors are never retryable. An
+    /// Validation, decoding and authentication errors are never retryable, and
+    /// neither is [`Error::ResponseTooLarge`]: a body over the cap is a property
+    /// of the answer, and the command behind it may already have run. An
     /// [`Error::Http`] is classified by its status: `429`, `502`, `503` and
     /// `504` are retryable, all other non-2xx statuses (`400`, `401`, `403`,
     /// `404`, …) are terminal.
@@ -353,6 +394,10 @@ impl Error {
             Self::Transport { retryable, .. } => *retryable,
             Self::Api { code, .. } => *code == 2300,
             Self::Http { status, .. } => is_transient_status(*status),
+            // Terminal by design — validation, decoding, authentication, HTTP,
+            // a missing field, and `ResponseTooLarge` (a body over the cap is a
+            // property of the answer, and the command behind it may already have
+            // run, so repeating it would duplicate work).
             _ => false,
         }
     }

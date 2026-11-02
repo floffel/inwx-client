@@ -177,6 +177,14 @@ Every method below is implemented against the published INWX API documentation
   written is `Error::Uncertain`: the API may already have run the command. It is
   replayed only for a read-only method (`is_read_only_method`), never for a
   mutating one, so a registration cannot be submitted twice.
+* **Capped answers.** A response body may not exceed 4 MiB
+  (`DEFAULT_MAX_RESPONSE_BYTES`, per transport
+  `ReqwestTransport::with_max_response_bytes`). The cap is checked against
+  `Content-Length` before the body is read and against a running total while it
+  streams, so neither a huge answer nor a header that lies about its size can
+  decide how much memory the process allocates. Crossing the cap is
+  `Error::ResponseTooLarge`, terminal on purpose: the command behind that
+  response may already have run, and repeating it would duplicate the work.
 
 ## Feature flags
 
@@ -304,7 +312,10 @@ cargo +nightly fuzz run parse_response
   `tests/certificates.rs`, `tests/reseller.rs`); `tests/limits.rs` is the boundary
   matrix (63/64-byte label, 253/254-byte name, empty label, TTL bounds, IDN form,
   per-type record
-  values, CSR size, auth-code and email shapes) and `tests/coverage.rs` calls the
+  values, CSR size, auth-code and email shapes), `tests/response_size.rs` the
+  response-cap matrix (a body exactly at the cap and one byte over, with and
+  without `Content-Length`, an empty body at a zero cap, and no retry after a
+  cap error), and `tests/coverage.rs` calls the
   `Display`/`FromStr`/serde impls and error branches that doctests exercise —
   `cargo llvm-cov` does not count doctests.
   `tests/pagination.rs` is the pagination matrix: every page of each of the three
@@ -317,7 +328,9 @@ cargo +nightly fuzz run parse_response
   input; accepted enum values round-trip through `Display`/`FromStr`; accepted
   emails and timestamps round-trip; zone params survive a JSON round trip;
   `RecordSet` never accepts an apex CNAME; an `Irreversible` acknowledgement only
-  builds the request whose action it names.
+  builds the request whose action it names; the response cap decides on the
+  declared and the observed size alone, and never reads more than one chunk past
+  the cap.
   The reseller objects add their own invariants: an application type is a token
   that upper-cases and reparses up to exactly 64 characters, a document file name
   is never a path or an empty string, an uploaded body survives base64, a host
