@@ -519,7 +519,10 @@ Anchored between `hosting` (ends 2.188) and `nameserver` (starts 2.193).
 `poll_message` accepts all three shapes the answer can take: the message flat in
 `resData`, the message nested under `message`, and an empty mailbox as an empty
 object (`PolledMessage::message == None`). An empty mailbox is not an error;
-`message_id()` on it is.
+`message_id()` on it is. A flat answer is recognised by the keys `Message`
+decodes — `messageId` as well as `id` — so a counted answer that carries neither
+shape, or two shapes that name different messages, is an `Error::UnexpectedAnswer`
+instead of an empty mailbox.
 
 ### `news.list` (`src/news.rs`)
 

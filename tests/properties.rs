@@ -1331,3 +1331,57 @@ proptest! {
         }
     }
 }
+
+// ------------------------------------------------------- mailbox poll (#137)
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// `messageId` is the key `Message` documents, so a flat poll answer spelled
+    /// that way must arrive — and every documented shape has to decode to the
+    /// same message id, whatever the spelling.
+    #[test]
+    fn a_polled_message_keeps_its_id_in_every_documented_shape(
+        id in 1i64..i64::MAX,
+        title in any_text(),
+    ) {
+        let shapes = [
+            serde_json::json!({ "count": 1, "messageId": id, "title": title.clone() }),
+            serde_json::json!({ "count": 1, "id": id, "title": title.clone() }),
+            serde_json::json!({ "message": { "messageId": id, "title": title.clone() } }),
+            serde_json::json!({
+                "count": 1,
+                "messageId": id,
+                "message": { "messageId": id, "title": title.clone() },
+            }),
+        ];
+        for payload in shapes {
+            let polled: PolledMessage = serde_json::from_value(payload.clone())
+                .map_err(|error| TestCaseError::fail(format!("{payload}: {error}")))?;
+            prop_assert_eq!(polled.message_id().ok(), Some(id));
+        }
+    }
+
+    /// A count that promises a message never turns into an empty mailbox: with
+    /// no key that names a message the answer is refused, whatever unknown keys
+    /// travel beside it.
+    #[test]
+    fn a_counted_poll_answer_is_refused_instead_of_empty(
+        count in 1i64..10_000,
+        extra in proptest::collection::vec("[a-z]{0,6}", 0..4),
+    ) {
+        let mut data = serde_json::Map::new();
+        data.insert("count".to_owned(), serde_json::json!(count));
+        for key in extra {
+            data.insert(format!("xUnknown{key}"), serde_json::json!("x"));
+        }
+        let refused = serde_json::from_value::<PolledMessage>(Value::Object(data));
+        prop_assert!(refused.is_err(), "count {count} decoded to {refused:?}");
+
+        // Just outside: the same shape with nothing waiting is an empty mailbox.
+        let empty = serde_json::from_value::<PolledMessage>(serde_json::json!({ "count": 0 }))
+            .map_err(|error| TestCaseError::fail(error.to_string()))?;
+        prop_assert!(empty.message.is_none());
+        prop_assert!(empty.message_id().is_err());
+    }
+}
