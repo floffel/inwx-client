@@ -482,7 +482,12 @@ impl Error {
     /// Whether this is a rejected session rather than a rejected command.
     ///
     /// The client uses this to decide whether a single re-login is worth it;
-    /// callers can use it to prompt for new credentials.
+    /// callers can use it to prompt for new credentials. That decision is only
+    /// sound for errors a login can cure, so this covers the API codes
+    /// `2200`–`2202` and [`Error::Authentication`]. [`Error::NotAuthenticated`]
+    /// is deliberately excluded: it means the client has neither a session nor
+    /// credentials, so a re-login cannot succeed and the caller has to supply
+    /// credentials first — see [`Error::is_missing_credentials`].
     ///
     /// ```
     /// use inwx_client::{Error, RpcResponse};
@@ -490,15 +495,39 @@ impl Error {
     /// let response = RpcResponse::parse(br#"{"code":2200,"msg":"Authentication error"}"#)?;
     /// let err = response.into_result().unwrap_err();
     /// assert!(err.is_authentication());
+    ///
+    /// // Nothing to log in with: a configuration gap, not an expired session.
+    /// assert!(!Error::NotAuthenticated.is_authentication());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     #[must_use]
     pub fn is_authentication(&self) -> bool {
         match self {
             Self::Api { code, .. } => matches!(code, 2200..=2202),
-            Self::Authentication { .. } | Self::NotAuthenticated => true,
+            Self::Authentication { .. } => true,
             _ => false,
         }
+    }
+
+    /// Whether the client never had credentials to authenticate with.
+    ///
+    /// [`Error::NotAuthenticated`] is returned when an authenticated method is
+    /// called on a client that has neither a session nor credentials to open
+    /// one, so the fix is to configure credentials rather than to retry or to
+    /// log in again. Not part of [`Error::is_authentication`] for that reason.
+    ///
+    /// ```
+    /// use inwx_client::Error;
+    ///
+    /// assert!(Error::NotAuthenticated.is_missing_credentials());
+    /// // An expired session is a different problem: a login can cure it.
+    /// assert!(!Error::Authentication { message: "session expired".into() }
+    ///     .is_missing_credentials());
+    /// assert!(!Error::validation("domain", "empty").is_missing_credentials());
+    /// ```
+    #[must_use]
+    pub fn is_missing_credentials(&self) -> bool {
+        matches!(self, Self::NotAuthenticated)
     }
 
     /// Whether this came from argument validation, before any request was sent.
@@ -655,5 +684,52 @@ mod tests {
             !Error::unexpected_answer("nameserver.check", "details", "expected an array")
                 .is_retryable()
         );
+    }
+
+    /// Only errors a login can cure are reported as re-login-able; a missing
+    /// credential is a different, terminal condition.
+    #[test]
+    fn relogin_classification_stops_at_the_credential_gap() {
+        let api = |code| Error::Api {
+            code,
+            message: String::from("Authentication error"),
+            reason_code: None,
+            reason: None,
+            details: Vec::new(),
+        };
+
+        // Just outside and just inside both ends of the 2200..=2202 window.
+        assert!(!api(2199).is_authentication());
+        assert!(api(2200).is_authentication());
+        assert!(api(2201).is_authentication());
+        assert!(api(2202).is_authentication());
+        assert!(!api(2203).is_authentication());
+
+        // A recovery that could not log in again stays re-login-able: the
+        // caller may hold fresh credentials.
+        assert!(Error::Authentication {
+            message: String::from("no cookie"),
+        }
+        .is_authentication());
+
+        // The one error a login cannot cure.
+        assert!(!Error::NotAuthenticated.is_authentication());
+        assert!(Error::NotAuthenticated.is_missing_credentials());
+
+        // Everything else is neither.
+        for error in [
+            api(2300),
+            api(2203),
+            Error::validation("domain", "empty"),
+            Error::transport("dns lookup failed"),
+            Error::uncertain("timeout"),
+            Error::MissingField {
+                method: "domain.info",
+                field: "resData.id",
+            },
+        ] {
+            assert!(!error.is_authentication());
+            assert!(!error.is_missing_credentials());
+        }
     }
 }
