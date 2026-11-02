@@ -12,30 +12,45 @@
 //!
 //! # Quickstart
 //!
-//! Against the real endpoint, with the default `http` feature:
+//! Point the first run at the free OTE sandbox, not at a production account:
+//! [`InwxClient::sandbox`] sends every command to [`SANDBOX_BASE_URL`]
+//! (`https://api.ote.domrobot.com/jsonrpc/`), which exposes the same command
+//! surface but owns no live zone and bills nothing. Production is the opt-in
+//! swap [`InwxClient::new`] — the code below is identical there, and the same
+//! `create_record` / `delete_record` pair then edits a real zone. The
+//! production client itself lives at [`DEFAULT_BASE_URL`].
 //!
 //! ```no_run
 //! # #[cfg(feature = "http")]
 //! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
-//! use inwx_client::{DomainName, InwxClient, RecordSpec, ReqwestTransport};
+//! use inwx_client::{DomainName, InwxClient, RecordSpec, ReqwestTransport, SANDBOX_BASE_URL};
 //!
-//! let client = InwxClient::new(ReqwestTransport::new())
-//!     .with_credentials("username", std::env::var("INWX_PASSWORD")?)?;
+//! // Sandbox credentials (an OTE test account), never the production password.
+//! let client = InwxClient::sandbox(ReqwestTransport::new())
+//!     .with_credentials("username", std::env::var("INWX_SANDBOX_PASSWORD")?)?;
+//! assert_eq!(client.base_url(), SANDBOX_BASE_URL);
 //!
 //! let domain = DomainName::parse("example.com")?;
 //! let check = client.check_domain(&domain).await?;
 //! println!("available: {}", check.is_available());
 //!
+//! // Sandbox data only: the record lands in the OTE zone, not in a live one.
 //! let record = RecordSpec::a("www", "203.0.113.7")?.with_ttl(3600)?;
 //! let id = client.create_record(&domain, &record).await?;
+//!
+//! // Destructive step, kept explicit: this removes the record created above.
 //! client.delete_record(&id).await?;
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! The same sequence runs without a socket and without the `http` feature: the
-//! HTTP layer is the one-method [`Transport`] trait, so a mock that answers each
-//! JSON-RPC method from a canned body is all it takes. This example is compiled
+//! The base URL is a property of the client, not of the transport, so one
+//! [`ReqwestTransport`] serves both endpoints and a swap only changes which
+//! zone the commands hit — see [Endpoints and the sandbox](#endpoints-and-the-sandbox).
+//!
+//! Nothing above runs in a test, because it needs a socket and credentials. The
+//! same sequence without either is the block below: a scripted [`Transport`]
+//! that answers each JSON-RPC method from a canned body. This example is compiled
 //! and executed in every feature configuration (`cargo test --doc`, including
 //! `--no-default-features`), so the login, the parsed answer and the mock path
 //! are checked rather than only described:
@@ -80,6 +95,8 @@
 //!
 //! # fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 //! # tokio::runtime::Runtime::new()?.block_on(async {
+//! // `Scripted` never opens a socket, so the default (production) base URL
+//! // above is inert here — nothing is sent anywhere.
 //! let client = InwxClient::new(Scripted).with_credentials("user", "secret")?;
 //!
 //! let domain = DomainName::parse("example.com")?;
@@ -160,8 +177,9 @@
 //!   [`Pages::bound_reached`] says whether the listing ended or the walk stopped
 //!   early.
 //! * **No socket needed.** The HTTP layer sits behind [`Transport`]; the
-//!   quickstart above runs end to end against an inline scripted transport, and
-//!   the test suite drives the same mock for every command.
+//!   quickstart above runs end to end against an inline scripted transport in
+//!   every feature configuration, and the integration tests in `tests/` drive
+//!   their own scripted transport (`tests/common`) for every command.
 //! * **Cap what arrives.** [`read_capped_body`] bounds a response before it is
 //!   buffered, so a huge answer or a header that lies about its size costs an
 //!   error instead of memory.
@@ -171,6 +189,23 @@
 //! * `http` (default) — pulls in `reqwest` (rustls) and `tokio/time` and
 //!   provides [`ReqwestTransport`]. Without it the crate is pure request
 //!   building + response parsing: no TLS stack, no async runtime, no socket.
+//!
+//! # Endpoints and the sandbox
+//!
+//! * [`InwxClient::sandbox`] — [`SANDBOX_BASE_URL`],
+//!   `https://api.ote.domrobot.com/jsonrpc/`. The free OTE sandbox: same
+//!   commands, same answers, no live zone and no charge. This is where a
+//!   mutating call belongs until the flow is understood.
+//! * [`InwxClient::new`] — [`DEFAULT_BASE_URL`],
+//!   `https://api.domrobot.com/jsonrpc/`. Every mutating command there is real:
+//!   a registration costs money, a `delete_record` removes a record from a zone
+//!   that is serving traffic.
+//! * [`InwxClient::with_base_url`] — anything else (a proxy, a local test
+//!   server).
+//!
+//! The endpoint travels inside each [`Request`](transport::Request), so one
+//! transport serves all three; picking production is one constructor call, and
+//! nothing in the client asks twice before writing.
 //!
 //! # Security
 //!
