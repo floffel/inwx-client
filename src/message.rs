@@ -197,14 +197,22 @@ impl MessageAck {
 
 /// One message from the mailbox, or `None` when it is empty.
 ///
+/// A flat answer is read by the same keys [`Message`] decodes, so the
+/// documented `messageId` spelling counts as well as `id`; an answer that
+/// counts a message without carrying one is refused instead of being reported
+/// as an empty mailbox.
+///
 /// ```
 /// use inwx_client::PolledMessage;
 ///
 /// let empty: PolledMessage = serde_json::from_str(r#"{"count":0}"#)?;
 /// assert!(empty.message.is_none());
 ///
-/// let one: PolledMessage = serde_json::from_str(r#"{"id":3,"title":"Ready"}"#)?;
+/// let one: PolledMessage = serde_json::from_str(r#"{"messageId":3,"title":"Ready"}"#)?;
 /// assert_eq!(one.message.as_ref().and_then(|m| m.id), Some(3));
+///
+/// let lost: Result<PolledMessage, _> = serde_json::from_str(r#"{"count":2}"#);
+/// assert!(lost.is_err());
 /// # Ok::<(), serde_json::Error>(())
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -244,16 +252,54 @@ impl PolledMessage {
 /// Reads a `message.poll` answer.
 ///
 /// INWX sends the message either flat in `resData` or nested under `message`,
-/// and an empty mailbox as an empty object; all three shapes are accepted.
+/// and an empty mailbox as an empty object; all three shapes are accepted. A
+/// message is recognised by the keys [`Message`] itself decodes — a nested
+/// `message` object, or a flat `messageId`/`id` — so the spelling the struct
+/// and the API documentation use is never missed.
+///
+/// A `count` that promises a message the answer does not carry is an
+/// [`Error::UnexpectedAnswer`], not an empty mailbox: the message would stay
+/// unacknowledged in the queue forever, because every caller skips a `None` and
+/// only the discarded `count` remembered it. Two shapes that name different
+/// messages are refused for the same reason — one of them would be dropped
+/// silently.
 fn poll_from(data: &Value) -> Result<PolledMessage> {
     let count = data.get("count").and_then(crate::types::opt_i64_value);
-    let raw = data
-        .get("message")
-        .filter(|nested| nested.is_object())
-        .cloned()
-        .or_else(|| data.get("id").map(|_| data.clone()));
+    let nested = data.get("message").filter(|node| node.is_object());
+    let flat_id = data.get("messageId").or_else(|| data.get("id"));
+    let raw = match (nested, flat_id) {
+        (Some(nested), Some(flat_id)) => {
+            // Both shapes in one answer: accepted only while they agree, so a
+            // message id that disagrees can never be picked by accident.
+            let nested_id = nested
+                .get("messageId")
+                .or_else(|| nested.get("id"))
+                .and_then(crate::types::opt_i64_value);
+            if nested_id != crate::types::opt_i64_value(flat_id) {
+                return Err(Error::unexpected_answer(
+                    "message.poll",
+                    "message",
+                    "the nested `message` and the flat `messageId`/`id` name different messages",
+                ));
+            }
+            Some(nested.clone())
+        }
+        (Some(nested), None) => Some(nested.clone()),
+        (None, Some(_)) => Some(data.clone()),
+        (None, None) => {
+            if matches!(count, Some(waiting) if waiting > 0) {
+                return Err(Error::unexpected_answer(
+                    "message.poll",
+                    "message",
+                    "the answer counts waiting messages but carries neither a `message` object \
+                     nor a `messageId`/`id`",
+                ));
+            }
+            None
+        }
+    };
     let message = raw
-        .map(|body| serde_json::from_value(body).map_err(Error::from))
+        .map(|body| serde_json::from_value::<Message>(body).map_err(Error::from))
         .transpose()?;
     Ok(PolledMessage { count, message })
 }
@@ -286,11 +332,15 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// [`Error::Json`] when the answer does not fit the model, plus the usual
-    /// transport and API errors.
+    /// [`Error::Json`] when the answer does not fit the model,
+    /// [`Error::UnexpectedAnswer`] when it counts a waiting message but carries
+    /// none, plus the usual transport and API errors.
     pub async fn poll_message(&self) -> Result<PolledMessage> {
         let data = self.call("message.poll", json!({})).await?;
-        serde_json::from_value(data).map_err(Error::from)
+        // Not through the `Deserialize` impl: that one can only report a serde
+        // error, and a counted answer without a message has to surface as the
+        // typed [`Error::UnexpectedAnswer`] a caller can match on.
+        poll_from(&data)
     }
 
     /// Acknowledges a message and removes it from the queue (`message.ack`).
@@ -357,6 +407,70 @@ mod tests {
         assert_eq!(flat.message, nested.message);
         assert_eq!(nested.count, Some(2));
         assert_eq!(flat.message_id().unwrap(), 4);
+    }
+
+    #[test]
+    fn a_flat_answer_spelled_message_id_is_read() {
+        let polled: PolledMessage =
+            serde_json::from_value(json!({"messageId": 12, "title": "Ready"})).unwrap();
+        assert_eq!(polled.message_id().unwrap(), 12);
+        assert_eq!(
+            polled.message.as_ref().and_then(|m| m.title.as_deref()),
+            Some("Ready")
+        );
+        // The alias `id` is the just-inside neighbour of the same shape.
+        let alias: PolledMessage = serde_json::from_value(json!({"id": 12})).unwrap();
+        assert_eq!(alias.message_id().unwrap(), 12);
+    }
+
+    #[test]
+    fn a_null_message_does_not_hide_a_flat_id() {
+        let polled: PolledMessage = serde_json::from_value(json!({
+            "count": 1,
+            "message": Value::Null,
+            "messageId": 7,
+        }))
+        .unwrap();
+        assert_eq!(polled.count, Some(1));
+        assert_eq!(polled.message_id().unwrap(), 7);
+    }
+
+    #[test]
+    fn a_counted_answer_without_a_message_is_refused() {
+        let err = serde_json::from_value::<PolledMessage>(json!({"count": 1})).unwrap_err();
+        assert!(err.to_string().contains("unexpected `message`"), "{err}");
+        // Just inside: a count of zero is an empty mailbox, not an error.
+        let empty: PolledMessage = serde_json::from_value(json!({"count": 0})).unwrap();
+        assert_eq!(empty.count, Some(0));
+        assert!(empty.message.is_none());
+    }
+
+    #[test]
+    fn two_shapes_may_repeat_one_id_but_not_disagree() {
+        let agreeing: PolledMessage = serde_json::from_value(json!({
+            "count": 1,
+            "messageId": 4,
+            "message": {"messageId": "4", "title": "Ready"},
+        }))
+        .unwrap();
+        assert_eq!(agreeing.message_id().unwrap(), 4);
+
+        let against = serde_json::from_value::<PolledMessage>(json!({
+            "message": {"id": 4},
+            "messageId": 5,
+        }))
+        .unwrap_err();
+        assert!(
+            against.to_string().contains("name different messages"),
+            "{against}"
+        );
+
+        // A nested message without an id cannot be reconciled with a flat one.
+        let half = serde_json::from_value::<PolledMessage>(json!({
+            "message": {"title": "Ready"},
+            "id": 5,
+        }));
+        assert!(half.is_err());
     }
 
     #[test]

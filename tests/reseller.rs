@@ -739,6 +739,40 @@ async fn poll_message_reads_both_shapes() {
 }
 
 #[tokio::test]
+async fn a_flat_poll_answer_spelled_message_id_reaches_the_caller() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "messageId": 12, "title": "Ready" }));
+
+    let client = client(transport.clone());
+    let polled = client.poll_message().await.unwrap();
+    assert_eq!(polled.message_id().unwrap(), 12);
+    assert_eq!(
+        polled.message.as_ref().and_then(|m| m.title.as_deref()),
+        Some("Ready")
+    );
+    assert_eq!(transport.only_call().method, "message.poll");
+}
+
+#[tokio::test]
+async fn a_counted_poll_answer_without_a_message_is_an_error() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "count": 3 }));
+
+    let err = client(transport.clone()).poll_message().await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::UnexpectedAnswer {
+                field: "message",
+                ..
+            }
+        ),
+        "{err}"
+    );
+    assert!(!err.is_retryable());
+}
+
+#[tokio::test]
 async fn ack_message_sends_the_message_id() {
     let transport = MockTransport::new();
     transport.ok_empty();
