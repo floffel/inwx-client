@@ -703,6 +703,95 @@ async fn checking_an_empty_nameserver_list_is_rejected_locally() {
     assert_eq!(transport.call_count(), 0);
 }
 
+#[tokio::test]
+async fn a_missing_details_array_fails_the_delegation_check() {
+    let transport = MockTransport::new();
+    transport.ok(json!({}));
+
+    let client = client(transport);
+    let error = client
+        .check_delegation(&domain("a.de"), &[Hostname::parse("ns1.a.de").unwrap()])
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::UnexpectedAnswer {
+            method: "nameserver.check",
+            field: "details",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn details_that_are_not_an_array_fail_the_delegation_check() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "details": "not-an-array" }));
+
+    let client = client(transport);
+    let error = client
+        .check_delegation(&domain("a.de"), &[Hostname::parse("ns1.a.de").unwrap()])
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::UnexpectedAnswer {
+            field: "details",
+            ..
+        }
+    ));
+}
+
+/// Boundary pair: one entry is a result, zero entries is a check that did not
+/// happen.
+#[tokio::test]
+async fn an_empty_details_array_is_not_a_successful_check() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "details": [] }));
+
+    let client = client(transport.clone());
+    let error = client
+        .check_delegation(&domain("a.de"), &[Hostname::parse("ns1.a.de").unwrap()])
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::UnexpectedAnswer {
+            field: "details",
+            ..
+        }
+    ));
+
+    transport.ok(json!({ "details": [{ "ns": "ns1.a.de", "status": "OK" }] }));
+    let checks = client
+        .check_delegation(&domain("a.de"), &[Hostname::parse("ns1.a.de").unwrap()])
+        .await
+        .unwrap();
+    assert_eq!(checks.len(), 1);
+    assert!(checks[0].is_ok());
+}
+
+#[tokio::test]
+async fn an_unparseable_details_entry_fails_the_delegation_check() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "details": [
+            {"ns": "ns1.a.de", "status": "OK", "message": ["fine"]},
+            "not-an-entry"
+        ]
+    }));
+
+    let client = client(transport);
+    let error = client
+        .check_delegation(&domain("a.de"), &[Hostname::parse("ns1.a.de").unwrap()])
+        .await
+        .unwrap_err();
+    let Error::UnexpectedAnswer { detail, .. } = &error else {
+        panic!("expected an unexpected-answer error, got {error:?}");
+    };
+    assert!(detail.contains("entry 1"), "detail was {detail:?}");
+}
+
 // ----------------------------------------------------------------- prices
 
 #[tokio::test]

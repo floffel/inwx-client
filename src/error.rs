@@ -142,6 +142,37 @@ pub enum Error {
         field: &'static str,
     },
 
+    /// A successful response carried a field the client needs, but in a shape
+    /// the documented answer does not have: a scalar where a list belongs, or a
+    /// list entry that does not parse.
+    ///
+    /// Kept apart from [`Error::MissingField`] on purpose. The field *is*
+    /// there, so the shape was renamed, reshaped, or the row was mangled — and
+    /// a silent default here would turn a failed check into a passing one.
+    /// `detail` names what was expected and, for a list, which entry failed.
+    ///
+    /// ```
+    /// use inwx_client::Error;
+    ///
+    /// let err = Error::unexpected_answer(
+    ///     "nameserver.check",
+    ///     "details",
+    ///     "expected an array with one entry per checked nameserver",
+    /// );
+    /// assert!(err.to_string().contains("unexpected `details`"));
+    /// assert!(!err.is_retryable());
+    /// ```
+    #[error("response for `{method}` has an unexpected `{field}`: {detail}")]
+    UnexpectedAnswer {
+        /// The method that was called.
+        method: &'static str,
+        /// The field whose shape was wrong.
+        field: &'static str,
+        /// What was expected, and which entry failed when the list itself was
+        /// the right shape.
+        detail: String,
+    },
+
     /// The server answered with a non-2xx status and a body that is not an
     /// INWX error envelope.
     ///
@@ -235,6 +266,38 @@ impl Error {
         Self::Validation {
             field,
             message: message.into(),
+        }
+    }
+
+    /// Builds an [`Error::UnexpectedAnswer`] for a field that is present but has
+    /// the wrong shape. `field` is the response path, `detail` says what was
+    /// expected and what was found instead.
+    ///
+    /// ```
+    /// use inwx_client::Error;
+    ///
+    /// let err = Error::unexpected_answer(
+    ///     "nameserver.check",
+    ///     "details",
+    ///     "expected an array with one entry per checked nameserver",
+    /// );
+    /// assert!(!err.is_retryable());
+    /// assert_eq!(
+    ///     err.to_string(),
+    ///     "response for `nameserver.check` has an unexpected `details`: \
+    ///      expected an array with one entry per checked nameserver",
+    /// );
+    /// ```
+    #[must_use]
+    pub fn unexpected_answer(
+        method: &'static str,
+        field: &'static str,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self::UnexpectedAnswer {
+            method,
+            field,
+            detail: detail.into(),
         }
     }
 
@@ -588,5 +651,9 @@ mod tests {
             field: "resData.id",
         }
         .is_retryable());
+        assert!(
+            !Error::unexpected_answer("nameserver.check", "details", "expected an array")
+                .is_retryable()
+        );
     }
 }

@@ -493,8 +493,12 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] for an empty nameserver list, plus the usual
-    /// transport and API errors.
+    /// [`Error::Validation`] for an empty nameserver list,
+    /// [`Error::UnexpectedAnswer`] when the answer carries no `details` array,
+    /// an empty one, or an entry that does not parse — plus the usual transport
+    /// and API errors. The check never answers `Ok` with an empty vector: an
+    /// answer without results would make the `all(is_ok)` loop above pass
+    /// vacuously, reporting a delegation that was never tested as healthy.
     pub async fn check_delegation(
         &self,
         domain: &DomainName,
@@ -517,12 +521,34 @@ impl<T: Transport> InwxClient<T> {
             .await?;
         let entries = match data.get("details") {
             Some(Value::Array(entries)) => entries.clone(),
-            _ => Vec::new(),
+            _ => {
+                return Err(Error::unexpected_answer(
+                    "nameserver.check",
+                    "details",
+                    "expected an array with one entry per checked nameserver",
+                ))
+            }
         };
-        Ok(entries
+        if entries.is_empty() {
+            return Err(Error::unexpected_answer(
+                "nameserver.check",
+                "details",
+                "expected one entry per checked nameserver, found none",
+            ));
+        }
+        entries
             .into_iter()
-            .filter_map(|entry| serde_json::from_value(entry).ok())
-            .collect())
+            .enumerate()
+            .map(|(index, entry)| {
+                serde_json::from_value(entry).map_err(|error| {
+                    Error::unexpected_answer(
+                        "nameserver.check",
+                        "details",
+                        format!("entry {index} does not parse: {error}"),
+                    )
+                })
+            })
+            .collect()
     }
 }
 
