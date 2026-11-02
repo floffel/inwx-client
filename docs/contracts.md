@@ -348,6 +348,7 @@ rather than failing the call, and the list can come back short; the two `PriceLi
 answers are deserialized whole, where an unreadable row is an error. Prices stay
 `float` on the wire and `f64` here (`de::opt_f64`): quotes to display and compare,
 never amounts to sum.
+
 ## 0.2.0 — transfer lock and auth codes (`src/domain.rs`, issue #60)
 
 Source: <https://account.inwx.com/en/help/apidoc/f/ch02s09.html> — the same
