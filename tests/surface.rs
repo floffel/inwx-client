@@ -491,7 +491,11 @@ fn error_helpers_cover_every_branch() {
     };
     assert!(auth.is_authentication());
     assert!(!auth.is_retryable());
-    assert!(Error::NotAuthenticated.is_authentication());
+    assert!(!auth.is_missing_credentials());
+    // No session and no credentials: a re-login cannot cure it, so it is not
+    // reported as re-login-able.
+    assert!(!Error::NotAuthenticated.is_authentication());
+    assert!(Error::NotAuthenticated.is_missing_credentials());
 
     let transport = Error::Transport {
         message: "reset".into(),
