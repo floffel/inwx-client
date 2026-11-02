@@ -28,7 +28,7 @@ use serde_json::{json, Map, Value};
 use crate::client::InwxClient;
 use crate::error::{Error, Result};
 use crate::transport::Transport;
-use crate::types::{de, reject_control_chars, validate_dns_name, DomainName, Timestamp};
+use crate::types::{canonical_dns_name, de, reject_control_chars, DomainName, Timestamp};
 
 /// Largest `pagelimit` [`DomainLogQuery`] accepts.
 ///
@@ -1048,16 +1048,14 @@ fn normalize_tld(input: &str) -> Result<String> {
         return Err(Error::validation("tld", "must not be empty"));
     }
     reject_control_chars("tld", trimmed)?;
-    // UTS-46 mapping: lower-casing, punycode and the checks a bare label needs.
-    let ascii = idna::domain_to_ascii(trimmed)
-        .map_err(|_| Error::validation("tld", format!("{trimmed:?} is not a valid TLD")))?;
+    // UTS-46 mapping and the label checks, the same path a domain takes.
+    let ascii = canonical_dns_name("tld", "TLD", trimmed)?;
     if ascii.contains('.') {
         return Err(Error::validation(
             "tld",
             format!("{input:?} is a domain name, not a TLD; pass the last label alone"),
         ));
     }
-    validate_dns_name("tld", &ascii, false)?;
     Ok(ascii)
 }
 
