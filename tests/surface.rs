@@ -497,12 +497,12 @@ fn error_helpers_cover_every_branch() {
     assert!(!Error::NotAuthenticated.is_authentication());
     assert!(Error::NotAuthenticated.is_missing_credentials());
 
-    let transport = Error::Transport {
-        message: "reset".into(),
-        retryable: false,
-    };
+    // The variant is closed outside the crate: no struct literal, so the retry
+    // flag cannot be handed in. A local failure is still terminal.
+    let transport = Error::transport_at(TransportStage::Local, "reset");
     assert!(!transport.is_retryable());
     assert!(!transport.is_uncertain());
+    assert!(matches!(transport, Error::Transport { .. }));
 
     let uncertain = Error::Uncertain {
         message: "timeout waiting for response".into(),

@@ -412,7 +412,9 @@ pub trait ChunkSource {
 ///
 /// [`Error::ResponseTooLarge`] when the declared or the observed size exceeds
 /// `limit`. Whatever the source reports as a read failure is passed through
-/// unchanged.
+/// unchanged — a reset or timeout *while reading the body* happens after the
+/// request was written, so a source reports it as [`Error::uncertain`] and not
+/// as [`Error::transport_before_send`].
 pub async fn read_capped_body<S: ChunkSource>(
     source: &mut S,
     declared_len: Option<u64>,
@@ -466,11 +468,13 @@ fn parse_content_length(value: Option<&str>) -> Option<u64> {
 /// * return the raw status, headers and body even for non-2xx (the client
 ///   decides what is retryable),
 /// * classify a failure that happened before the request was written (DNS,
-///   connect, TLS) as [`Error::transport`],
+///   connect, TLS) as [`Error::transport_before_send`], or — when the stage is
+///   at hand — as [`Error::transport_at`], which picks the variant from it,
 /// * classify a failure that happened after it was written (a timeout waiting
 ///   for the answer, a reset mid-response, a truncated body) as
 ///   [`Error::uncertain`](Error::uncertain) — the API may have executed the
-///   command, and the client will not replay it for a mutating method,
+///   command, and the client will not replay it for a mutating method. There is
+///   no one-string constructor that would silently make this retryable,
 /// * bound the body they buffer — [`read_capped_body`] does that for a chunked
 ///   source, and a transport that reads differently must still refuse a body
 ///   over its cap with [`Error::ResponseTooLarge`],
@@ -717,13 +721,15 @@ mod tests {
     }
 
     /// A source that fails on the second chunk, as a reset connection does.
+    /// A reset while the body is being read happens after the request was
+    /// written, so it is uncertain, not retryable.
     struct Breaks;
 
     impl ChunkSource for Breaks {
         type Chunk = Vec<u8>;
 
         fn next_chunk(&mut self) -> impl std::future::Future<Output = Result<Option<Vec<u8>>>> {
-            std::future::ready(Err(Error::transport("connection reset")))
+            std::future::ready(Err(Error::uncertain("connection reset")))
         }
     }
 
@@ -856,16 +862,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failing_source_is_reported_as_the_transport_error_it_gave() {
+    async fn a_reset_while_reading_the_body_passes_through_as_uncertain() {
         let mut source = Breaks;
         let error = read_capped_body(&mut source, None, 64).await.unwrap_err();
-        assert!(matches!(
-            error,
-            Error::Transport {
-                retryable: true,
-                ..
-            }
-        ));
+        assert!(error.is_uncertain());
+        assert!(!error.is_retryable());
+        assert!(matches!(error, Error::Uncertain { .. }));
     }
 
     #[test]
