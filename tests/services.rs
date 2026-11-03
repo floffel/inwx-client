@@ -244,7 +244,7 @@ async fn an_empty_key_list_is_an_answer_but_a_missing_one_is_not() {
 
     let client = client(transport.clone());
     let empty = client.list_dns_keys(&DnssecKeyQuery::new()).await.unwrap();
-    assert!(empty.is_empty());
+    assert_eq!(empty.len(), 0, "an empty array is an answer, not an error");
     assert_eq!(
         client
             .list_dns_keys(&DnssecKeyQuery::new())
@@ -341,7 +341,11 @@ async fn dnssec_info_without_a_data_array_fails_the_read() {
     }
 
     transport.ok(json!({ "data": [] }));
-    assert!(client.dnssec_info(None).await.unwrap().is_empty());
+    assert_eq!(
+        client.dnssec_info(None).await.unwrap().len(),
+        0,
+        "an empty array is an answer, not an error"
+    );
 }
 
 #[tokio::test]
