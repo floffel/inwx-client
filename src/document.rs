@@ -2,12 +2,16 @@
 //! proofs, mandates, attachments for an application.
 //!
 //! Four methods: upload a file, list what is stored, download one and delete
-//! one. Uploads are the risky direction, so the crate checks the file name
-//! (never a path), refuses an empty body and validates the size *before* it
-//! base64-encodes anything. The read side is checked too: a download carries
-//! the size it claims, and [`DownloadedDocument::bytes`] holds the decoded body
-//! against it, so a body that was cut short in transit fails instead of being
-//! written to disk as a whole document.
+//! one. The file name is checked in *both* directions, because it travels in
+//! both: [`DocumentUpload`] refuses a name that is a path on the way in, and a
+//! download hands its name out only as a [`SavedName`] on the way out — the
+//! server cannot talk a caller into writing `../../.ssh/authorized_keys`.
+//! Uploads are the risky direction for the body, so an empty one is refused and
+//! the size is validated *before* it base64-encodes anything. The read side is
+//! checked too: a download carries the size it claims, and
+//! [`DownloadedDocument::bytes`] holds the decoded body against it, so a body
+//! that was cut short in transit fails instead of being written to disk as a
+//! whole document.
 //!
 //! What a downloaded file *is* comes from its first bytes, never from its name:
 //! [`DownloadedDocument::kind`] reads the base64 prefix that carries the PDF
@@ -57,6 +61,118 @@ use crate::types::{
 /// # Ok::<(), inwx_client::Error>(())
 /// ```
 pub const MAX_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
+
+/// The name a downloaded document may be written under.
+///
+/// The upload path has always refused a name that is a path; the download path
+/// hands one back, and callers write it to disk. So the name leaves the read
+/// side as a value that cannot be a path either: no `/`, no `\`, not empty, not
+/// `.`/`..`, no control character and at most 255 characters — the same rule
+/// [`DocumentUpload`] applies on the way in.
+///
+/// [`DownloadedDocument::saved_name`] builds one from the name the service
+/// echoed and [`DownloadedDocument::saved_name_or`] from a fallback the caller
+/// names; both validate. Writing `name.as_str()` therefore lands in the working
+/// directory and `dir.join(name.as_str())` stays inside `dir`, whichever server
+/// answered.
+///
+/// ```
+/// use inwx_client::{Error, SavedName};
+///
+/// assert_eq!(SavedName::parse("mandate.pdf")?.as_str(), "mandate.pdf");
+///
+/// // What `validate_filename` refuses on upload it refuses on download too.
+/// let traversing = SavedName::parse("../../.ssh/authorized_keys").unwrap_err();
+/// assert!(matches!(
+///     traversing,
+///     Error::Validation { field: "document.filename", .. }
+/// ));
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SavedName(String);
+
+impl SavedName {
+    /// Validates `name` as a file name to write under.
+    ///
+    /// Surrounding whitespace is trimmed, as on the upload path, so the value
+    /// and the entry on disk agree on the same name.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] with field `document.filename` when `name` is
+    /// empty, `.` or `..`, longer than 255 characters, carries a path separator
+    /// or carries a control character.
+    ///
+    /// ```
+    /// use inwx_client::SavedName;
+    ///
+    /// assert_eq!(SavedName::parse(" scan.pdf ")?.as_str(), "scan.pdf");
+    /// for bad in [
+    ///     "",
+    ///     "   ",
+    ///     ".",
+    ///     "..",
+    ///     "dir/scan.pdf",
+    ///     "..\\scan.pdf",
+    ///     "scan\n.pdf",
+    /// ] {
+    ///     assert!(SavedName::parse(bad).is_err(), "{bad:?} should be rejected");
+    /// }
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    pub fn parse(name: &str) -> Result<Self> {
+        Ok(Self(validate_filename("document.filename", name)?))
+    }
+
+    /// The file name, as validated: a name, never a path.
+    ///
+    /// ```
+    /// use inwx_client::SavedName;
+    ///
+    /// let name = SavedName::parse("id-copy.pdf")?;
+    /// assert_eq!(name.as_str(), "id-copy.pdf");
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SavedName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl fmt::Debug for SavedName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "SavedName({:?})", self.0)
+    }
+}
+
+impl AsRef<str> for SavedName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for SavedName {
+    type Error = Error;
+
+    fn try_from(value: &str) -> Result<Self> {
+        Self::parse(value)
+    }
+}
+
+impl std::str::FromStr for SavedName {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        Self::parse(value)
+    }
+}
 
 /// Longest type token this crate accepts for a document.
 const MAX_TYPE_LEN: usize = 64;
@@ -608,7 +724,12 @@ pub enum DocumentKind {
 /// answer is parsed, because no decoded body can have one.
 ///
 /// The file name is not evidence of anything: [`kind`](Self::kind) reads the
-/// first bytes of the body, so `scan.pdf` holding a JPEG is not a PDF.
+/// first bytes of the body, so `scan.pdf` holding a JPEG is not a PDF. It is
+/// also not a path: a name carrying a separator — `../../.ssh/authorized_keys`
+/// — fails the answer when it is parsed, exactly as [`DocumentUpload`] refuses
+/// it on the way in. [`saved_name`](Self::saved_name) and
+/// [`saved_name_or`](Self::saved_name_or) hand the name out as a [`SavedName`],
+/// so writing it cannot leave the directory the caller chose.
 ///
 /// ```
 /// use inwx_client::{DocumentKind, DownloadedDocument};
@@ -656,7 +777,10 @@ pub struct DownloadedDocument {
 /// A negative `size` fails the answer instead of landing in the row: no decoded
 /// body can have a negative length, so the number is a mangled claim rather than
 /// a small one, and carrying it would only move the contradiction to
-/// [`DownloadedDocument::bytes`].
+/// [`DownloadedDocument::bytes`]. A `filename` that is not a file name fails it
+/// for the same reason: the name is what a caller writes to disk, so a value
+/// with a path separator is not a slightly odd name but a write somewhere the
+/// caller did not choose ([`SavedName`]).
 impl<'de> Deserialize<'de> for DownloadedDocument {
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,
@@ -670,9 +794,20 @@ impl<'de> Deserialize<'de> for DownloadedDocument {
             }
             size => size,
         };
+        let filename = match pick_text(&fields, &["filename"]) {
+            Some(name) => {
+                let validated = validate_filename("document.filename", &name).map_err(|error| {
+                    D::Error::custom(format!(
+                        "document filename {name:?} is not a name to write under: {error}"
+                    ))
+                })?;
+                Some(validated)
+            }
+            None => None,
+        };
         Ok(Self {
             id: pick_i64(&fields, &["documentId", "id"]),
-            filename: pick_text(&fields, &["filename"]),
+            filename,
             content: pick_text(&fields, &["content", "data"]),
             mime_type: pick_text(&fields, &["mimeType", "mime_type"]),
             size,
@@ -800,6 +935,80 @@ impl DownloadedDocument {
             Ok(DocumentKind::Pdf)
         } else {
             Ok(DocumentKind::Unknown)
+        }
+    }
+
+    /// The name this document would be written under, validated.
+    ///
+    /// The answer's own `filename` is what a caller reaches for first, which is
+    /// why the value is a [`SavedName`] and not the raw string: a name the
+    /// service chose cannot make `std::fs::write` or `dir.join` reach outside
+    /// the directory the caller picked. An answer that parsed into this value
+    /// already passed that check, so the only failure left is an answer that
+    /// named no file at all.
+    ///
+    /// ```rust
+    /// use inwx_client::DownloadedDocument;
+    ///
+    /// let document: DownloadedDocument = serde_json::from_str(
+    ///     r#"{"filename":"mandate.pdf","content":"JVBERi0xLjc="}"#,
+    /// )?;
+    /// assert_eq!(document.saved_name()?.as_str(), "mandate.pdf");
+    ///
+    /// // An answer without a name has no name to write under.
+    /// let unnamed: DownloadedDocument = serde_json::from_str(r#"{"content":"aGk="}"#)?;
+    /// assert!(unnamed.saved_name().is_err());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::MissingField`] when the answer carries no `filename`.
+    pub fn saved_name(&self) -> Result<SavedName> {
+        match self.filename.as_deref() {
+            Some(name) => SavedName::parse(name),
+            None => Err(Error::MissingField {
+                method: "document.download",
+                field: "document.filename",
+            }),
+        }
+    }
+
+    /// The name to write under: the answer's, or `fallback` when it named none.
+    ///
+    /// A server-side name wins; the fallback is for the answer that carries a
+    /// body and no file name — `document.download` may answer without one, and
+    /// a document saved as `document.bin` still beats a document not saved. The
+    /// fallback is validated too, so a caller cannot leave the directory through
+    /// the argument either.
+    ///
+    /// ```rust
+    /// use inwx_client::DownloadedDocument;
+    ///
+    /// let named: DownloadedDocument =
+    ///     serde_json::from_str(r#"{"filename":"scan.pdf","content":"aGk="}"#)?;
+    /// assert_eq!(named.saved_name_or("document.bin")?.as_str(), "scan.pdf");
+    ///
+    /// let unnamed: DownloadedDocument = serde_json::from_str(r#"{"content":"aGk="}"#)?;
+    /// assert_eq!(
+    ///     unnamed.saved_name_or("document.bin")?.as_str(),
+    ///     "document.bin"
+    /// );
+    ///
+    /// // The fallback is held to the same rule as the answer.
+    /// assert!(unnamed.saved_name_or("../../x").is_err());
+    /// assert!(unnamed.saved_name_or("").is_err());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] with field `document.filename` when `fallback` is
+    /// not a file name.
+    pub fn saved_name_or(&self, fallback: &str) -> Result<SavedName> {
+        match self.filename.as_deref() {
+            Some(name) => SavedName::parse(name),
+            None => SavedName::parse(fallback),
         }
     }
 
@@ -1104,6 +1313,12 @@ impl<T: Transport> InwxClient<T> {
     /// is what turns a transfer cut short on a base64 boundary into a plausible
     /// but incomplete file.
     ///
+    /// Neither the body nor the name is taken from the answer unchecked: the
+    /// bytes go through [`bytes`](DownloadedDocument::bytes), and the name
+    /// through [`saved_name_or`](DownloadedDocument::saved_name_or), which
+    /// returns a [`SavedName`] — a name, never a path. A server that answers
+    /// with `../../.ssh/authorized_keys` cannot steer the write below.
+    ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
     /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
@@ -1113,8 +1328,8 @@ impl<T: Transport> InwxClient<T> {
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
     /// let document = client.download_document(81).await?;
     /// let body = document.bytes()?;
-    /// let name = document.filename.unwrap_or_else(|| "document.bin".to_owned());
-    /// std::fs::write(name, body)?;
+    /// let name = document.saved_name_or("document.bin")?;
+    /// std::fs::write(name.as_str(), body)?;
     /// # Ok(())
     /// # }
     /// ```
@@ -1123,7 +1338,8 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// [`Error::Validation`] for a non-positive id, [`Error::Json`] for an answer
     /// that does not fit the model — including a negative `size`, which no body
-    /// can have — plus the usual transport and API errors.
+    /// can have, and a `filename` that is not a file name — plus the usual
+    /// transport and API errors.
     pub async fn download_document(&self, document_id: i64) -> Result<DownloadedDocument> {
         validate_id("document.id", document_id)?;
         let data = self
@@ -1491,5 +1707,149 @@ mod tests {
         // Whitespace around the body is tolerated, as everywhere else.
         let padded = download("  JVBERi0xLjc=  ", None, None);
         assert_eq!(padded.kind().unwrap(), DocumentKind::Pdf);
+    }
+
+    #[test]
+    fn a_downloaded_filename_is_never_a_path_either() {
+        // The name goes out to `std::fs::write`, so the read side applies the
+        // same rule the upload side does (issue #122).
+        for bad in [
+            "../../.ssh/authorized_keys",
+            "..",
+            ".",
+            "",
+            "dir/scan.pdf",
+            "..\\scan.pdf",
+            "/etc/passwd",
+            "scan\n.pdf",
+        ] {
+            let json = json!({ "filename": bad, "content": "aGk=" });
+            let error = serde_json::from_str::<DownloadedDocument>(&json.to_string()).unwrap_err();
+            assert!(
+                error.to_string().contains("is not a name to write under"),
+                "{bad:?}: {error}"
+            );
+        }
+
+        // The same answer without a hostile name parses, so the rule rejects
+        // the name and not the download.
+        let fine: DownloadedDocument =
+            serde_json::from_str(r#"{"filename":"scan.pdf","content":"aGk="}"#).unwrap();
+        assert_eq!(fine.filename.as_deref(), Some("scan.pdf"));
+        assert_eq!(fine.bytes().unwrap(), b"hi");
+    }
+
+    #[test]
+    fn a_downloaded_name_of_255_characters_is_accepted_and_256_is_not() {
+        // The boundary the validator draws, on the way out this time.
+        let ok = "a".repeat(255);
+        let too_long = format!("{ok}b");
+        let ok_json = json!({ "filename": ok, "content": "aGk=" }).to_string();
+        let long_json = json!({ "filename": too_long, "content": "aGk=" }).to_string();
+        let parsed: DownloadedDocument = serde_json::from_str(&ok_json).unwrap();
+        assert_eq!(parsed.saved_name().unwrap().as_str(), ok);
+        assert!(serde_json::from_str::<DownloadedDocument>(&long_json).is_err());
+    }
+
+    #[test]
+    fn a_downloaded_name_is_trimmed_like_an_upload_name() {
+        // Upload trims, so a download that did not would hand out a different
+        // name for the same stored file.
+        let document: DownloadedDocument =
+            serde_json::from_str(r#"{"filename":"  scan.pdf  ","content":"aGk="}"#).unwrap();
+        assert_eq!(document.filename.as_deref(), Some("scan.pdf"));
+        assert_eq!(document.saved_name().unwrap().as_str(), "scan.pdf");
+    }
+
+    #[test]
+    fn saved_name_hands_out_the_answer_name_or_the_callers_fallback() {
+        let named: DownloadedDocument =
+            serde_json::from_str(r#"{"filename":"scan.pdf","content":"aGk="}"#).unwrap();
+        assert_eq!(named.saved_name().unwrap().as_str(), "scan.pdf");
+        assert_eq!(
+            named.saved_name_or("document.bin").unwrap().as_str(),
+            "scan.pdf"
+        );
+
+        // No name in the answer: the strict accessor says which field is
+        // missing, the loose one takes the caller's name.
+        let unnamed: DownloadedDocument = serde_json::from_str(r#"{"content":"aGk="}"#).unwrap();
+        assert!(matches!(
+            unnamed.saved_name(),
+            Err(Error::MissingField {
+                method: "document.download",
+                field: "document.filename"
+            })
+        ));
+        assert_eq!(
+            unnamed.saved_name_or("document.bin").unwrap().as_str(),
+            "document.bin"
+        );
+
+        // The fallback is checked too, so the argument is no way around the
+        // rule the answer is held to.
+        let traversal = unnamed.saved_name_or("../../x").unwrap_err();
+        assert!(traversal.is_validation(), "{traversal}");
+        assert!(unnamed.saved_name_or("").is_err());
+        assert!(unnamed.saved_name_or("dir/x").is_err());
+    }
+
+    #[test]
+    fn a_hand_built_downloaded_row_cannot_skip_the_name_check() {
+        // The fields are public, so a caller can build the value the
+        // deserialiser refuses — the accessor still will not hand it out.
+        let hand_built = DownloadedDocument {
+            filename: Some("../../.ssh/authorized_keys".to_owned()),
+            ..DownloadedDocument::default()
+        };
+        assert!(hand_built.saved_name().is_err());
+        assert!(hand_built.saved_name_or("document.bin").is_err());
+    }
+
+    #[test]
+    fn saved_name_traits() {
+        let name = SavedName::parse("id-copy.pdf").unwrap();
+        assert_eq!(name.as_str(), "id-copy.pdf");
+        assert_eq!(name.to_string(), "id-copy.pdf");
+        assert_eq!(name.as_ref(), "id-copy.pdf");
+        assert_eq!(format!("{name:?}"), "SavedName(\"id-copy.pdf\")");
+        assert_eq!(SavedName::try_from("a.pdf").unwrap().as_str(), "a.pdf");
+        assert_eq!(
+            "a.pdf".parse::<SavedName>().unwrap().as_str(),
+            "a.pdf",
+            "FromStr is the same door as parse"
+        );
+
+        // Ordering stays deterministic for sorted output, hashing for maps.
+        let mut names = [
+            SavedName::parse("b.pdf").unwrap(),
+            SavedName::parse("a.pdf").unwrap(),
+        ];
+        names.sort();
+        assert_eq!(names[0].as_str(), "a.pdf");
+        let mut map = std::collections::HashMap::new();
+        map.insert(name.clone(), 1);
+        assert_eq!(map[&SavedName::parse("id-copy.pdf").unwrap()], 1);
+    }
+
+    #[test]
+    fn saved_name_reports_the_field_and_the_reason() {
+        let error = SavedName::parse("../a.pdf").unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Validation {
+                field: "document.filename",
+                ..
+            }
+        ));
+        assert!(error
+            .to_string()
+            .contains("must not contain a path separator"));
+
+        let too_long = SavedName::parse(&"a".repeat(256)).unwrap_err();
+        assert!(too_long.to_string().contains("at most 255 characters"));
+
+        let control = SavedName::parse("a\u{7}b.pdf").unwrap_err();
+        assert!(control.to_string().contains("control characters"));
     }
 }
