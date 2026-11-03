@@ -12,7 +12,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use inwx_client::transport::{ChunkSource, Request, Response, Transport};
+use inwx_client::transport::{ChunkSource, Request, Response, Transport, TransportStage};
 use inwx_client::{read_capped_body, Error, InwxClient, Result};
 use serde_json::{json, Value};
 
@@ -100,12 +100,13 @@ pub enum Reply {
     },
     /// A full response, status and all.
     Response(Response),
-    /// A transport-level failure.
+    /// A transport-level failure, classified the way a real transport must
+    /// classify it: the stage decides whether a replay is safe.
     Failure {
-        /// Message for [`Error::Transport`].
+        /// Message for the transport error.
         message: String,
-        /// Whether a retry could help.
-        retryable: bool,
+        /// Where the failure sat relative to the request being written.
+        stage: TransportStage,
     },
     /// The request was written and the answer never arrived.
     Uncertain {
@@ -192,7 +193,7 @@ impl MockTransport {
     pub fn transport_failure(&self, message: &str) {
         self.push(Reply::Failure {
             message: message.to_owned(),
-            retryable: true,
+            stage: TransportStage::BeforeSend,
         });
     }
 
@@ -200,7 +201,7 @@ impl MockTransport {
     pub fn terminal_failure(&self, message: &str) {
         self.push(Reply::Failure {
             message: message.to_owned(),
-            retryable: false,
+            stage: TransportStage::Local,
         });
     }
 
@@ -263,15 +264,8 @@ impl Transport for MockTransport {
                 br#"{"code":1000,"msg":"Login successful","resData":{"accountId":61140}}"#.to_vec(),
             ),
             Some(Reply::Response(response)) => response,
-            Some(Reply::Failure { message, retryable }) => {
-                return Err(if retryable {
-                    Error::transport(message)
-                } else {
-                    Error::Transport {
-                        message,
-                        retryable: false,
-                    }
-                })
+            Some(Reply::Failure { message, stage }) => {
+                return Err(Error::transport_at(stage, message))
             }
             Some(Reply::Uncertain { message }) => return Err(Error::uncertain(message)),
             None => json_response(r#"{"code":1000,"msg":"ok"}"#),

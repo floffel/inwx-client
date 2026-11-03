@@ -660,7 +660,7 @@ async fn a_transport_that_always_fails_is_tried_exactly_three_times() {
             _request: inwx_client::transport::Request<'_>,
         ) -> inwx_client::Result<Response> {
             std::future::ready(()).await;
-            Err(Error::transport("down"))
+            Err(Error::transport_before_send("down"))
         }
     }
 
@@ -674,13 +674,8 @@ async fn a_transport_that_always_fails_is_tried_exactly_three_times() {
         .unwrap_err();
 
     assert!(error.is_retryable());
-    assert!(matches!(
-        error,
-        Error::Transport {
-            retryable: true,
-            ..
-        }
-    ));
+    assert!(!error.is_uncertain());
+    assert!(matches!(error, Error::Transport { .. }));
 }
 
 /// A reply that is a success envelope with a bogus code must not be accepted.

@@ -81,11 +81,22 @@ pub enum Error {
     /// `retryable` is `true` for everything except local configuration
     /// mistakes, so callers can decide whether to hand the request back to
     /// [`RetryPolicy`](crate::RetryPolicy) themselves.
+    ///
+    /// The flag is not a free choice. It must never be `true` once the request
+    /// bytes left the process: that outcome is [`Error::Uncertain`], because a
+    /// replay could duplicate a mutation. So the variant is
+    /// `#[non_exhaustive]` — outside this crate it cannot be written as a
+    /// struct literal — and the only ways in are [`Error::transport_at`] and
+    /// [`Error::transport_before_send`], which derive the flag from
+    /// [`TransportStage`] instead of taking it from the caller.
+    #[non_exhaustive]
     #[error("transport error: {message}")]
     Transport {
         /// Description from the transport.
         message: String,
-        /// `true` when another attempt could plausibly succeed.
+        /// `true` when another attempt could plausibly succeed: only ever set
+        /// for a failure at [`TransportStage::BeforeSend`], never after the
+        /// request was written.
         retryable: bool,
     },
 
@@ -313,22 +324,27 @@ impl Error {
 
     /// Builds a retryable transport error: a failure that happened before the
     /// request was written, so replaying the command cannot duplicate anything.
-    /// Use [`Error::transport_at`] when the stage is known, and
-    /// [`Error::uncertain`] when the request had already been written.
+    ///
+    /// The name is the point. There is deliberately no `Error::transport(msg)`
+    /// one-string constructor: it was the shortest call for a transport author
+    /// to reach for, and it produced a retryable error even for a timeout that
+    /// may already have executed the command. A failure after the request had
+    /// been written is [`Error::uncertain`]; when the stage is known, prefer
+    /// [`Error::transport_at`], which picks the variant from it.
     ///
     /// ```
     /// use inwx_client::Error;
     ///
-    /// let err = Error::transport("dns lookup failed");
+    /// let err = Error::transport_before_send("dns lookup failed");
     /// assert!(err.is_retryable());
     /// assert!(!err.is_uncertain());
+    ///
+    /// // The unsafe call is no longer available: this does not compile.
+    /// // let _ = Error::transport("timeout");
     /// ```
     #[must_use]
-    pub fn transport(message: impl Into<String>) -> Self {
-        Self::Transport {
-            message: message.into(),
-            retryable: true,
-        }
+    pub fn transport_before_send(message: impl Into<String>) -> Self {
+        Self::transport_at(TransportStage::BeforeSend, message)
     }
 
     /// Builds the error for a transport failure that happened at `stage`.
@@ -377,7 +393,8 @@ impl Error {
     /// Use this from a [`Transport`](crate::transport::Transport) implementation
     /// for a timeout, a reset mid-response or a truncated body. Prefer
     /// [`Error::transport_at`] when the stage is already known, and
-    /// [`Error::transport`] when the request was demonstrably never written.
+    /// [`Error::transport_before_send`] when the request was demonstrably never
+    /// written.
     ///
     /// ```
     /// use inwx_client::Error;
@@ -466,7 +483,7 @@ impl Error {
     /// ```
     /// use inwx_client::{Error, RetryPolicy};
     ///
-    /// assert!(Error::transport("dns lookup failed").is_retryable());
+    /// assert!(Error::transport_before_send("dns lookup failed").is_retryable());
     /// assert!(!Error::uncertain("timeout").is_retryable());
     /// assert!(!Error::validation("domain", "empty").is_retryable());
     ///
@@ -505,7 +522,7 @@ impl Error {
     /// use inwx_client::Error;
     ///
     /// assert!(Error::uncertain("timeout").is_uncertain());
-    /// assert!(!Error::transport("dns lookup failed").is_uncertain());
+    /// assert!(!Error::transport_before_send("dns lookup failed").is_uncertain());
     /// ```
     #[must_use]
     pub fn is_uncertain(&self) -> bool {
@@ -910,6 +927,38 @@ mod tests {
         }
     }
 
+    /// The retry flag of a transport failure is derived from the stage, never
+    /// passed in: the free-form `Error::transport(msg)` that always produced a
+    /// retryable error is gone, and the variant takes no `retryable` argument.
+    /// Edge pair: the last stage that may be replayed and the first one that
+    /// may not.
+    #[test]
+    fn only_the_before_send_stage_is_retryable() {
+        let before = Error::transport_before_send("dns lookup failed");
+        assert!(before.is_retryable());
+        assert!(!before.is_uncertain());
+
+        let after = Error::transport_at(TransportStage::AfterSend, "timeout");
+        assert!(!after.is_retryable());
+        assert!(after.is_uncertain());
+
+        assert!(!Error::transport_at(TransportStage::Local, "unsupported scheme").is_retryable());
+        assert!(!Error::transport_at(TransportStage::Local, "unsupported scheme").is_uncertain());
+
+        // Building the same stage through the stage-driven constructor and the
+        // named one must not diverge, whatever the message.
+        for message in ["", "x", "timeout waiting for the answer"] {
+            assert_eq!(
+                Error::transport_before_send(message).is_retryable(),
+                Error::transport_at(TransportStage::BeforeSend, message).is_retryable()
+            );
+            assert_eq!(
+                Error::transport_before_send(message).to_string(),
+                Error::transport_at(TransportStage::BeforeSend, message).to_string()
+            );
+        }
+    }
+
     #[test]
     fn transient_http_statuses_are_retryable() {
         for status in [429, 502, 503, 504] {
@@ -982,12 +1031,8 @@ mod tests {
     /// No behavior change for the other variants.
     #[test]
     fn other_variants_classify_as_before() {
-        assert!(Error::transport("dns lookup failed").is_retryable());
-        assert!(!Error::Transport {
-            message: String::from("unsupported scheme"),
-            retryable: false,
-        }
-        .is_retryable());
+        assert!(Error::transport_before_send("dns lookup failed").is_retryable());
+        assert!(!Error::transport_at(TransportStage::Local, "unsupported scheme").is_retryable());
 
         let api = |code| Error::Api {
             code,
@@ -1053,7 +1098,7 @@ mod tests {
             api(2300),
             api(2203),
             Error::validation("domain", "empty"),
-            Error::transport("dns lookup failed"),
+            Error::transport_before_send("dns lookup failed"),
             Error::uncertain("timeout"),
             Error::MissingField {
                 method: "domain.info",
