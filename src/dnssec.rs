@@ -8,6 +8,7 @@
 
 use std::fmt;
 
+use base64::Engine as _;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{json, Map, Value};
@@ -230,6 +231,19 @@ impl DnssecDigestType {
         match Self::from_u8(value) {
             Ok(known) => known,
             Err(_) => Self::Other(value),
+        }
+    }
+
+    /// The digest size in bytes, where the registry fixes one.
+    ///
+    /// RFC 4034 §5.1.4 (as extended by RFC 6605) fixes the SHA-256 digest at 32
+    /// bytes and SHA-384 at 48; `None` means this crate's table does not know a
+    /// size, so a caller must not invent one.
+    const fn digest_len(self) -> Option<usize> {
+        match self {
+            Self::Sha256 => Some(32),
+            Self::Sha384 => Some(48),
+            Self::Other(_) => None,
         }
     }
 }
@@ -620,21 +634,24 @@ fn opt_domain_status<'de, D: Deserializer<'de>>(
 /// A DNSKEY in presentation format (`dnskey`), checked before it is sent.
 ///
 /// The documentation's example is
-/// `domain.tld. IN DNSKEY 257 3 13 ac12c2…`. `dnssec.adddnskey` accepts only
+/// `domain.tld. IN DNSKEY 257 3 13 ac12…`. `dnssec.adddnskey` accepts only
 /// `ZONE+SEP` keys (flag 257), so anything else is refused here rather than by
 /// the API.
+///
+/// The key material is base64, and it is decoded here: `k` passes a character
+/// check and is not a key, so it is refused before the request is built.
 ///
 /// ```
 /// use inwx_client::{DnsKey, DnssecAlgorithm, DnssecFlag};
 ///
-/// let key = DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12c2")?;
+/// let key = DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12")?;
 /// assert_eq!(key.flag(), DnssecFlag::ZoneSep);
 /// assert_eq!(key.algorithm(), DnssecAlgorithm::EcdsaP256);
 /// assert_eq!(key.owner(), "example.com.");
-/// assert_eq!(key.as_str(), "example.com. IN DNSKEY 257 3 13 ac12c2");
+/// assert_eq!(key.as_str(), "example.com. IN DNSKEY 257 3 13 ac12");
 ///
 /// // A ZONE key (256) is not accepted by the API.
-/// assert!(DnsKey::parse("example.com. IN DNSKEY 256 3 13 ac12c2").is_err());
+/// assert!(DnsKey::parse("example.com. IN DNSKEY 256 3 13 ac12").is_err());
 /// assert!(DnsKey::parse("garbage").is_err());
 /// # Ok::<(), inwx_client::Error>(())
 /// ```
@@ -653,13 +670,17 @@ impl DnsKey {
     ///
     /// [`Error::Validation`] when the string is not
     /// `<owner> IN DNSKEY <flag> 3 <algorithm> <key>`, when the protocol is not
-    /// `3`, when the flag is not 257, or when the algorithm is undocumented.
+    /// `3`, when the flag is not 257, when the algorithm is undocumented, or
+    /// when the key material is not base64.
     ///
     /// ```
     /// use inwx_client::DnsKey;
     ///
-    /// assert!(DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12c2").is_ok());
-    /// assert!(DnsKey::parse("example.com. IN DNSKEY 257 2 13 ac12c2").is_err());
+    /// assert!(DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12").is_ok());
+    /// assert!(DnsKey::parse("example.com. IN DNSKEY 257 2 13 ac12").is_err());
+    /// // `k` is not base64 of anything, and `====` is not key material either.
+    /// assert!(DnsKey::parse("example.com. IN DNSKEY 257 3 13 k").is_err());
+    /// assert!(DnsKey::parse("example.com. IN DNSKEY 257 3 13 ====").is_err());
     /// assert!(DnsKey::parse("").is_err());
     /// ```
     pub fn parse(input: &str) -> Result<Self> {
@@ -677,7 +698,8 @@ impl DnsKey {
         // One slice pattern instead of a length check plus `tokens[1..]`: the
         // bound and the field extraction cannot drift apart, so a short record
         // is an error instead of a panic.
-        let Some([owner, class, kind, flag, protocol, algorithm, _key, ..]) = tokens.get(..) else {
+        let Some([owner, class, kind, flag, protocol, algorithm, key, rest @ ..]) = tokens.get(..)
+        else {
             return Err(Error::validation(
                 "dnssec.dnskey",
                 "needs `<owner> IN DNSKEY <flag> 3 <algorithm> <key>`",
@@ -711,11 +733,35 @@ impl DnsKey {
                 format!("{algorithm:?} is not an algorithm id"),
             )
         })?;
+        let algorithm = DnssecAlgorithm::from_u8(algorithm)?;
+        // The key material is base64, and the `base64` crate is already a
+        // dependency of this crate (`accounting`, `document`), so it decodes it
+        // here instead of a local alphabet check: `DNSKEY 257 3 13 k` is not key
+        // material, and `base64::DecodeError` says why. No maintained crate
+        // parses the *record* (only `hickory-client` 0.26.0-alpha.1, an alpha
+        // DNS client), so the tokenizer above stays local.
+        //
+        // The tokens after the algorithm are joined first: a zone-file dump
+        // wraps long key material over several lines, and that is still one
+        // base64 string.
+        let mut material = (*key).to_owned();
+        for part in rest {
+            material.push_str(part);
+        }
+        base64::engine::general_purpose::STANDARD_NO_PAD
+            .decode(&material)
+            .or_else(|_| base64::engine::general_purpose::STANDARD.decode(&material))
+            .map_err(|error| {
+                Error::validation(
+                    "dnssec.dnskey",
+                    format!("the key material is not valid base64: {error}"),
+                )
+            })?;
         Ok(Self {
             raw: raw.to_owned(),
             owner: owner.to_string(),
             flag,
-            algorithm: DnssecAlgorithm::from_u8(algorithm)?,
+            algorithm,
         })
     }
 
@@ -724,8 +770,8 @@ impl DnsKey {
     /// ```
     /// use inwx_client::DnsKey;
     /// assert_eq!(
-    ///     DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12c2")?.as_str(),
-    ///     "example.com. IN DNSKEY 257 3 13 ac12c2"
+    ///     DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12")?.as_str(),
+    ///     "example.com. IN DNSKEY 257 3 13 ac12"
     /// );
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
@@ -738,7 +784,7 @@ impl DnsKey {
     ///
     /// ```
     /// use inwx_client::DnsKey;
-    /// assert_eq!(DnsKey::parse("example.com. IN DNSKEY 257 3 13 k")?.owner(), "example.com.");
+    /// assert_eq!(DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12")?.owner(), "example.com.");
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     #[must_use]
@@ -750,7 +796,7 @@ impl DnsKey {
     ///
     /// ```
     /// use inwx_client::{DnsKey, DnssecFlag};
-    /// assert_eq!(DnsKey::parse("a.de. IN DNSKEY 257 3 13 k")?.flag(), DnssecFlag::ZoneSep);
+    /// assert_eq!(DnsKey::parse("a.de. IN DNSKEY 257 3 13 ac12")?.flag(), DnssecFlag::ZoneSep);
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     #[must_use]
@@ -763,7 +809,7 @@ impl DnsKey {
     /// ```
     /// use inwx_client::{DnsKey, DnssecAlgorithm};
     /// assert_eq!(
-    ///     DnsKey::parse("a.de. IN DNSKEY 257 3 8 k")?.algorithm(),
+    ///     DnsKey::parse("a.de. IN DNSKEY 257 3 8 ac12")?.algorithm(),
     ///     DnssecAlgorithm::RsaSha256
     /// );
     /// # Ok::<(), inwx_client::Error>(())
@@ -802,15 +848,24 @@ impl Serialize for DnsKey {
 /// domain. [`AddDnsKeyRequest::with_ds`] compares the owner against the
 /// request's domain for that reason.
 ///
+/// The digest is not "some hex": its length follows from the digest type
+/// (SHA-256 is 32 bytes, SHA-384 is 48), so a truncated digest is refused
+/// locally instead of on the wire.
+///
 /// ```
 /// use inwx_client::{DsRecord, DnssecAlgorithm, DnssecDigestType};
 ///
-/// let ds = DsRecord::parse("example.com. IN DS 1234 13 2 56DC12")?;
+/// let digest = "0011".repeat(16); // 64 hex characters = 32 bytes
+/// let record = format!("example.com. IN DS 1234 13 2 {digest}");
+/// let ds = DsRecord::parse(&record)?;
 /// assert_eq!(ds.owner(), "example.com.");
 /// assert_eq!(ds.key_tag(), 1234);
 /// assert_eq!(ds.algorithm(), DnssecAlgorithm::EcdsaP256);
 /// assert_eq!(ds.digest_type(), DnssecDigestType::Sha256);
-/// assert!(DsRecord::parse("example.com. IN DS 1234 13 9 56DC12").is_err());
+///
+/// // An undocumented digest type, and a digest far too short to be SHA-256.
+/// assert!(DsRecord::parse("example.com. IN DS 1234 13 9 0011").is_err());
+/// assert!(DsRecord::parse("example.com. IN DS 1234 13 2 56DC12").is_err());
 /// # Ok::<(), inwx_client::Error>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -827,29 +882,45 @@ impl DsRecord {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the string is not
-    /// `<owner> IN DS <keytag> <algorithm> <digesttype> <digest>`, or a number is
-    /// outside the documented set.
+    /// [`Error::Validation`] when the string is not exactly
+    /// `<owner> IN DS <keytag> <algorithm> <digesttype> <digest>`, when a number
+    /// is outside the documented set, or when the digest is not hex of the
+    /// length its digest type requires.
     ///
     /// ```
     /// use inwx_client::DsRecord;
-    /// assert!(DsRecord::parse("example.com. IN DS 1234 13 2 56DC12").is_ok());
-    /// assert!(DsRecord::parse("example.com. IN DS 1234 13 56DC12").is_err());
+    ///
+    /// let digest = "00".repeat(32); // a SHA-256 digest: 64 hex characters
+    /// assert!(DsRecord::parse(&format!("example.com. IN DS 1 13 2 {digest}")).is_ok());
+    /// // One nibble short.
+    /// assert!(DsRecord::parse(&format!("example.com. IN DS 1 13 2 {}", &digest[1..])).is_err());
+    /// // One field too many, and one too few.
+    /// assert!(DsRecord::parse(&format!("example.com. IN DS 1 13 2 {digest} x")).is_err());
+    /// assert!(DsRecord::parse("example.com. IN DS 1234 13 2").is_err());
     /// ```
     pub fn parse(input: &str) -> Result<Self> {
         let raw = input.trim();
         if raw.is_empty() {
             return Err(Error::validation("dnssec.ds", "must not be empty"));
         }
+        // The same bound as `DnsKey::parse`, and for the same reason: the string
+        // is split into a `Vec` and kept in `raw`, so the cap is applied before
+        // the split rather than after it.
+        if raw.chars().count() > 1024 {
+            return Err(Error::validation(
+                "dnssec.ds",
+                "must be at most 1024 characters",
+            ));
+        }
         let tokens = raw.split_whitespace().collect::<Vec<_>>();
-        // One slice pattern for the seven fields: the bound and the extraction
-        // are the same step, so a short record is an error instead of a panic.
-        let Some([owner, class, kind, key_tag, algorithm, digest_type, digest, ..]) =
-            tokens.get(..)
+        // Exactly seven tokens, not "at least": the digest is one
+        // whitespace-free field, so `… 2 <digest> garbage` is a line the caller
+        // pasted wrong — and `raw`, everything up here, is what gets sent.
+        let Some([owner, class, kind, key_tag, algorithm, digest_type, digest]) = tokens.get(..)
         else {
             return Err(Error::validation(
                 "dnssec.ds",
-                "needs `<owner> IN DS <keytag> <algorithm> <digesttype> <digest>`",
+                "needs exactly `<owner> IN DS <keytag> <algorithm> <digesttype> <digest>`",
             ));
         };
         if !class.eq_ignore_ascii_case("IN") || !kind.eq_ignore_ascii_case("DS") {
@@ -867,18 +938,41 @@ impl DsRecord {
         let digest_type: u8 = digest_type.parse().map_err(|_| {
             Error::validation("dnssec.ds", format!("{digest_type:?} is not a digest type"))
         })?;
-        if !digest.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(Error::validation(
-                "dnssec.ds",
-                "the digest must be hexadecimal",
-            ));
+        let algorithm = DnssecAlgorithm::from_u8(algorithm)?;
+        let digest_type = DnssecDigestType::from_u8(digest_type)?;
+        // A DS digest is a hex string whose length the digest type fixes, so it
+        // is decoded with the maintained `data-encoding` instead of a local
+        // `is_ascii_hexdigit` loop and the decoded length is what decides: `AA`
+        // is a valid hex string and still not a SHA-256 digest. No crate parses
+        // the presentation record itself (`hickory-client` 0.26.0-alpha.1 is an
+        // alpha DNS client), which is why the tokenizer above is local.
+        let digest_bytes = data_encoding::HEXLOWER_PERMISSIVE
+            .decode(digest.as_bytes())
+            .map_err(|error| {
+                Error::validation(
+                    "dnssec.ds",
+                    format!("the digest is not hexadecimal: {error}"),
+                )
+            })?;
+        if let Some(expected) = digest_type.digest_len() {
+            if digest_bytes.len() != expected {
+                return Err(Error::validation(
+                    "dnssec.ds",
+                    format!(
+                        "a {digest_type} digest is {expected} bytes ({} hex characters), \
+                         this one is {}",
+                        expected * 2,
+                        digest_bytes.len()
+                    ),
+                ));
+            }
         }
         Ok(Self {
             raw: raw.to_owned(),
             owner: owner.to_string(),
             key_tag,
-            algorithm: DnssecAlgorithm::from_u8(algorithm)?,
-            digest_type: DnssecDigestType::from_u8(digest_type)?,
+            algorithm,
+            digest_type,
         })
     }
 
@@ -886,10 +980,8 @@ impl DsRecord {
     ///
     /// ```
     /// use inwx_client::DsRecord;
-    /// assert_eq!(
-    ///     DsRecord::parse("example.com. IN DS 1234 13 2 56DC12")?.as_str(),
-    ///     "example.com. IN DS 1234 13 2 56DC12"
-    /// );
+    /// let record = format!("example.com. IN DS 1234 13 2 {}", "00".repeat(32));
+    /// assert_eq!(DsRecord::parse(&record)?.as_str(), record);
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     #[must_use]
@@ -901,7 +993,8 @@ impl DsRecord {
     ///
     /// ```
     /// use inwx_client::DsRecord;
-    /// assert_eq!(DsRecord::parse("example.com. IN DS 1234 13 2 AA")?.owner(), "example.com.");
+    /// let record = format!("example.com. IN DS 1234 13 2 {}", "00".repeat(32));
+    /// assert_eq!(DsRecord::parse(&record)?.owner(), "example.com.");
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     #[must_use]
@@ -913,7 +1006,8 @@ impl DsRecord {
     ///
     /// ```
     /// use inwx_client::DsRecord;
-    /// assert_eq!(DsRecord::parse("a.de. IN DS 65535 13 2 AA")?.key_tag(), 65535);
+    /// let record = format!("a.de. IN DS 65535 13 2 {}", "00".repeat(32));
+    /// assert_eq!(DsRecord::parse(&record)?.key_tag(), 65535);
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     #[must_use]
@@ -925,7 +1019,8 @@ impl DsRecord {
     ///
     /// ```
     /// use inwx_client::{DsRecord, DnssecAlgorithm};
-    /// assert_eq!(DsRecord::parse("a.de. IN DS 1 8 2 AA")?.algorithm(), DnssecAlgorithm::RsaSha256);
+    /// let record = format!("a.de. IN DS 1 8 2 {}", "00".repeat(32));
+    /// assert_eq!(DsRecord::parse(&record)?.algorithm(), DnssecAlgorithm::RsaSha256);
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     #[must_use]
@@ -937,7 +1032,8 @@ impl DsRecord {
     ///
     /// ```
     /// use inwx_client::{DsRecord, DnssecDigestType};
-    /// assert_eq!(DsRecord::parse("a.de. IN DS 1 8 4 AA")?.digest_type(), DnssecDigestType::Sha384);
+    /// let record = format!("a.de. IN DS 1 8 4 {}", "00".repeat(48)); // 96 hex characters
+    /// assert_eq!(DsRecord::parse(&record)?.digest_type(), DnssecDigestType::Sha384);
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     #[must_use]
@@ -972,7 +1068,7 @@ impl Serialize for DsRecord {
 /// use inwx_client::DnsKeyPair;
 ///
 /// let pair: DnsKeyPair = serde_json::from_str(
-///     r#"{"dnskey":"example.com. IN DNSKEY 257 3 13 ac12","ds":"example.com. IN DS 1 13 2 AA"}"#,
+///     r#"{"dnskey":"example.com. IN DNSKEY 257 3 13 ac12","ds":"example.com. IN DS 1 13 2 00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF"}"#,
 /// )?;
 /// assert!(pair.dnskey.starts_with("example.com."));
 /// assert!(pair.ds.is_some());
@@ -1169,7 +1265,7 @@ fn check_zone_owner(
 ///
 /// let request = AddDnsKeyRequest::new(
 ///     DomainName::parse("example.com")?,
-///     DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12c2")?,
+///     DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12")?,
 /// )?
 /// .calculating_digest(DnssecDigestType::Sha384)?;
 ///
@@ -1226,15 +1322,16 @@ impl AddDnsKeyRequest {
     /// ```
     /// use inwx_client::{AddDnsKeyRequest, DnsKey, DsRecord, DnssecDigestType, DomainName};
     ///
+    /// let ds = format!("example.com. IN DS 1234 13 2 {}", "00".repeat(32));
     /// let request = AddDnsKeyRequest::new(
     ///     DomainName::parse("example.com")?,
     ///     DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12")?,
     /// )?
-    /// .with_ds(DsRecord::parse("example.com. IN DS 1234 13 2 AA")?)?;
-    /// assert_eq!(request.params()["ds"], "example.com. IN DS 1234 13 2 AA");
+    /// .with_ds(DsRecord::parse(&ds)?)?;
+    /// assert_eq!(request.params()["ds"], ds);
     ///
     /// // A DS for another zone is refused, not attached to this domain.
-    /// let foreign = DsRecord::parse("example.net. IN DS 1234 13 2 AA")?;
+    /// let foreign = DsRecord::parse(&format!("example.net. IN DS 1234 13 2 {}", "00".repeat(32)))?;
     /// assert!(AddDnsKeyRequest::new(
     ///     DomainName::parse("example.com")?,
     ///     DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12")?,
@@ -1630,7 +1727,7 @@ impl<T: Transport> InwxClient<T> {
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
     /// let request = AddDnsKeyRequest::new(
     ///     DomainName::parse("example.com")?,
-    ///     DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12c2")?,
+    ///     DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12")?,
     /// )?;
     /// let pair = client.add_dns_key(&request).await?;
     /// println!("{}", pair.dnskey);
@@ -1781,6 +1878,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn digest_len_is_known_only_for_documented_types() {
+        assert_eq!(DnssecDigestType::Sha256.digest_len(), Some(32));
+        assert_eq!(DnssecDigestType::Sha384.digest_len(), Some(48));
+        assert_eq!(DnssecDigestType::Other(7).digest_len(), None);
+    }
+
+    #[test]
     fn state_without_a_reported_status_keeps_it_absent() {
         let state = |json: &str| serde_json::from_str::<DnssecState>(json).unwrap();
 
@@ -1823,19 +1927,19 @@ mod tests {
         };
 
         // A foreign zone is refused: the digest is keyed by `domainName`.
-        let foreign = DsRecord::parse("example.net. IN DS 1234 13 2 AA").unwrap();
+        let foreign = DsRecord::parse("example.net. IN DS 1234 13 2 00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF").unwrap();
         let error = request().with_ds(foreign).unwrap_err();
         assert!(error.to_string().contains("example.net"), "{error}");
 
         // A parent or child of the domain is a different zone.
         for owner in ["com.", "sub.example.com.", "example.com.evil."] {
-            let ds = DsRecord::parse(&format!("{owner} IN DS 1234 13 2 AA")).unwrap();
+            let ds = DsRecord::parse(&format!("{owner} IN DS 1234 13 2 00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")).unwrap();
             assert!(request().with_ds(ds).is_err(), "{owner}");
         }
 
         // The trailing dot and the case are presentation noise, not a mismatch.
         for owner in ["example.com.", "example.com", "EXAMPLE.COM."] {
-            let ds = DsRecord::parse(&format!("{owner} IN DS 1234 13 2 AA")).unwrap();
+            let ds = DsRecord::parse(&format!("{owner} IN DS 1234 13 2 00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")).unwrap();
             assert!(request().with_ds(ds).is_ok(), "{owner}");
         }
     }
@@ -1847,7 +1951,7 @@ mod tests {
             DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12").unwrap(),
         )
         .unwrap()
-        .with_ds(DsRecord::parse("example.com. IN DS 1234 13 2 AA").unwrap())
+        .with_ds(DsRecord::parse("example.com. IN DS 1234 13 2 00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF").unwrap())
         .unwrap();
         assert!(request
             .calculating_digest(DnssecDigestType::Sha256)

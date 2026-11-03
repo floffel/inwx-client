@@ -491,11 +491,11 @@ fn dnskey_boundaries() {
     // Over-long presentation.
     assert!(DnsKey::parse(&"x".repeat(1025)).is_err());
 
-    assert!(DsRecord::parse("example.com. IN DS 0 13 2 AA").is_ok());
-    assert!(DsRecord::parse("example.com. IN DS 65535 13 2 AA").is_ok());
-    assert!(DsRecord::parse("example.com. IN DS 65536 13 2 AA").is_err());
+    assert!(DsRecord::parse("example.com. IN DS 0 13 2 00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF").is_ok());
+    assert!(DsRecord::parse("example.com. IN DS 65535 13 2 00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF").is_ok());
+    assert!(DsRecord::parse("example.com. IN DS 65536 13 2 00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF").is_err());
     assert!(DsRecord::parse("example.com. IN DS 1 13 2 ZZ").is_err());
-    assert!(DsRecord::parse("example.com. IN DS 1 99 2 AA").is_err());
+    assert!(DsRecord::parse("example.com. IN DS 1 99 2 00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF").is_err());
 }
 
 #[test]
@@ -507,7 +507,9 @@ fn ds_owner_boundary() {
         )
         .unwrap()
     };
-    let ds = |owner: &str| DsRecord::parse(&format!("{owner} IN DS 1234 13 2 AA")).unwrap();
+    let ds = |owner: &str| {
+        DsRecord::parse(&format!("{owner} IN DS 1234 13 2 00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")).unwrap()
+    };
 
     // Just inside: the zone itself, with or without the presentation dot and
     // in any ASCII case — `DomainName` stores the lower-cased form.
@@ -528,6 +530,86 @@ fn ds_owner_boundary() {
     ] {
         assert!(request().with_ds(ds(owner)).is_err(), "{owner}");
     }
+}
+
+#[test]
+fn ds_digest_is_checked_against_its_type() {
+    // 32 bytes for SHA-256, 48 for SHA-384 — the lengths RFC 4034 and RFC 6605 fix.
+    let sha256 = "00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF";
+    let sha384 = "00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF\
+                  00112233445566778899AABBCCDDEEFF";
+    assert_eq!(sha256.len(), 64);
+    assert_eq!(sha384.len(), 96);
+
+    // Just inside.
+    assert!(DsRecord::parse(&format!("example.com. IN DS 1 13 2 {sha256}")).is_ok());
+    assert!(DsRecord::parse(&format!("example.com. IN DS 1 13 4 {sha384}")).is_ok());
+
+    // Just outside, on both sides: 31 and 33 bytes, 47 and 49 bytes.
+    for digest in [sha256[..62].to_owned(), format!("{sha256}0000")] {
+        assert!(
+            DsRecord::parse(&format!("example.com. IN DS 1 13 2 {digest}")).is_err(),
+            "{digest}"
+        );
+    }
+    for digest in [sha384[..94].to_owned(), format!("{sha384}0000")] {
+        assert!(
+            DsRecord::parse(&format!("example.com. IN DS 1 13 4 {digest}")).is_err(),
+            "{digest}"
+        );
+    }
+
+    // A digest of the other type's length is not "close enough".
+    assert!(DsRecord::parse(&format!("example.com. IN DS 1 13 4 {sha256}")).is_err());
+
+    // The six-character digest the old parser accepted, and the error that now
+    // says what was expected instead of "not hex".
+    let error = DsRecord::parse("example.com. IN DS 1234 13 2 56DC12")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("32 bytes"), "{error}");
+}
+
+#[test]
+fn ds_token_count_is_exact() {
+    let digest = "00".repeat(32);
+
+    assert!(DsRecord::parse(&format!("example.com. IN DS 1 13 2 {digest}")).is_ok());
+
+    // An eighth token: `raw` is what gets sent, so trailing text is refused
+    // rather than shipped along with the digest.
+    assert!(DsRecord::parse(&format!("example.com. IN DS 1 13 2 {digest} garbage")).is_err());
+    // A sixth: the digest type and the digest are both missing.
+    assert!(DsRecord::parse("example.com. IN DS 1 13 2").is_err());
+
+    // The 1024-character cap is checked before the split, so neither a huge
+    // input nor its neighbour is buffered and parsed.
+    let error = DsRecord::parse(&"x".repeat(1025)).unwrap_err().to_string();
+    assert!(error.contains("1024"), "{error}");
+    assert!(DsRecord::parse(&"x".repeat(1024)).is_err());
+}
+
+#[test]
+fn dnskey_material_must_be_base64() {
+    // Just inside: canonical base64 for three bytes.
+    assert!(DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12").is_ok());
+
+    // Just outside: a lone symbol, a character outside the alphabet, and a
+    // length whose last character carries bits that are not there.
+    for key in ["k", "ac12!", "ac12c2", "===="] {
+        assert!(
+            DnsKey::parse(&format!("example.com. IN DNSKEY 257 3 13 {key}")).is_err(),
+            "{key}"
+        );
+    }
+
+    // Key material wrapped over two lines by a zone-file dump is still one
+    // base64 string, and the presentation is kept as written.
+    let wrapped = DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12 ac12").unwrap();
+    assert_eq!(
+        wrapped.as_str(),
+        "example.com. IN DNSKEY 257 3 13 ac12 ac12"
+    );
 }
 
 #[test]

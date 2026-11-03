@@ -24,6 +24,10 @@ http = ["dep:bytes", "dep:reqwest", "dep:tokio"]
 [dependencies]
 base64 = "0.22"
 bytes = { version = "1", optional = true }
+# The DS digest is hex and its length is fixed by the digest type; `data-encoding`
+# decodes it (both cases, with a typed error) instead of a local hex loop that
+# would report "not hex" for a digest that is hex of the wrong length.
+data-encoding = "2.11"
 # `Retry-After` may be a delay in seconds or an HTTP-date; both forms are
 # parsed by the maintained `httpdate`, never by hand.
 httpdate = "1"

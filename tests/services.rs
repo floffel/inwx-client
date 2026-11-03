@@ -48,11 +48,11 @@ async fn dnssec_toggles_send_the_domain() {
 #[tokio::test]
 async fn add_dns_key_sends_the_presentation_and_digest_request() {
     let transport = MockTransport::new();
-    transport.ok(json!({ "dnskey": "example.com. IN DNSKEY 257 3 13 ac12", "ds": "example.com. IN DS 1 13 2 AA" }));
+    transport.ok(json!({ "dnskey": "example.com. IN DNSKEY 257 3 13 ac12", "ds": "example.com. IN DS 1 13 2 00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF" }));
 
     let request = AddDnsKeyRequest::new(
         domain("example.com"),
-        DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12c2").unwrap(),
+        DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12").unwrap(),
     )
     .unwrap()
     .calculating_digest(DnssecDigestType::Sha384)
@@ -64,14 +64,14 @@ async fn add_dns_key_sends_the_presentation_and_digest_request() {
         .unwrap();
 
     assert!(pair.dnskey.starts_with("example.com."));
-    assert_eq!(pair.ds.as_deref(), Some("example.com. IN DS 1 13 2 AA"));
+    assert_eq!(pair.ds.as_deref(), Some("example.com. IN DS 1 13 2 00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF"));
 
     let call = transport.only_call();
     assert_eq!(call.method, "dnssec.adddnskey");
     assert_eq!(call.params["domainName"], "example.com");
     assert_eq!(
         call.params["dnskey"],
-        "example.com. IN DNSKEY 257 3 13 ac12c2"
+        "example.com. IN DNSKEY 257 3 13 ac12"
     );
     assert_eq!(call.params["calculateDigest"], true);
     assert_eq!(call.params["digestType"], 4);
@@ -88,7 +88,7 @@ async fn add_dns_key_with_a_supplied_ds_does_not_calculate() {
         DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12").unwrap(),
     )
     .unwrap()
-    .with_ds(DsRecord::parse("example.com. IN DS 1234 13 2 AA").unwrap())
+    .with_ds(DsRecord::parse("example.com. IN DS 1234 13 2 00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF").unwrap())
     .unwrap();
 
     client(transport.clone())
@@ -96,7 +96,7 @@ async fn add_dns_key_with_a_supplied_ds_does_not_calculate() {
         .await
         .unwrap();
     let call = transport.only_call();
-    assert_eq!(call.params["ds"], "example.com. IN DS 1234 13 2 AA");
+    assert_eq!(call.params["ds"], "example.com. IN DS 1234 13 2 00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF");
     assert!(call.params.get("calculateDigest").is_none());
 }
 
