@@ -4,7 +4,10 @@
 //! Four methods: upload a file, list what is stored, download one and delete
 //! one. Uploads are the risky direction, so the crate checks the file name
 //! (never a path), refuses an empty body and validates the size *before* it
-//! base64-encodes anything.
+//! base64-encodes anything. The read side is checked too: a download carries
+//! the size it claims, and [`DownloadedDocument::bytes`] holds the decoded body
+//! against it, so a body that was cut short in transit fails instead of being
+//! written to disk as a whole document.
 //!
 //! ```
 //! use inwx_client::DocumentUpload;
@@ -21,6 +24,7 @@
 
 use std::fmt;
 
+use serde::de::Error as _;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
@@ -556,6 +560,12 @@ impl DocumentUploadOutcome {
 /// `content`/`data` are merged when INWX sends both spellings, and the first
 /// spelling that carries a value wins.
 ///
+/// The answer also reports the stored size, and [`DownloadedDocument::bytes`]
+/// holds the decoded body against it: a body cut short in transit can still
+/// decode when the cut lands on a base64 boundary, and the declared size is the
+/// only thing that tells the two apart. A negative `size` is refused when the
+/// answer is parsed, because no decoded body can have one.
+///
 /// ```
 /// use inwx_client::DownloadedDocument;
 ///
@@ -588,48 +598,96 @@ pub struct DownloadedDocument {
     /// MIME type, when the API reports one.
     pub mime_type: Option<String>,
     /// Size in bytes, when the API reports one.
+    ///
+    /// The answer is a claim, not a measurement: [`bytes`](Self::bytes) compares
+    /// it with the decoded body and fails as [`Error::SizeMismatch`] when the two
+    /// disagree. Never negative — a parsed answer with a negative size is
+    /// rejected, and a hand-built one is refused by `bytes` just the same.
     pub size: Option<i64>,
 }
 
 /// Reads a download by key, so both spellings of a renamed field land in one
 /// place.
+///
+/// A negative `size` fails the answer instead of landing in the row: no decoded
+/// body can have a negative length, so the number is a mangled claim rather than
+/// a small one, and carrying it would only move the contradiction to
+/// [`DownloadedDocument::bytes`].
 impl<'de> Deserialize<'de> for DownloadedDocument {
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
         let fields = field_map(deserializer)?;
+        let size = match pick_i64(&fields, &["size"]) {
+            Some(declared) if declared < 0 => {
+                return Err(D::Error::custom(format!(
+                    "document size must not be negative, got {declared}"
+                )));
+            }
+            size => size,
+        };
         Ok(Self {
             id: pick_i64(&fields, &["documentId", "id"]),
             filename: pick_text(&fields, &["filename"]),
             content: pick_text(&fields, &["content", "data"]),
             mime_type: pick_text(&fields, &["mimeType", "mime_type"]),
-            size: pick_i64(&fields, &["size"]),
+            size,
         })
     }
 }
 
 impl DownloadedDocument {
-    /// Decodes the body.
+    /// Decodes the body and holds it against the size the answer declared.
     ///
-    /// ```
-    /// use inwx_client::DownloadedDocument;
+    /// ```rust
+    /// use inwx_client::{DownloadedDocument, Error};
     ///
     /// let good: DownloadedDocument = serde_json::from_str(r#"{"content":"aGk="}"#)?;
     /// assert_eq!(good.bytes()?, b"hi");
     ///
     /// let broken: DownloadedDocument = serde_json::from_str(r#"{"content":"!!!not base64!!!"}"#)?;
     /// assert!(broken.bytes().is_err());
-    /// # Ok::<(), inwx_client::Error>(())
+    ///
+    /// // A body cut on a base64 boundary still decodes to two bytes, and only
+    /// // the declared size notices that it is short.
+    /// let truncated: DownloadedDocument =
+    ///     serde_json::from_str(r#"{"content":"aGk=","size":40}"#)?;
+    /// assert!(matches!(
+    ///     truncated.bytes(),
+    ///     Err(Error::SizeMismatch { declared: 40, actual: 2, .. })
+    /// ));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when there is no body or it is not base64.
+    /// [`Error::Validation`] when there is no body or it is not base64,
+    /// [`Error::SizeMismatch`] when the decoded body is not as long as the
+    /// answer's `size` says, and [`Error::UnexpectedAnswer`] when the row carries
+    /// a negative `size` — a parsed answer refuses one, so only a hand-built
+    /// value can get that far.
     pub fn bytes(&self) -> Result<Vec<u8>> {
         let encoded = self.content.as_deref().ok_or_else(|| {
             Error::validation("document.content", "the answer carries no document body")
         })?;
-        decode_base64("document.content", encoded)
+        let bytes = decode_base64("document.content", encoded)?;
+        // A size the answer never reported cannot contradict anything.
+        let Some(declared) = self.size else {
+            return Ok(bytes);
+        };
+        let declared = u64::try_from(declared).map_err(|_| {
+            Error::unexpected_answer(
+                "document.download",
+                "size",
+                format!("declares a negative size ({declared})"),
+            )
+        })?;
+        let actual = bytes.len() as u64;
+        if declared == actual {
+            Ok(bytes)
+        } else {
+            Err(Error::size_mismatch("document.download", declared, actual))
+        }
     }
 
     /// Whether the body looks like a PDF, by file name or magic bytes.
@@ -922,6 +980,12 @@ impl<T: Transport> InwxClient<T> {
 
     /// Downloads one document (`document.download`).
     ///
+    /// The answer is not a file yet: it carries the base64 body next to the size
+    /// the service says it stored, and [`DownloadedDocument::bytes`] decodes the
+    /// one and holds it against the other. Writing the bytes without that check
+    /// is what turns a transfer cut short on a base64 boundary into a plausible
+    /// but incomplete file.
+    ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
     /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
@@ -939,8 +1003,9 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] for a non-positive id or a payload that does not
-    /// fit the model, plus the usual transport and API errors.
+    /// [`Error::Validation`] for a non-positive id, [`Error::Json`] for an answer
+    /// that does not fit the model — including a negative `size`, which no body
+    /// can have — plus the usual transport and API errors.
     pub async fn download_document(&self, document_id: i64) -> Result<DownloadedDocument> {
         validate_id("document.id", document_id)?;
         let data = self
@@ -1137,5 +1202,91 @@ mod tests {
     fn a_row_that_is_not_an_object_is_still_an_error() {
         assert!(serde_json::from_str::<DocumentEntry>("[]").is_err());
         assert!(serde_json::from_str::<DownloadedDocument>("\"aGk=\"").is_err());
+    }
+
+    #[test]
+    fn a_body_that_matches_its_declared_size_decodes_and_one_byte_off_is_refused() {
+        // `hi` is two bytes: 2 is the last accepted claim, 1 and 3 the first
+        // refused ones on either side.
+        let exact: DownloadedDocument =
+            serde_json::from_str(r#"{"content":"aGk=","size":2}"#).unwrap();
+        assert_eq!(exact.bytes().unwrap(), b"hi");
+
+        let short: DownloadedDocument =
+            serde_json::from_str(r#"{"content":"aGk=","size":3}"#).unwrap();
+        assert!(matches!(
+            short.bytes(),
+            Err(Error::SizeMismatch {
+                declared: 3,
+                actual: 2,
+                ..
+            })
+        ));
+
+        let long: DownloadedDocument =
+            serde_json::from_str(r#"{"content":"aGk=","size":1}"#).unwrap();
+        assert!(matches!(
+            long.bytes(),
+            Err(Error::SizeMismatch {
+                declared: 1,
+                actual: 2,
+                ..
+            })
+        ));
+
+        // No claim, nothing to contradict.
+        let unchecked: DownloadedDocument = serde_json::from_str(r#"{"content":"aGk="}"#).unwrap();
+        assert_eq!(unchecked.bytes().unwrap(), b"hi");
+    }
+
+    #[test]
+    fn a_body_cut_on_a_base64_boundary_is_caught_by_the_declared_size() {
+        // `hello` trimmed to `aGVs` still decodes — to three bytes instead of
+        // five. Only the size the answer declared notices.
+        let truncated: DownloadedDocument =
+            serde_json::from_str(r#"{"filename":"a.txt","content":"aGVs","size":5}"#).unwrap();
+        let error = truncated.bytes().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "`document.download` declared 5 bytes but the body carries 3"
+        );
+        assert!(!error.is_uncertain());
+        assert!(!error.is_retryable());
+        assert!(!error.is_validation());
+    }
+
+    #[test]
+    fn a_negative_declared_size_fails_the_answer_and_zero_is_still_a_size() {
+        // Zero is the boundary that is still a size: an empty body.
+        let empty: DownloadedDocument = serde_json::from_str(r#"{"content":"","size":0}"#).unwrap();
+        assert_eq!(empty.size, Some(0));
+        assert_eq!(empty.bytes().unwrap(), Vec::<u8>::new());
+
+        // One byte below zero is not, so the row never reaches a caller.
+        for size in ["-1", "-5", "-9223372036854775808"] {
+            let json = format!(r#"{{"content":"aGk=","size":{size}}}"#);
+            let error = serde_json::from_str::<DownloadedDocument>(&json).unwrap_err();
+            assert!(error.to_string().contains("must not be negative"), "{json}");
+        }
+
+        // The same row parses when the size is a usable claim.
+        let fine: DownloadedDocument =
+            serde_json::from_str(r#"{"content":"aGk=","size":2}"#).unwrap();
+        assert_eq!(fine.size, Some(2));
+    }
+
+    #[test]
+    fn a_hand_built_negative_size_is_refused_by_bytes() {
+        // The field is public, so a caller can build the contradiction the
+        // deserialiser refuses — `bytes` still will not decode it.
+        let document = DownloadedDocument {
+            content: Some("aGk=".to_owned()),
+            size: Some(-5),
+            ..DownloadedDocument::default()
+        };
+        assert!(matches!(
+            document.bytes(),
+            Err(Error::UnexpectedAnswer { field: "size", .. })
+        ));
     }
 }
