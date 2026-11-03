@@ -609,6 +609,7 @@ proptest! {
             status: inside,
             body: body.clone().into(),
             retry_after: None,
+            source: None,
         };
         prop_assert!(transient.is_retryable());
         prop_assert!(!transient.is_uncertain());
@@ -622,6 +623,7 @@ proptest! {
             status: outside,
             body: body.into(),
             retry_after: None,
+            source: None,
         };
         prop_assert!(!terminal.is_retryable());
         prop_assert!(!terminal.is_uncertain());
@@ -656,6 +658,7 @@ proptest! {
             status: 400,
             body: body.into(),
             retry_after: None,
+            source: None,
         };
         prop_assert!(!error.to_string().contains(&secret));
         prop_assert!(error.to_string().contains("<redacted>"));
@@ -672,6 +675,7 @@ proptest! {
             status,
             body: String::new().into(),
             retry_after: None,
+            source: None,
         };
         prop_assert_eq!(error.is_retryable(), matches!(status, 429 | 502 | 503 | 504));
     }
