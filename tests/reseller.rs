@@ -567,6 +567,54 @@ async fn download_document_decodes_the_body() {
 }
 
 #[tokio::test]
+async fn a_download_carrying_both_field_spellings_is_merged() {
+    let transport = MockTransport::new();
+    // A rename in flight: the answer carries the new key and the old one. This
+    // used to fail as `Error::Json`, losing a document the API did send.
+    transport.ok(json!({
+        "documentId": 81,
+        "id": 81,
+        "filename": "a.txt",
+        "content": "aGk=",
+        "data": "aGk=",
+        "mimeType": "text/plain",
+        "mime_type": "text/plain"
+    }));
+
+    let document = client(transport.clone())
+        .download_document(81)
+        .await
+        .unwrap();
+
+    assert_eq!(document.id, Some(81));
+    assert_eq!(document.mime_type.as_deref(), Some("text/plain"));
+    assert_eq!(document.bytes().unwrap(), b"hi");
+}
+
+#[tokio::test]
+async fn a_listed_row_carrying_both_field_spellings_keeps_its_place() {
+    let transport = MockTransport::new();
+    // Both rows are inside the page; the first carries every key twice.
+    transport.ok(json!({
+        "document": [
+            { "documentId": 1, "id": 1, "filename": "a.pdf", "size": 10, "read": 0 },
+            { "id": 2, "filename": "b.pdf", "size": 20, "read": 1 }
+        ]
+    }));
+
+    let documents = client(transport.clone())
+        .list_documents(&DocumentQuery::new())
+        .await
+        .unwrap();
+
+    assert_eq!(documents.len(), 2);
+    assert_eq!(documents[0].id, Some(1));
+    assert_eq!(documents[0].read, Some(false));
+    assert_eq!(documents[1].id, Some(2));
+    assert_eq!(documents[1].read, Some(true));
+}
+
+#[tokio::test]
 async fn document_ids_are_validated_before_the_wire() {
     let transport = MockTransport::new();
     transport.ok_empty();

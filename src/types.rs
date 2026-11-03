@@ -1567,6 +1567,61 @@ pub(crate) fn opt_i64_value(value: &Value) -> Option<i64> {
     }
 }
 
+/// An answer as a key → value map, so a struct can merge the spellings of one
+/// field itself.
+///
+/// serde's derive rejects an object that carries the renamed *and* the old
+/// spelling of a field (`duplicate_field`), and INWX answers a rename by
+/// sending both for a while. A struct that wants the merge instead of an error
+/// therefore deserialises the map and picks each field from it with
+/// [`pick_i64`], [`pick_text`] or [`pick_bool`].
+pub(crate) fn field_map<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<serde_json::Map<String, Value>, D::Error> {
+    serde_json::Map::<String, Value>::deserialize(deserializer)
+}
+
+/// An integer from the first of `keys` that carries a usable value — a number
+/// or a numeric string. A key that is absent, `null` or unparsable hands over to
+/// the next spelling instead of failing the answer.
+pub(crate) fn pick_i64(fields: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<i64> {
+    keys.iter()
+        .find_map(|key| fields.get(*key).and_then(opt_i64_value))
+}
+
+/// Text from the first of `keys` that carries a usable value, with numbers and
+/// booleans rendered as text the way [`de::opt_string`] does. Absent and `null`
+/// keys hand over to the next spelling.
+pub(crate) fn pick_text(fields: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        fields.get(*key).and_then(|value| match value {
+            Value::Null => None,
+            Value::String(text) => Some(text.clone()),
+            Value::Number(number) => Some(number.to_string()),
+            Value::Bool(flag) => Some(flag.to_string()),
+            other => Some(other.to_string()),
+        })
+    })
+}
+
+/// A boolean from the first of `keys` that carries a usable value, in the
+/// spellings [`de::opt_bool`] accepts. Absent, `null` and unparsable keys hand
+/// over to the next spelling.
+pub(crate) fn pick_bool(fields: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<bool> {
+    keys.iter().find_map(|key| {
+        fields.get(*key).and_then(|value| match value {
+            Value::Bool(flag) => Some(*flag),
+            Value::Number(number) => number.as_i64().map(|number| number != 0),
+            Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" => Some(true),
+                "0" | "false" | "no" => Some(false),
+                _ => None,
+            },
+            _ => None,
+        })
+    })
+}
+
 /// The rows of a list answer under `key`: an array is used as it arrives, a
 /// single object becomes a one-row list (INWX drops the array when exactly one
 /// object matches), anything else yields no rows.
