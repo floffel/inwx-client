@@ -367,7 +367,7 @@ pub use dyndns::{
     DynDnsLogEntry, DynDnsRecord, DynDnsUpdate,
 };
 pub use dyndnssubscription::DynDnsSubscription;
-pub use error::{Error, HttpBody, Result, MAX_HTTP_BODY_CHARS};
+pub use error::{retry_after_from_header, Error, HttpBody, Result, MAX_HTTP_BODY_CHARS};
 pub use host::{
     HostCheck, HostCheckResult, HostCreate, HostQuery, HostRecord, HostUpdate, MAX_HOST_ADDRESSES,
 };

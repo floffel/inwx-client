@@ -6,6 +6,7 @@
 
 use std::fmt;
 use std::ops::Deref;
+use std::time::{Duration, SystemTime};
 
 use thiserror::Error;
 
@@ -208,20 +209,29 @@ pub enum Error {
     /// a character boundary and redacts known secrets before the error ever
     /// exists — `Display` and `Debug` print that same safe text.
     ///
-    /// ```
+    /// A transient status is often accompanied by a `Retry-After` header saying
+    /// how long the endpoint wants to be left alone. That delay is kept in
+    /// `retry_after` and read back through [`Error::retry_after`]: seeing it
+    /// after the fact is what lets a caller pace its own retry instead of
+    /// guessing, since the client never sleeps on a header it did not read.
+    ///
+    /// ```rust
     /// use inwx_client::Error;
     ///
-    /// let gateway = Error::Http {
-    ///     status: 502,
-    ///     body: "bad gateway".into(),
-    /// };
+    /// let gateway = Error::http(502, "bad gateway");
     /// assert!(gateway.is_retryable());
+    /// assert_eq!(gateway.retry_after(), None);
     ///
-    /// let gone = Error::Http {
-    ///     status: 404,
-    ///     body: "no such page".into(),
-    /// };
+    /// let gone = Error::http(404, "no such page");
     /// assert!(!gone.is_retryable());
+    ///
+    /// let throttled = Error::http(429, "slow down").with_retry_after(
+    ///     std::time::Duration::from_secs(30),
+    /// );
+    /// assert_eq!(
+    ///     throttled.retry_after(),
+    ///     Some(std::time::Duration::from_secs(30)),
+    /// );
     /// ```
     #[error("http {status}: {body}")]
     Http {
@@ -230,6 +240,16 @@ pub enum Error {
         /// Body, bounded to [`MAX_HTTP_BODY_CHARS`] characters and with
         /// sensitive values redacted — see [`HttpBody`].
         body: HttpBody,
+        /// Delay the endpoint asked for in a `Retry-After` header, or `None`
+        /// when the answer carried no usable one.
+        ///
+        /// Both header forms are understood: delay-seconds (`120`) and an
+        /// HTTP-date (`Sun, 06 Nov 1994 08:49:37 GMT`, read relative to the
+        /// moment the answer arrived, so a date in the past becomes
+        /// [`Duration::ZERO`]). The value is advisory and unbounded — the
+        /// crate never sleeps on it, so a caller that waits should cap it
+        /// against its own deadline.
+        retry_after: Option<Duration>,
     },
 
     /// A response body crossed the transport's size cap, so it was discarded
@@ -415,6 +435,10 @@ impl Error {
     /// envelope. The body is bounded and redacted by [`HttpBody`] on the way in,
     /// so the error stays safe to log whatever the endpoint sent.
     ///
+    /// The `Retry-After` of the answer is not part of this call site — add it
+    /// with [`with_retry_after`](Self::with_retry_after) when the transport saw
+    /// one.
+    ///
     /// ```
     /// use inwx_client::Error;
     ///
@@ -431,6 +455,82 @@ impl Error {
         Self::Http {
             status,
             body: body.into(),
+            retry_after: None,
+        }
+    }
+
+    /// Records the delay a `Retry-After` header asked for on an
+    /// [`Error::Http`].
+    ///
+    /// The header is advisory input from the network, so it is carried as data
+    /// and never turned into a sleep here: a caller that decides to wait reads
+    /// it back with [`retry_after`](Self::retry_after) and caps it itself.
+    /// Calling this on any other variant is a no-op, so a path that builds an
+    /// error without matching first stays readable.
+    ///
+    /// ```rust
+    /// use inwx_client::Error;
+    /// use std::time::Duration;
+    ///
+    /// let err = Error::http(429, "too many requests").with_retry_after(Duration::from_secs(120));
+    /// assert_eq!(err.retry_after(), Some(Duration::from_secs(120)));
+    /// // The classification does not change: 429 was retryable already.
+    /// assert!(err.is_retryable());
+    ///
+    /// // Attaching a delay never overrides the status: 404 stays terminal.
+    /// let gone = Error::http(404, "no such page").with_retry_after(Duration::from_secs(5));
+    /// assert_eq!(gone.retry_after(), Some(Duration::from_secs(5)));
+    /// assert!(!gone.is_retryable());
+    /// assert_eq!(Error::validation("domain", "empty").retry_after(), None);
+    /// ```
+    #[must_use]
+    pub fn with_retry_after(mut self, retry_after: Duration) -> Self {
+        if let Self::Http {
+            retry_after: slot, ..
+        } = &mut self
+        {
+            *slot = Some(retry_after);
+        }
+        self
+    }
+
+    /// Delay the endpoint asked for before the next attempt, if it asked for
+    /// one.
+    ///
+    /// `Some` only for an [`Error::Http`] that carried a usable `Retry-After`
+    /// header: either delay-seconds (`120`) or an HTTP-date, which is turned
+    /// into a delay relative to the moment the answer arrived — a date already
+    /// in the past yields [`Duration::ZERO`], meaning "retry now". Every other
+    /// failure, and an `Http` without the header, answers `None`, so the
+    /// caller's own backoff applies.
+    ///
+    /// This is the server's wish, not a recommendation: the value is unbounded
+    /// and says nothing about whether the failed command may be replayed — for
+    /// a mutating method that decision is [`is_retryable`](Self::is_retryable)
+    /// and [`is_uncertain`](Self::is_uncertain).
+    ///
+    /// ```rust
+    /// use inwx_client::{retry_after_from_header, Error};
+    /// use std::time::Duration;
+    ///
+    /// // The two forms the header is allowed to take.
+    /// let seconds = retry_after_from_header("30");
+    /// assert_eq!(seconds, Some(Duration::from_secs(30)));
+    ///
+    /// let throttled = Error::http(429, "too many requests")
+    ///     .with_retry_after(seconds.unwrap_or_default());
+    /// assert_eq!(throttled.retry_after(), Some(Duration::from_secs(30)));
+    /// assert!(throttled.is_retryable());
+    ///
+    /// // No header seen: the caller's backoff decides.
+    /// assert_eq!(Error::http(503, "unavailable").retry_after(), None);
+    /// assert_eq!(Error::uncertain("timeout").retry_after(), None);
+    /// ```
+    #[must_use]
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Http { retry_after, .. } => *retry_after,
+            _ => None,
         }
     }
 
@@ -474,6 +574,10 @@ impl Error {
     /// transient status says another attempt *could* work, not that replaying
     /// `domain.create` is safe.
     ///
+    /// A `Retry-After` header carried on the error never changes the answer
+    /// here — it only says *when* a retry would be polite, never *whether* one
+    /// is allowed; see [`Error::retry_after`].
+    ///
     /// [`Error::Uncertain`] is *not* retryable here: the command may already
     /// have been executed. [`InwxClient::call`](crate::InwxClient::call) still
     /// replays it for a read-only method, where a second attempt cannot
@@ -488,9 +592,9 @@ impl Error {
     /// assert!(!Error::validation("domain", "empty").is_retryable());
     ///
     /// // A gateway hiccup is transient, a rejected request is not.
-    /// let gateway = Error::Http { status: 503, body: "unavailable".into() };
+    /// let gateway = Error::http(503, "unavailable");
     /// assert!(gateway.is_retryable());
-    /// let denied = Error::Http { status: 403, body: "forbidden".into() };
+    /// let denied = Error::http(403, "forbidden");
     /// assert!(!denied.is_retryable());
     /// assert_eq!(RetryPolicy::default().delay(1), Some(std::time::Duration::from_millis(500)));
     /// ```
@@ -916,6 +1020,62 @@ fn is_transient_status(status: u16) -> bool {
     matches!(status, 429 | 502 | 503 | 504)
 }
 
+/// Delay a `Retry-After` header asks for, in the header's own terms.
+///
+/// The header has two forms (RFC 9110 §10.2.3): delay-seconds, a non-negative
+/// integer, and an HTTP-date. A date is measured against the current instant —
+/// so a date in the past, the endpoint saying "immediately", yields
+/// [`Duration::ZERO`] instead of a negative wait. Anything else (empty,
+/// negative, fractional, out of range, not a date) answers `None`: a value the
+/// client cannot read must not become a made-up delay.
+///
+/// Attach the result with [`Error::with_retry_after`], or read it back from an
+/// error with [`Error::retry_after`]. This is the parser the client itself uses
+/// on every non-envelope answer, exposed because a caller with its own
+/// [`Transport`](crate::transport::Transport) or HTTP stack needs the same
+/// reading.
+///
+/// ```rust
+/// use inwx_client::retry_after_from_header;
+/// use std::time::Duration;
+///
+/// // Delay-seconds, padded or not.
+/// assert_eq!(retry_after_from_header("120"), Some(Duration::from_secs(120)));
+/// assert_eq!(retry_after_from_header(" 0 "), Some(Duration::ZERO));
+///
+/// // A date in the past means "now", never a negative delay.
+/// assert_eq!(
+///     retry_after_from_header("Sun, 06 Nov 1994 08:49:37 GMT"),
+///     Some(Duration::ZERO),
+/// );
+///
+/// // Not a delay: nothing is invented.
+/// assert_eq!(retry_after_from_header("soon"), None);
+/// assert_eq!(retry_after_from_header("-1"), None);
+/// assert_eq!(retry_after_from_header(""), None);
+/// ```
+#[must_use]
+pub fn retry_after_from_header(value: &str) -> Option<Duration> {
+    retry_after_at(value, SystemTime::now())
+}
+
+/// [`retry_after_from_header`] against an explicit instant, so the date form
+/// stays a pure function: the caller decides what "now" is.
+pub(crate) fn retry_after_at(value: &str, now: SystemTime) -> Option<Duration> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    // Delay-seconds: digits only. `parse::<u64>` would also accept `+5` and
+    // `1_000`, neither of which the grammar allows, and an overflow must not
+    // wrap into a short delay.
+    if value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return value.parse::<u64>().ok().map(Duration::from_secs);
+    }
+    let deadline = httpdate::parse_http_date(value).ok()?;
+    Some(deadline.duration_since(now).unwrap_or(Duration::ZERO))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -924,6 +1084,7 @@ mod tests {
         Error::Http {
             status,
             body: "gateway trouble".into(),
+            retry_after: None,
         }
     }
 
@@ -1018,14 +1179,159 @@ mod tests {
             let error = Error::Http {
                 status: 503,
                 body: body.to_owned().into(),
+                retry_after: None,
             };
             assert!(error.is_retryable());
             let terminal = Error::Http {
                 status: 404,
                 body: body.to_owned().into(),
+                retry_after: None,
             };
             assert!(!terminal.is_retryable());
         }
+    }
+
+    /// The header is data, not a verdict: attaching, carrying and reading it
+    /// back says nothing about whether the status may be replayed. Edge pair:
+    /// no header seen and the smallest delay that is not zero.
+    #[test]
+    fn the_retry_after_header_is_carried_without_changing_the_verdict() {
+        assert_eq!(http(429).retry_after(), None);
+
+        let immediate = http(429).with_retry_after(Duration::ZERO);
+        assert_eq!(immediate.retry_after(), Some(Duration::ZERO));
+        assert!(immediate.is_retryable());
+
+        let throttled = http(429).with_retry_after(Duration::from_secs(120));
+        assert_eq!(throttled.retry_after(), Some(Duration::from_secs(120)));
+        assert!(throttled.is_retryable());
+
+        // Attaching it to a terminal status does not make that status retryable.
+        let denied = http(403).with_retry_after(Duration::from_secs(120));
+        assert_eq!(denied.retry_after(), Some(Duration::from_secs(120)));
+        assert!(!denied.is_retryable());
+
+        // The largest expressible delay survives the round trip unchanged.
+        let huge = http(503).with_retry_after(Duration::from_secs(u64::MAX));
+        assert_eq!(huge.retry_after(), Some(Duration::from_secs(u64::MAX)));
+
+        // Neither the body nor the delay reaches the message; the verdict is
+        // the only thing `Display` is allowed to leak.
+        assert_eq!(throttled.to_string(), "http 429: gateway trouble");
+        assert!(!throttled.to_string().contains("120"));
+    }
+
+    /// Every other variant answers `None`, whatever the builder was handed.
+    #[test]
+    fn only_an_http_error_carries_a_retry_after() {
+        for error in [
+            Error::uncertain("timeout"),
+            Error::validation("domain", "empty"),
+            Error::transport_before_send("dns lookup failed"),
+            Error::NotAuthenticated,
+            Error::Api {
+                code: 2300,
+                message: String::from("object pending transfer"),
+                reason_code: None,
+                reason: None,
+                details: Vec::new(),
+            },
+        ] {
+            assert_eq!(error.retry_after(), None, "{error}");
+            assert_eq!(
+                error.with_retry_after(Duration::from_secs(1)).retry_after(),
+                None
+            );
+        }
+    }
+
+    /// 1994-11-06T08:49:37Z, the date RFC 9110 uses in its own example.
+    const FIXDATE: &str = "Sun, 06 Nov 1994 08:49:37 GMT";
+    const FIXDATE_EPOCH_SECS: u64 = 784_111_777;
+
+    fn at(seconds: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
+    }
+
+    /// Delay-seconds: zero, a typical value, and the largest value that still
+    /// fits — with one past the edge and the shapes a `u64` parser would
+    /// wrongly accept.
+    #[test]
+    fn retry_after_seconds_parse_exactly() {
+        let now = at(FIXDATE_EPOCH_SECS);
+        assert_eq!(retry_after_at("0", now), Some(Duration::ZERO));
+        assert_eq!(retry_after_at("120", now), Some(Duration::from_secs(120)));
+        assert_eq!(
+            retry_after_at(" 120\t", now),
+            Some(Duration::from_secs(120))
+        );
+        // Leading zeros are still a number.
+        assert_eq!(retry_after_at("0007", now), Some(Duration::from_secs(7)));
+        // One past `u64::MAX` must not wrap into a short delay.
+        assert_eq!(retry_after_at("18446744073709551616", now), None);
+        assert_eq!(
+            retry_after_at("18446744073709551615", now),
+            Some(Duration::from_secs(u64::MAX))
+        );
+
+        for rejected in ["", "  ", "-1", "+5", "1.5", "1s", "12 0", "abc", "0x10"] {
+            assert_eq!(retry_after_at(rejected, now), None, "{rejected:?}");
+        }
+    }
+
+    /// A date is measured against `now`: in the future it is the distance, at
+    /// or before `now` it is "retry now". All three formats a recipient must
+    /// accept are read.
+    #[test]
+    fn retry_after_dates_are_measured_against_now() {
+        let deadline = at(FIXDATE_EPOCH_SECS);
+
+        // Just inside: one second before the date.
+        assert_eq!(
+            retry_after_at(FIXDATE, at(FIXDATE_EPOCH_SECS - 1)),
+            Some(Duration::from_secs(1))
+        );
+        // The date itself and anything older mean "now", never a negative wait.
+        assert_eq!(retry_after_at(FIXDATE, deadline), Some(Duration::ZERO));
+        assert_eq!(
+            retry_after_at(FIXDATE, at(FIXDATE_EPOCH_SECS + 86_400)),
+            Some(Duration::ZERO)
+        );
+        // Same instant, spelled the other two ways a recipient must accept.
+        for spelling in ["Sunday, 06-Nov-94 08:49:37 GMT", "Sun Nov  6 08:49:37 1994"] {
+            assert_eq!(
+                retry_after_at(spelling, at(FIXDATE_EPOCH_SECS - 5)),
+                Some(Duration::from_secs(5)),
+                "{spelling}"
+            );
+        }
+
+        // Not a date, not a number: no delay rather than a made-up one.
+        for rejected in [
+            "Sun, 32 Nov 1994 08:49:37 GMT",
+            "Sun, 06 Foo 1994 08:49:37 GMT",
+            "1994-11-06T08:49:37Z",
+            "Sun, 06 Nov 1994 08:49:37",
+        ] {
+            assert_eq!(retry_after_at(rejected, deadline), None, "{rejected}");
+        }
+    }
+
+    /// The public entry point reads the clock for the date form: a date long
+    /// past is "now", a date far ahead is a long wait, a number is the number.
+    #[test]
+    fn the_public_parser_reads_the_clock_for_dates() {
+        assert_eq!(
+            retry_after_from_header(FIXDATE),
+            Some(Duration::ZERO),
+            "a 1994 date is long past"
+        );
+        assert_eq!(retry_after_from_header("90"), Some(Duration::from_secs(90)));
+        assert!(
+            retry_after_from_header("Mon, 06 Nov 2400 08:49:37 GMT")
+                .is_some_and(|delay| delay > Duration::from_secs(3_000_000_000)),
+            "a date centuries ahead is a long wait"
+        );
     }
 
     /// No behavior change for the other variants.

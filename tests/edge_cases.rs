@@ -335,7 +335,7 @@ async fn a_long_error_body_is_truncated_in_the_http_error() {
         .unwrap_err();
 
     match error {
-        Error::Http { status, body } => {
+        Error::Http { status, body, .. } => {
             assert_eq!(status, 400);
             assert_eq!(
                 body.as_str().chars().count(),
