@@ -178,6 +178,13 @@ absent id is `None`, never a silently substituted `0`. The same holds for
 — not a defaulted `MANUAL`, which would claim keys are managed through this
 API and make "no status reported" indistinguishable from a real `MANUAL`.
 
+Leniency stops at the row. The list itself is not optional: `dnssec.info` and
+`dnssec.listkeys` answer `Error::UnexpectedAnswer` when the `data` / `dnskey`
+array is absent or has another shape, and an entry that does not parse fails the
+whole call with its index. A present but empty array stays `Ok`, so "this domain
+has no manual keys" and "the answer did not carry the list" never read the same
+to a caller that is about to delete or re-add keys.
+
 Validation: the DNSKEY parser enforces `IN DNSKEY`, protocol `3`, flag **257
 only** — the method's description says "only ZONE+SEP keys (flag value 257) are
 accepted" — a documented algorithm, and key material that decodes as base64

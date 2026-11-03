@@ -8,7 +8,7 @@ use common::{client, client_without_retries, MockTransport};
 use inwx_client::{
     AddDnsKeyRequest, DnsKey, DnssecAlgorithm, DnssecDigestType, DnssecDomainStatus,
     DnssecKeyQuery, DnssecKeyStatus, DomainName, DsRecord, DynDnsAccount, DynDnsAccountRef, Email,
-    Handle, HostingOrder, HostingPeriod, Hostname, NameserverSetCreate, NameserverSetType,
+    Error, Handle, HostingOrder, HostingPeriod, Hostname, NameserverSetCreate, NameserverSetType,
     NameserverSetUpdate, TagUpdate, Timestamp,
 };
 use serde_json::json;
@@ -234,8 +234,141 @@ async fn list_dns_keys_keeps_a_key_signed_with_an_unknown_algorithm() {
     );
 }
 
-// -------------------------------------------------------- NAMESERVER SET ----
+/// Boundary pair: an empty array is a domain without managed keys, a missing
+/// array is an answer that failed — and only the first may read as "no keys".
+#[tokio::test]
+async fn an_empty_key_list_is_an_answer_but_a_missing_one_is_not() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "dnskey": [] }));
+    transport.ok(json!({ "dnskey": [{ "id": 7, "status": "OK" }] }));
 
+    let client = client(transport.clone());
+    let empty = client.list_dns_keys(&DnssecKeyQuery::new()).await.unwrap();
+    assert!(empty.is_empty());
+    assert_eq!(
+        client
+            .list_dns_keys(&DnssecKeyQuery::new())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    transport.ok(json!({}));
+    let error = client
+        .list_dns_keys(&DnssecKeyQuery::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::UnexpectedAnswer {
+            method: "dnssec.listkeys",
+            field: "dnskey",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn a_key_list_of_another_shape_fails_the_read() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "dnskey": { "0": { "id": 7 } } }));
+    transport.ok(json!({ "dnskey": "id=7" }));
+
+    let client = client(transport);
+    for _ in 0..2 {
+        let error = client
+            .list_dns_keys(&DnssecKeyQuery::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::UnexpectedAnswer {
+                field: "dnskey",
+                ..
+            }
+        ));
+    }
+}
+
+/// The defect this guards: `filter_map(..ok())` dropped this row and returned
+/// `Ok`, so a domain whose only key carries an out-of-range tag looked like a
+/// domain without keys.
+#[tokio::test]
+async fn an_unparseable_key_fails_the_read_instead_of_disappearing() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "dnskey": [
+        { "id": 7, "keyTag": 1234, "status": "OK" },
+        { "id": 8, "keyTag": 70000, "status": "OK" }
+    ] }));
+
+    let client = client(transport);
+    let error = client
+        .list_dns_keys(&DnssecKeyQuery::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::UnexpectedAnswer {
+            method: "dnssec.listkeys",
+            field: "dnskey",
+            ..
+        }
+    ));
+    assert!(
+        error.to_string().contains("entry 1"),
+        "the failing row must be named: {error}"
+    );
+}
+
+#[tokio::test]
+async fn dnssec_info_without_a_data_array_fails_the_read() {
+    let transport = MockTransport::new();
+    transport.ok(json!({}));
+    transport.ok(json!({ "data": {} }));
+
+    let client = client(transport.clone());
+    for _ in 0..2 {
+        let error = client.dnssec_info(None).await.unwrap_err();
+        assert!(matches!(
+            error,
+            Error::UnexpectedAnswer {
+                method: "dnssec.info",
+                field: "data",
+                ..
+            }
+        ));
+    }
+
+    transport.ok(json!({ "data": [] }));
+    assert!(client.dnssec_info(None).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_domain_state_that_does_not_parse_fails_the_read() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "data": [
+        { "domain": "example.com", "dnssecStatus": "MANUAL" },
+        { "keyCount": 2 }
+    ] }));
+
+    let client = client(transport);
+    let error = client.dnssec_info(None).await.unwrap_err();
+    assert!(matches!(
+        error,
+        Error::UnexpectedAnswer {
+            method: "dnssec.info",
+            field: "data",
+            ..
+        }
+    ));
+    assert!(
+        error.to_string().contains("entry 1"),
+        "the failing row must be named: {error}"
+    );
+}
+
+// -------------------------------------------------------- NAMESERVER SET ----
 fn nameserver_set() -> NameserverSetCreate {
     NameserverSetCreate::new(NameserverSetType::Primary, &[host("ns1.example.net")])
         .unwrap()

@@ -9,7 +9,7 @@
 use std::fmt;
 
 use base64::Engine as _;
-use serde::de::Error as _;
+use serde::de::{DeserializeOwned, Error as _};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{json, Map, Value};
 
@@ -1815,7 +1815,10 @@ impl<T: Transport> InwxClient<T> {
     /// # Errors
     ///
     /// [`Error::Validation`] for an empty domain list (use `None` for "all"),
-    /// plus the usual transport and API errors.
+    /// [`Error::UnexpectedAnswer`] when the answer carries no `data` array, a
+    /// `data` of another shape, or an entry that does not parse — plus the
+    /// usual transport and API errors. A domain whose state cannot be read is
+    /// never reported as a domain without DNSSEC.
     pub async fn dnssec_info(&self, domains: Option<&[DomainName]>) -> Result<Vec<DnssecState>> {
         let params = match domains {
             None => json!({}),
@@ -1830,14 +1833,12 @@ impl<T: Transport> InwxClient<T> {
             }),
         };
         let data = self.call("dnssec.info", params).await?;
-        let entries = match data.get("data") {
-            Some(Value::Array(entries)) => entries.clone(),
-            _ => Vec::new(),
-        };
-        Ok(entries
-            .into_iter()
-            .filter_map(|entry| serde_json::from_value(entry).ok())
-            .collect())
+        decode_answer_rows(
+            &data,
+            "dnssec.info",
+            "data",
+            "expected an array with one entry per domain",
+        )
     }
 
     /// Lists manually managed DNSKEYs (`dnssec.listkeys`).
@@ -1859,18 +1860,59 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// The usual transport and API errors.
+    /// [`Error::UnexpectedAnswer`] when the answer carries no `dnskey` array, a
+    /// `dnskey` of another shape, or a key that does not parse — plus the usual
+    /// transport and API errors. An empty array is a domain without manual keys;
+    /// an answer that failed to carry the list is not, because a caller that
+    /// reads "no keys" from it would delete and re-add exactly the keys it could
+    /// not see.
     pub async fn list_dns_keys(&self, query: &DnssecKeyQuery) -> Result<Vec<DnssecKey>> {
         let data = self.call("dnssec.listkeys", query.params()).await?;
-        let entries = match data.get("dnskey") {
-            Some(Value::Array(entries)) => entries.clone(),
-            _ => Vec::new(),
-        };
-        Ok(entries
-            .into_iter()
-            .filter_map(|entry| serde_json::from_value(entry).ok())
-            .collect())
+        decode_answer_rows(
+            &data,
+            "dnssec.listkeys",
+            "dnskey",
+            "expected an array with one entry per managed key",
+        )
     }
+}
+
+/// Decodes the rows of a DNSSEC read answer, failing closed.
+///
+/// Both DNSSEC reads feed destructive commands: [`InwxClient::delete_dns_key`]
+/// takes an id from this list and [`InwxClient::delete_all_dns_keys`] follows a
+/// `"no keys"` answer. A row that is silently dropped therefore does not just
+/// shorten a report — it makes a domain with a scheduled-for-deletion key look
+/// empty, which is the state that invites re-adding keys that already exist.
+///
+/// So neither tolerance this module used to apply survives: a missing or
+/// non-array list is [`Error::UnexpectedAnswer`] (the shape was renamed, or the
+/// answer carries nothing), and a row that does not parse fails the whole call
+/// with its index, instead of vanishing from the vector. A present but empty
+/// array stays `Ok`: a domain without manual keys is a documented answer, and
+/// the caller can tell it apart from a broken one.
+fn decode_answer_rows<T: DeserializeOwned>(
+    data: &Value,
+    method: &'static str,
+    field: &'static str,
+    expected: &'static str,
+) -> Result<Vec<T>> {
+    let Some(Value::Array(entries)) = data.get(field) else {
+        return Err(Error::unexpected_answer(method, field, expected));
+    };
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            serde_json::from_value(entry.clone()).map_err(|error| {
+                Error::unexpected_answer(
+                    method,
+                    field,
+                    format!("entry {index} does not parse: {error}"),
+                )
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
