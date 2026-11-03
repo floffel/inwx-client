@@ -574,6 +574,15 @@ characters), the body is neither empty nor larger than `MAX_DOCUMENT_BYTES`
 bigger again — and the body is absent from `Debug`, because these documents are
 mandates and ID copies.
 
+The download side carries its own claim and is held to it. `document.download`
+reports `size` next to the base64 body; `DownloadedDocument::bytes` decodes the
+body and compares the two, so a transfer cut short on a base64 boundary — which
+still decodes, just shorter — fails as `Error::SizeMismatch` instead of being
+written out as the document. The failure is certain (nothing was written, both
+counts are known) and not retryable; a second attempt is the caller's call. A
+negative `size` is refused when the answer is parsed, and by `bytes` on a
+hand-built row.
+
 The answer is a `DocumentUploadOutcome`, not a bare `DocumentEntry`. The row's
 `id` is optional in the documented shape, so "stored, but the answer named no
 id" and "nothing stored (a dry run)" would otherwise arrive as the same `Ok` —

@@ -617,6 +617,16 @@ fn an_error_cause_survives_the_crate_boundary() {
     // A variant without a cause slot is untouched by the builder.
     let plain = Error::validation("domain", "empty").with_source(std::io::Error::other("late"));
     assert!(std::error::Error::source(&plain).is_none());
+
+    // A body that contradicts its own declared size is a certain, terminal
+    // failure: both numbers are known and nothing was written.
+    let sized = Error::size_mismatch("document.download", 1024, 512);
+    assert_eq!(
+        sized.to_string(),
+        "`document.download` declared 1024 bytes but the body carries 512"
+    );
+    assert!(!sized.is_retryable());
+    assert!(!sized.is_uncertain());
 }
 
 #[test]

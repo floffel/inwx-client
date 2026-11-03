@@ -322,6 +322,44 @@ pub enum Error {
         source: Option<ErrorSource>,
     },
 
+    /// A decoded body does not have the byte count the same answer declared for
+    /// it.
+    ///
+    /// `document.download` reports the stored size next to the base64 body, and
+    /// that pair is the only cross-check the read path has: a body cut short in
+    /// transit but still ending on a base64 boundary decodes cleanly into fewer
+    /// bytes than the service said it stored. Compared after decoding, the two
+    /// numbers catch that; without the check the caller writes a truncated file
+    /// and treats it as the document.
+    ///
+    /// The failure is certain rather than [`Error::Uncertain`] — nothing was
+    /// written, and both byte counts are known — so
+    /// [`is_uncertain`](Error::is_uncertain) is `false`. It is not retryable
+    /// either: repeating a download that already produced a contradictory answer
+    /// fetches the same contradiction, so a second attempt is the caller's
+    /// decision, not the client's.
+    ///
+    /// ```rust
+    /// use inwx_client::{DownloadedDocument, Error};
+    ///
+    /// // Two bytes of body, but the answer promises ten.
+    /// let document: DownloadedDocument = serde_json::from_str(r#"{"content":"aGk=","size":10}"#)?;
+    /// let err = document.bytes().unwrap_err();
+    /// assert!(matches!(err, Error::SizeMismatch { declared: 10, actual: 2, .. }));
+    /// assert!(!err.is_uncertain());
+    /// assert!(!err.is_retryable());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[error("`{method}` declared {declared} bytes but the body carries {actual}")]
+    SizeMismatch {
+        /// The method whose answer contradicted itself.
+        method: &'static str,
+        /// Byte count the answer declared, from the `size` field.
+        declared: u64,
+        /// Byte count the decoded body actually has.
+        actual: u64,
+    },
+
     /// The server answered with a non-2xx status and a body that is not an
     /// INWX error envelope.
     ///
@@ -478,6 +516,28 @@ impl Error {
             method,
             field,
             detail: detail.into(),
+        }
+    }
+
+    /// Builds an [`Error::SizeMismatch`] for a body that does not have the size
+    /// its own answer declared. Both counts are in bytes.
+    ///
+    /// ```rust
+    /// use inwx_client::Error;
+    ///
+    /// let err = Error::size_mismatch("document.download", 10, 2);
+    /// assert_eq!(
+    ///     err.to_string(),
+    ///     "`document.download` declared 10 bytes but the body carries 2",
+    /// );
+    /// assert!(!err.is_retryable());
+    /// ```
+    #[must_use]
+    pub fn size_mismatch(method: &'static str, declared: u64, actual: u64) -> Self {
+        Self::SizeMismatch {
+            method,
+            declared,
+            actual,
         }
     }
 
@@ -901,9 +961,10 @@ impl Error {
             Self::Api { code, .. } => *code == 2300,
             Self::Http { status, .. } => is_transient_status(*status),
             // Terminal by design — validation, decoding, authentication, HTTP,
-            // a missing field, and `ResponseTooLarge` (a body over the cap is a
-            // property of the answer, and the command behind it may already have
-            // run, so repeating it would duplicate work).
+            // a missing field, a body that contradicts its own declared size and
+            // `ResponseTooLarge` (a body over the cap is a property of the
+            // answer, and the command behind it may already have run, so
+            // repeating it would duplicate work).
             _ => false,
         }
     }

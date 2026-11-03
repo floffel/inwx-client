@@ -888,6 +888,29 @@ fn reseller_value_types_run_their_trait_impls() {
         serde_json::from_str(r#"{"filename":"x.txt","content":"aGk="}"#).unwrap();
     assert!(!text.is_pdf());
     assert!(DownloadedDocument::default().bytes().is_err());
+
+    // A body shorter than the size its answer declared fails instead of being
+    // handed over as a whole document (issue #124).
+    let short: DownloadedDocument =
+        serde_json::from_str(r#"{"filename":"x.txt","content":"aGk=","size":3}"#).unwrap();
+    let mismatch = short.bytes().unwrap_err();
+    assert!(matches!(
+        &mismatch,
+        inwx_client::Error::SizeMismatch {
+            declared: 3,
+            actual: 2,
+            ..
+        }
+    ));
+    assert_eq!(
+        inwx_client::Error::size_mismatch("document.download", 3, 2).to_string(),
+        mismatch.to_string()
+    );
+    // The size itself cannot be negative, and zero is still a size.
+    assert!(serde_json::from_str::<DownloadedDocument>(r#"{"content":"aGk=","size":-1}"#).is_err());
+    let empty: DownloadedDocument = serde_json::from_str(r#"{"content":"","size":0}"#).unwrap();
+    assert!(empty.bytes().is_ok());
+
     assert!(PdfFile::default().bytes().is_err());
 }
 
