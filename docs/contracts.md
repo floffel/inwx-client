@@ -180,8 +180,13 @@ API and make "no status reported" indistinguishable from a real `MANUAL`.
 
 Validation: the DNSKEY parser enforces `IN DNSKEY`, protocol `3`, flag **257
 only** — the method's description says "only ZONE+SEP keys (flag value 257) are
-accepted" — a documented algorithm and a documented digest type. Both records
-carry their owner, and `AddDnsKeyRequest` compares it with the request's domain
+accepted" — a documented algorithm, and key material that decodes as base64
+(the crate's `base64`, joined over wrapped lines). The DS parser enforces
+exactly seven fields, a documented algorithm and digest type, and a hex digest
+whose **length follows from the digest type** (32 bytes for SHA-256, 48 for
+SHA-384); both parsers cap the presentation at 1024 characters before splitting
+it. Both records carry their owner, and `AddDnsKeyRequest` compares it with the
+request's domain
 (case-insensitively, ignoring the presentation's trailing dot): the API keys
 the digest by `domainName`, so a key or DS string for a foreign zone is refused
 instead of being published against the wrong domain. `calculateDigest`

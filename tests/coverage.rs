@@ -365,20 +365,20 @@ fn dnssec_error_branches() {
     assert!(DnsKey::parse("example.com. IN DNSKEY 257 3 alg ac12").is_err());
 
     // DS: wrong class, non-numeric algorithm, non-numeric digest type.
-    assert!(DsRecord::parse("example.com. IN A 1234 13 2 AA").is_err());
-    assert!(DsRecord::parse("example.com. IN DS 1234 alg 2 AA").is_err());
+    assert!(DsRecord::parse("example.com. IN A 1234 13 2 00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF").is_err());
+    assert!(DsRecord::parse("example.com. IN DS 1234 alg 2 00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF").is_err());
     assert!(DsRecord::parse("example.com. IN DS 1234 13 dt AA").is_err());
 
     // Accessors and formatting.
-    let ds = DsRecord::parse("example.com. IN DS 1234 13 2 AA").unwrap();
-    assert_eq!(ds.as_str(), "example.com. IN DS 1234 13 2 AA");
+    let ds = DsRecord::parse("example.com. IN DS 1234 13 2 00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF").unwrap();
+    assert_eq!(ds.as_str(), "example.com. IN DS 1234 13 2 00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF");
     assert_eq!(ds.owner(), "example.com.");
     assert_eq!(ds.key_tag(), 1234);
     assert_eq!(ds.algorithm(), DnssecAlgorithm::EcdsaP256);
     assert_eq!(ds.digest_type(), DnssecDigestType::Sha256);
     assert_eq!(ds.to_string(), ds.as_str());
     assert_eq!(
-        "example.com. IN DS 1234 13 2 AA"
+        "example.com. IN DS 1234 13 2 00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF"
             .parse::<DsRecord>()
             .unwrap(),
         ds
