@@ -9,12 +9,14 @@
 //! [`Error::with_source`] is how a cause is attached.
 //!
 //! Certainty is part of the type. A failure that happened after the request was
-//! written leaves the outcome of the command unknown, and it is spelled two
-//! ways: [`Error::Uncertain`] for the transport (a timeout, a reset) and
-//! [`Error::Undecodable`] for decoding (an answer whose body cannot be read).
-//! Both answer [`Error::is_uncertain`] with `true` and are never replayed for a
-//! mutating command; [`Error::Json`] is the other side of that line — a payload
-//! that arrived intact and does not fit the model, behind a command that ran.
+//! written leaves the outcome of the command unknown, and it is spelled three
+//! ways: [`Error::Uncertain`] for the transport (a timeout, a reset),
+//! [`Error::Undecodable`] for decoding (an answer whose body cannot be read) and
+//! [`Error::Ambiguous`] for an answer that arrives and names no result (an
+//! upload the API accepted without returning a `documentId`). All three answer
+//! [`Error::is_uncertain`] with `true` and are never replayed for a mutating
+//! command; [`Error::Json`] is the other side of that line — a payload that
+//! arrived intact and does not fit the model, behind a command that ran.
 
 use std::fmt;
 use std::ops::Deref;
@@ -280,6 +282,44 @@ pub enum Error {
         /// What was expected, and which entry failed when the list itself was
         /// the right shape.
         detail: String,
+    },
+
+    /// The command ran and its answer carried no error, yet the answer does not
+    /// name the result the caller needs: a `document.upload` that came back
+    /// without a usable `documentId`, for example.
+    ///
+    /// This is neither a transport failure nor a decoding failure of the
+    /// exchange — the request was answered and the body parsed — but the outcome
+    /// cannot be reported as a success either, because the caller cannot act on
+    /// it. The mutation has almost certainly been applied, so the verdict is the
+    /// same as for [`Error::Uncertain`]:
+    /// [`is_uncertain`](Error::is_uncertain) is `true`,
+    /// [`is_retryable`](Error::is_retryable) is `false`, and replaying the
+    /// request can duplicate the work. `detail` says what is missing and how the
+    /// caller can establish the state another way (usually: list before writing
+    /// again).
+    ///
+    /// ```rust
+    /// use inwx_client::Error;
+    ///
+    /// let err = Error::ambiguous(
+    ///     "document.upload",
+    ///     "the answer carries no documentId; list the documents before uploading again",
+    /// );
+    /// assert!(err.is_uncertain());
+    /// assert!(!err.is_retryable());
+    /// assert!(err.to_string().contains("may have been executed"));
+    /// ```
+    #[error("ambiguous answer for `{method}`: {detail} (the command may have been executed)")]
+    Ambiguous {
+        /// The method that was called.
+        method: &'static str,
+        /// What the answer is missing, and what a caller can do instead.
+        detail: String,
+        /// The decode failure behind the missing value, when a parse went
+        /// wrong. See [`Error::with_source`].
+        #[source]
+        source: Option<ErrorSource>,
     },
 
     /// The server answered with a non-2xx status and a body that is not an
@@ -597,6 +637,37 @@ impl Error {
         }
     }
 
+    /// Builds an [`Error::Ambiguous`] for an answer that names no result.
+    ///
+    /// `method` is the method that was called, `detail` what the answer is
+    /// missing and how a caller can find the state out another way. Attach the
+    /// parse failure with [`with_source`](Self::with_source) when the answer did
+    /// not decode; the parse error then stays walkable instead of being
+    /// flattened into `detail`.
+    ///
+    /// ```rust
+    /// use inwx_client::Error;
+    /// use std::error::Error as _;
+    ///
+    /// let err = Error::ambiguous("document.upload", "the answer carries no documentId");
+    /// assert!(err.is_uncertain());
+    /// assert_eq!(err.code(), None);
+    /// assert!(err.source().is_none());
+    ///
+    /// let failed = serde_json::from_str::<serde_json::Value>("{not json")
+    ///     .expect_err("garbage is not JSON");
+    /// let caused = err.with_source(failed);
+    /// assert!(caused.source().is_some());
+    /// ```
+    #[must_use]
+    pub fn ambiguous(method: &'static str, detail: impl Into<String>) -> Self {
+        Self::Ambiguous {
+            method,
+            detail: detail.into(),
+            source: None,
+        }
+    }
+
     /// Builds an [`Error::Http`] for a non-2xx answer whose body is not an INWX
     /// envelope. The body is bounded and redacted by [`HttpBody`] on the way in,
     /// so the error stays safe to log whatever the endpoint sent.
@@ -636,9 +707,10 @@ impl Error {
     /// parse a message.
     ///
     /// Supported on [`Error::Transport`], [`Error::Uncertain`],
-    /// [`Error::Authentication`] and [`Error::Http`]. On any other variant it is
-    /// a no-op, like [`with_retry_after`](Self::with_retry_after), so a path
-    /// that builds an error without matching first stays readable.
+    /// [`Error::Authentication`], [`Error::Ambiguous`] and [`Error::Http`]. On
+    /// any other variant it is a no-op, like
+    /// [`with_retry_after`](Self::with_retry_after), so a path that builds an
+    /// error without matching first stays readable.
     ///
     /// `message` is not rewritten: it is what `Display` prints, and keeping the
     /// cause out of it is what stops the same text (and any URL in it) from
@@ -666,6 +738,7 @@ impl Error {
             Self::Transport { source: slot, .. }
             | Self::Uncertain { source: slot, .. }
             | Self::Authentication { source: slot, .. }
+            | Self::Ambiguous { source: slot, .. }
             | Self::Http { source: slot, .. } => *slot = Some(source),
             _ => {}
         }
@@ -836,17 +909,19 @@ impl Error {
     }
 
     /// Whether the outcome of the command is unknown: the request was written
-    /// and the exchange then broke, either in transport (a timeout, a reset
+    /// and the exchange then broke, in transport (a timeout, a reset
     /// mid-response, a truncated body) or in decoding (an answer whose body
-    /// cannot be read as an envelope).
+    /// cannot be read as an envelope) — or it completed and named no result
+    /// ([`Error::Ambiguous`], an accepted upload without a `documentId`).
     ///
-    /// Both cases mean the API may already have executed the command, so a
+    /// All three mean the API may already have executed the command, so a
     /// replay can duplicate a mutation.
     ///
     /// ```rust
     /// use inwx_client::Error;
     ///
     /// assert!(Error::uncertain("timeout").is_uncertain());
+    /// assert!(Error::ambiguous("document.upload", "no documentId").is_uncertain());
     /// assert!(!Error::transport_before_send("dns lookup failed").is_uncertain());
     ///
     /// // The decode side of the same ambiguity: the answer arrived, the body
@@ -862,7 +937,10 @@ impl Error {
     /// ```
     #[must_use]
     pub fn is_uncertain(&self) -> bool {
-        matches!(self, Self::Uncertain { .. } | Self::Undecodable { .. })
+        matches!(
+            self,
+            Self::Uncertain { .. } | Self::Undecodable { .. } | Self::Ambiguous { .. }
+        )
     }
 
     /// Whether this is a rejected session rather than a rejected command.
@@ -1407,6 +1485,7 @@ mod tests {
             Error::transport_before_send("dns lookup failed").with_source(cause_of("cause")),
             Error::uncertain("timeout").with_source(cause_of("cause")),
             Error::http(503, "unavailable").with_source(cause_of("cause")),
+            Error::ambiguous("document.upload", "no documentId").with_source(cause_of("cause")),
             Error::Authentication {
                 message: String::from("no cookie"),
                 source: None,
@@ -1512,6 +1591,35 @@ mod tests {
         };
         assert!(empty.is_uncertain());
         assert!(!empty.is_retryable());
+    }
+
+    /// An answer that arrived and named no result: the command ran, the client
+    /// just cannot say what it produced. Verdict like a transport failure after
+    /// the write — uncertain, never retryable — with the parse failure walkable
+    /// as the cause when there was one.
+    #[test]
+    fn an_ambiguous_answer_is_uncertain_and_never_retryable() {
+        let error = Error::ambiguous("document.upload", "the answer carries no documentId");
+
+        assert!(error.is_uncertain());
+        assert!(!error.is_retryable());
+        assert!(!error.is_authentication());
+        assert!(!error.is_missing_credentials());
+        assert!(!error.is_validation());
+        assert_eq!(error.code(), None);
+        assert_eq!(error.retry_after(), None);
+        assert!(cause(&error).is_none());
+        assert!(error.to_string().contains("document.upload"));
+        assert!(error.to_string().contains("may have been executed"));
+
+        // The parse failure behind a missing value stays the cause instead of
+        // being flattened into the detail text.
+        let failed = serde_json::from_str::<serde_json::Value>("{not json")
+            .expect_err("garbage is not JSON");
+        let caused = error.with_source(failed);
+        assert!(cause(&caused).is_some());
+        assert!(caused.is_uncertain());
+        assert!(!caused.is_retryable());
     }
 
     /// Boundary pair around the certainty of a decode failure: the same

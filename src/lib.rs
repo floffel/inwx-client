@@ -360,7 +360,8 @@ pub use dnssec::{
     DnssecFlag, DnssecKey, DnssecKeyQuery, DnssecKeyStatus, DnssecState, DsRecord,
 };
 pub use document::{
-    DocumentEntry, DocumentQuery, DocumentUpload, DownloadedDocument, MAX_DOCUMENT_BYTES,
+    DocumentEntry, DocumentQuery, DocumentUpload, DocumentUploadOutcome, DownloadedDocument,
+    MAX_DOCUMENT_BYTES,
 };
 pub use domain::{
     AuthInfoUpdate, ClientHoldResult, DomainCheck, DomainControlResult, DomainCreate, DomainInfo,

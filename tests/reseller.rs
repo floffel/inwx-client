@@ -12,8 +12,8 @@ use common::{client, MockTransport};
 use inwx_client::{
     ApplicationCheck, ApplicationCreate, ApplicationQuery, ApplicationType, ApplicationUpdate,
     AuthInfo2Order, ContactVerificationSettingsUpdate, CustomerDownloadQuery, CustomerUpdate,
-    DocumentQuery, DocumentUpload, DomainName, Error, HostCheck, HostCreate, HostQuery, HostUpdate,
-    Hostname, MessageAck, NicHandleQuery, PdfRender,
+    DocumentQuery, DocumentUpload, DocumentUploadOutcome, DomainName, Error, HostCheck, HostCreate,
+    HostQuery, HostUpdate, Hostname, MessageAck, NicHandleQuery, PdfRender,
 };
 use serde_json::json;
 
@@ -509,13 +509,119 @@ async fn upload_document_base64_encodes_the_body() {
         .await
         .unwrap();
 
-    assert_eq!(stored.id, Some(81));
+    assert_eq!(stored.id(), Some(81));
+    assert!(stored.is_stored());
+    assert_eq!(
+        stored.entry().and_then(|entry| entry.filename.as_deref()),
+        Some("mandate.pdf")
+    );
 
     let call = transport.only_call();
     assert_eq!(call.method, "document.upload");
     assert_eq!(call.params["filename"], "mandate.pdf");
     assert_eq!(call.params["type"], "MANDATE");
     assert_eq!(call.params["content"], "JVBERi0xLjc=");
+}
+
+#[tokio::test]
+async fn a_dry_run_upload_reports_that_nothing_was_stored() {
+    let transport = MockTransport::new();
+    transport.ok_empty();
+
+    let upload = DocumentUpload::new("mandate.pdf", b"%PDF-1.7")
+        .unwrap()
+        .with_testing(true);
+
+    let outcome = client(transport.clone())
+        .upload_document(&upload)
+        .await
+        .expect("a dry run is a certain outcome, not an error");
+
+    assert_eq!(outcome, DocumentUploadOutcome::dry_run());
+    assert!(outcome.is_dry_run());
+    assert!(!outcome.is_stored());
+    assert_eq!(outcome.id(), None);
+
+    let call = transport.only_call();
+    assert_eq!(call.params["testing"], true);
+}
+
+#[tokio::test]
+async fn an_upload_without_an_id_is_ambiguous_not_a_success() {
+    let transport = MockTransport::new();
+    // Stored by the service, but the answer names nothing: a caller that took
+    // this as `Ok` would own a document it can never download or delete.
+    transport.ok(json!({ "filename": "mandate.pdf" }));
+
+    let upload = DocumentUpload::new("mandate.pdf", b"%PDF-1.7").unwrap();
+    let error = client(transport.clone())
+        .upload_document(&upload)
+        .await
+        .expect_err("an upload without an id is not a success");
+
+    assert!(matches!(
+        error,
+        Error::Ambiguous {
+            method: "document.upload",
+            ..
+        }
+    ));
+    assert!(error.is_uncertain());
+    assert!(!error.is_retryable());
+    assert!(
+        error.to_string().contains("before"),
+        "the error says what to do instead: {error}"
+    );
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
+async fn the_last_usable_id_is_one_and_zero_is_not_usable() {
+    // Just inside: the smallest id `download_document` accepts.
+    let stored_transport = MockTransport::new();
+    stored_transport.ok(json!({ "id": 1 }));
+    let upload = DocumentUpload::new("a.pdf", b"x").unwrap();
+    let outcome = client(stored_transport.clone())
+        .upload_document(&upload)
+        .await
+        .unwrap();
+    assert_eq!(outcome.id(), Some(1));
+
+    // Just outside: `0` is not a handle, so it may not be handed out as one.
+    let zero_transport = MockTransport::new();
+    zero_transport.ok(json!({ "id": 0 }));
+    let error = client(zero_transport.clone())
+        .upload_document(&upload)
+        .await
+        .expect_err("an id of zero is not a usable handle");
+    assert!(error.is_uncertain());
+
+    // And a negative id is the same shape of nonsense.
+    let negative_transport = MockTransport::new();
+    negative_transport.ok(json!({ "documentId": -7 }));
+    assert!(client(negative_transport.clone())
+        .upload_document(&upload)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn an_unreadable_upload_answer_stays_uncertain_with_its_cause() {
+    let transport = MockTransport::new();
+    transport.ok(json!("stored"));
+
+    let upload = DocumentUpload::new("a.pdf", b"x").unwrap();
+    let error = client(transport.clone())
+        .upload_document(&upload)
+        .await
+        .expect_err("a scalar is not a document row");
+
+    assert!(error.is_uncertain());
+    assert!(!error.is_retryable());
+    assert!(
+        std::error::Error::source(&error).is_some(),
+        "the parse failure stays walkable: {error}"
+    );
 }
 
 #[tokio::test]
