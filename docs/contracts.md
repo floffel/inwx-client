@@ -167,6 +167,13 @@ Datatypes (ch03 §3.33–3.37): algorithms 5, 7, 8, 10, 13, 14, 15, 16; digest t
 2, 4; flags 256 (`ZONE`), 257 (`ZONE+SEP`); key status `CREATE`, `DELAYED`, `OK`,
 `DELETED`, `IGNORE`; domain status `DELETE_ALL`, `MANUAL`, `UPDATE`.
 
+Responses are read leniently: `dnssec.listkeys` returns `keyTag` as `u16` and
+`algorithmId`/`flagId`/`digestTypeId`/`status` as `DnssecAlgorithm`,
+`DnssecFlag`, `DnssecDigestType` and `DnssecKeyStatus`. A number outside the
+tables above is carried as `Other(..)` instead of failing the row, so a key
+signed with a later-assigned algorithm does not disappear from the list; an
+absent id is `None`, never a silently substituted `0`.
+
 Validation: the DNSKEY parser enforces `IN DNSKEY`, protocol `3`, flag **257
 only** — the method's description says "only ZONE+SEP keys (flag value 257) are
 accepted" — a documented algorithm and a documented digest type. `calculateDigest`

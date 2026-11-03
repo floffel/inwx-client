@@ -20,7 +20,10 @@ use crate::types::{de, DomainName, Timestamp};
 /// A DNSSEC signing algorithm (`dnssecAlgorithm`).
 ///
 /// The variants are exactly the numbers the datatype chapter lists; an
-/// unlisted number is refused, because the API only accepts the documented set.
+/// unlisted number is refused for a request, because the API only accepts the
+/// documented set. A response is read leniently instead: a number this table
+/// does not list becomes [`DnssecAlgorithm::Other`], so a key signed with a
+/// later-assigned algorithm stays readable.
 ///
 /// ```
 /// use inwx_client::DnssecAlgorithm;
@@ -48,6 +51,11 @@ pub enum DnssecAlgorithm {
     Ed25519,
     /// 16 — ED448.
     Ed448,
+    /// A number this table does not list, carried as it arrived.
+    ///
+    /// Only a response produces this variant; a request still goes through
+    /// [`DnssecAlgorithm::from_u8`], which refuses an undocumented id.
+    Other(u8),
 }
 
 impl DnssecAlgorithm {
@@ -68,6 +76,7 @@ impl DnssecAlgorithm {
             Self::EcdsaP384 => 14,
             Self::Ed25519 => 15,
             Self::Ed448 => 16,
+            Self::Other(raw) => raw,
         }
     }
 
@@ -100,6 +109,28 @@ impl DnssecAlgorithm {
             }
         })
     }
+
+    /// Parses a numeric id as it arrives in a response.
+    ///
+    /// Unlike [`DnssecAlgorithm::from_u8`] nothing is refused: a number this
+    /// table does not list becomes [`DnssecAlgorithm::Other`], so a response
+    /// never loses a key over an algorithm that was assigned after this crate
+    /// was written.
+    ///
+    /// ```
+    /// use inwx_client::DnssecAlgorithm;
+    ///
+    /// assert_eq!(DnssecAlgorithm::from_u8_lenient(16), DnssecAlgorithm::Ed448);
+    /// assert_eq!(DnssecAlgorithm::from_u8_lenient(17), DnssecAlgorithm::Other(17));
+    /// assert_eq!(DnssecAlgorithm::Other(17).as_u8(), 17);
+    /// ```
+    #[must_use]
+    pub fn from_u8_lenient(value: u8) -> Self {
+        match Self::from_u8(value) {
+            Ok(known) => known,
+            Err(_) => Self::Other(value),
+        }
+    }
 }
 
 impl fmt::Display for DnssecAlgorithm {
@@ -116,14 +147,18 @@ impl Serialize for DnssecAlgorithm {
 
 impl<'de> Deserialize<'de> for DnssecAlgorithm {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-        let value = de::opt_i64(deserializer)?.unwrap_or_default();
+        let value =
+            de::opt_i64(deserializer)?.ok_or_else(|| D::Error::custom("algorithm is missing"))?;
         let value = u8::try_from(value)
             .map_err(|_| D::Error::custom(format!("algorithm {value} is out of range")))?;
-        Self::from_u8(value).map_err(D::Error::custom)
+        Ok(Self::from_u8_lenient(value))
     }
 }
 
 /// A DNSSEC digest type (`dnssecDigestType`).
+///
+/// A request is checked against the documented set; a response is read
+/// leniently, carrying an unlisted number as [`DnssecDigestType::Other`].
 ///
 /// ```
 /// use inwx_client::DnssecDigestType;
@@ -139,6 +174,8 @@ pub enum DnssecDigestType {
     Sha256,
     /// 4 — SHA-384.
     Sha384,
+    /// A number this table does not list, carried as it arrived.
+    Other(u8),
 }
 
 impl DnssecDigestType {
@@ -153,6 +190,7 @@ impl DnssecDigestType {
         match self {
             Self::Sha256 => 2,
             Self::Sha384 => 4,
+            Self::Other(raw) => raw,
         }
     }
 
@@ -177,6 +215,23 @@ impl DnssecDigestType {
             )),
         }
     }
+
+    /// Parses a numeric id as it arrives in a response, carrying an unlisted
+    /// number as [`DnssecDigestType::Other`] instead of refusing it.
+    ///
+    /// ```
+    /// use inwx_client::DnssecDigestType;
+    ///
+    /// assert_eq!(DnssecDigestType::from_u8_lenient(4), DnssecDigestType::Sha384);
+    /// assert_eq!(DnssecDigestType::from_u8_lenient(5), DnssecDigestType::Other(5));
+    /// ```
+    #[must_use]
+    pub fn from_u8_lenient(value: u8) -> Self {
+        match Self::from_u8(value) {
+            Ok(known) => known,
+            Err(_) => Self::Other(value),
+        }
+    }
 }
 
 impl fmt::Display for DnssecDigestType {
@@ -193,14 +248,18 @@ impl Serialize for DnssecDigestType {
 
 impl<'de> Deserialize<'de> for DnssecDigestType {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-        let value = de::opt_i64(deserializer)?.unwrap_or_default();
+        let value =
+            de::opt_i64(deserializer)?.ok_or_else(|| D::Error::custom("digest type is missing"))?;
         let value = u8::try_from(value)
             .map_err(|_| D::Error::custom(format!("digest type {value} is out of range")))?;
-        Self::from_u8(value).map_err(D::Error::custom)
+        Ok(Self::from_u8_lenient(value))
     }
 }
 
 /// A DNSSEC key flag (`dnssecFlag`).
+///
+/// A request accepts the two documented flags only; a response is read
+/// leniently, carrying anything else as [`DnssecFlag::Other`].
 ///
 /// ```
 /// use inwx_client::DnssecFlag;
@@ -216,6 +275,8 @@ pub enum DnssecFlag {
     Zone,
     /// 257 — ZONE+SEP (the only flag `dnssec.adddnskey` accepts).
     ZoneSep,
+    /// A number this table does not list, carried as it arrived.
+    Other(u16),
 }
 
 impl DnssecFlag {
@@ -230,6 +291,7 @@ impl DnssecFlag {
         match self {
             Self::Zone => 256,
             Self::ZoneSep => 257,
+            Self::Other(raw) => raw,
         }
     }
 
@@ -254,6 +316,23 @@ impl DnssecFlag {
             )),
         }
     }
+
+    /// Parses a numeric id as it arrives in a response, carrying an unlisted
+    /// number as [`DnssecFlag::Other`] instead of refusing it.
+    ///
+    /// ```
+    /// use inwx_client::DnssecFlag;
+    ///
+    /// assert_eq!(DnssecFlag::from_u16_lenient(257), DnssecFlag::ZoneSep);
+    /// assert_eq!(DnssecFlag::from_u16_lenient(258), DnssecFlag::Other(258));
+    /// ```
+    #[must_use]
+    pub fn from_u16_lenient(value: u16) -> Self {
+        match Self::from_u16(value) {
+            Ok(known) => known,
+            Err(_) => Self::Other(value),
+        }
+    }
 }
 
 impl fmt::Display for DnssecFlag {
@@ -270,10 +349,11 @@ impl Serialize for DnssecFlag {
 
 impl<'de> Deserialize<'de> for DnssecFlag {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-        let value = de::opt_i64(deserializer)?.unwrap_or_default();
+        let value =
+            de::opt_i64(deserializer)?.ok_or_else(|| D::Error::custom("flag is missing"))?;
         let value = u16::try_from(value)
             .map_err(|_| D::Error::custom(format!("flag {value} is out of range")))?;
-        Self::from_u16(value).map_err(D::Error::custom)
+        Ok(Self::from_u16_lenient(value))
     }
 }
 
@@ -859,14 +939,24 @@ pub struct DnsKeyPair {
 
 /// One manually managed DNSKEY, from `dnssec.listkeys`.
 ///
+/// The numeric ids are read as the types they name, so a caller compares an
+/// algorithm instead of remembering that `13` is ECDSA P-256. A number this
+/// crate's table does not list is carried (`DnssecAlgorithm::Other` and
+/// friends) rather than failing the row: an algorithm the registry assigned
+/// after this crate was written must not make the key disappear from the
+/// list.
+///
 /// ```
-/// use inwx_client::DnssecKey;
+/// use inwx_client::{DnssecAlgorithm, DnssecDigestType, DnssecKey, DnssecKeyStatus};
 ///
 /// let key: DnssecKey = serde_json::from_str(
 ///     r#"{"id":7,"ownerName":"example.com.","keyTag":1234,"flagId":257,
 ///         "algorithmId":13,"digestTypeId":2,"digest":"AA","status":"OK","active":1}"#,
 /// )?;
 /// assert_eq!(key.key_tag, Some(1234));
+/// assert_eq!(key.algorithm, Some(DnssecAlgorithm::EcdsaP256));
+/// assert_eq!(key.digest_type, Some(DnssecDigestType::Sha256));
+/// assert_eq!(key.status, Some(DnssecKeyStatus::Ok));
 /// assert!(key.is_active());
 /// # Ok::<(), serde_json::Error>(())
 /// ```
@@ -881,33 +971,100 @@ pub struct DnssecKey {
     /// Domain id.
     #[serde(default, rename = "domainId", deserialize_with = "de::opt_i64")]
     pub domain_id: Option<i64>,
-    /// Key tag.
-    #[serde(default, rename = "keyTag", deserialize_with = "de::opt_i64")]
-    pub key_tag: Option<i64>,
-    /// Key flag.
-    #[serde(default, rename = "flagId", deserialize_with = "de::opt_i64")]
-    pub flag: Option<i64>,
-    /// Algorithm id.
-    #[serde(default, rename = "algorithmId", deserialize_with = "de::opt_i64")]
-    pub algorithm: Option<i64>,
+    /// Key tag, the `0..=65535` value a DS record repeats.
+    #[serde(default, rename = "keyTag", deserialize_with = "opt_key_tag")]
+    pub key_tag: Option<u16>,
+    /// Key flag; an undocumented flag arrives as [`DnssecFlag::Other`].
+    #[serde(default, rename = "flagId", deserialize_with = "opt_flag")]
+    pub flag: Option<DnssecFlag>,
+    /// Signing algorithm; an undocumented id arrives as
+    /// [`DnssecAlgorithm::Other`].
+    #[serde(default, rename = "algorithmId", deserialize_with = "opt_algorithm")]
+    pub algorithm: Option<DnssecAlgorithm>,
     /// Public key (base64).
     #[serde(default, rename = "publicKey", deserialize_with = "de::opt_string")]
     pub public_key: Option<String>,
-    /// Digest type id.
-    #[serde(default, rename = "digestTypeId", deserialize_with = "de::opt_i64")]
-    pub digest_type: Option<i64>,
+    /// Digest type; an undocumented id arrives as
+    /// [`DnssecDigestType::Other`].
+    #[serde(default, rename = "digestTypeId", deserialize_with = "opt_digest_type")]
+    pub digest_type: Option<DnssecDigestType>,
     /// Digest value.
     #[serde(default, deserialize_with = "de::opt_string")]
     pub digest: Option<String>,
     /// Creation time.
     #[serde(default, deserialize_with = "de::opt_string")]
     pub created: Option<String>,
-    /// Key status.
-    #[serde(default, deserialize_with = "de::opt_string")]
-    pub status: Option<String>,
+    /// Key status; an unknown status arrives as [`DnssecKeyStatus::Other`].
+    #[serde(default, deserialize_with = "opt_key_status")]
+    pub status: Option<DnssecKeyStatus>,
     /// `1` when the key is active, `0` when not.
     #[serde(default, deserialize_with = "de::opt_i64")]
     pub active: Option<i64>,
+}
+
+/// `keyTag` from a number or a numeric string.
+///
+/// A tag outside `0..=65535` is a corrupt answer rather than an unknown id:
+/// no registry publishes one, so the number cannot be carried and the row is
+/// refused instead of reporting a tag the wire never held.
+fn opt_key_tag<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<u16>, D::Error> {
+    let Some(value) = de::opt_i64(deserializer)? else {
+        return Ok(None);
+    };
+    u16::try_from(value)
+        .map(Some)
+        .map_err(|_| D::Error::custom(format!("key tag {value} is outside 0..=65535")))
+}
+
+/// `flagId` as a [`DnssecFlag`]; an undocumented flag is carried.
+fn opt_flag<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<DnssecFlag>, D::Error> {
+    let Some(value) = de::opt_i64(deserializer)? else {
+        return Ok(None);
+    };
+    let value = u16::try_from(value)
+        .map_err(|_| D::Error::custom(format!("flag {value} is out of the u16 range")))?;
+    Ok(Some(DnssecFlag::from_u16_lenient(value)))
+}
+
+/// `algorithmId` as a [`DnssecAlgorithm`]; an undocumented id is carried.
+fn opt_algorithm<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<DnssecAlgorithm>, D::Error> {
+    let Some(value) = de::opt_i64(deserializer)? else {
+        return Ok(None);
+    };
+    let value = u8::try_from(value)
+        .map_err(|_| D::Error::custom(format!("algorithm {value} is out of the u8 range")))?;
+    Ok(Some(DnssecAlgorithm::from_u8_lenient(value)))
+}
+
+/// `digestTypeId` as a [`DnssecDigestType`]; an undocumented id is carried.
+fn opt_digest_type<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<DnssecDigestType>, D::Error> {
+    let Some(value) = de::opt_i64(deserializer)? else {
+        return Ok(None);
+    };
+    let value = u8::try_from(value)
+        .map_err(|_| D::Error::custom(format!("digest type {value} is out of the u8 range")))?;
+    Ok(Some(DnssecDigestType::from_u8_lenient(value)))
+}
+
+/// `status` as a [`DnssecKeyStatus`]; an unknown status is carried and an
+/// empty one counts as missing.
+fn opt_key_status<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<DnssecKeyStatus>, D::Error> {
+    match de::opt_string(deserializer)? {
+        Some(raw) if !raw.trim().is_empty() => Ok(Some(
+            DnssecKeyStatus::parse(&raw).map_err(D::Error::custom)?,
+        )),
+        _ => Ok(None),
+    }
 }
 
 impl DnssecKey {
@@ -1571,5 +1728,72 @@ mod tests {
         assert_eq!(params["active"], 0);
         assert_eq!(params["status"], "DELAYED");
         assert_eq!(params["algorithmId"], 15);
+    }
+
+    #[test]
+    fn response_ids_are_typed_and_unknown_ones_are_carried() {
+        let key: DnssecKey = serde_json::from_str(
+            r#"{"keyTag":65535,"flagId":257,"algorithmId":13,"digestTypeId":2,"status":"ok"}"#,
+        )
+        .expect("row");
+        assert_eq!(key.key_tag, Some(u16::MAX));
+        assert_eq!(key.flag, Some(DnssecFlag::ZoneSep));
+        assert_eq!(key.algorithm, Some(DnssecAlgorithm::EcdsaP256));
+        assert_eq!(key.digest_type, Some(DnssecDigestType::Sha256));
+        assert_eq!(key.status, Some(DnssecKeyStatus::Ok));
+
+        // One step past the table on every field: carried, not dropped.
+        let unknown: DnssecKey = serde_json::from_str(
+            r#"{"flagId":258,"algorithmId":17,"digestTypeId":5,"status":"BOGUS"}"#,
+        )
+        .expect("row");
+        assert_eq!(unknown.flag, Some(DnssecFlag::Other(258)));
+        assert_eq!(unknown.algorithm, Some(DnssecAlgorithm::Other(17)));
+        assert_eq!(unknown.digest_type, Some(DnssecDigestType::Other(5)));
+        assert_eq!(unknown.status, Some(DnssecKeyStatus::Other("BOGUS".into())));
+    }
+
+    #[test]
+    fn key_tag_is_refused_past_its_boundary() {
+        let at_limit: DnssecKey = serde_json::from_str(r#"{"keyTag":65535}"#).expect("row");
+        assert_eq!(at_limit.key_tag, Some(u16::MAX));
+
+        let past_limit = serde_json::from_str::<DnssecKey>(r#"{"keyTag":65536}"#).unwrap_err();
+        assert!(
+            past_limit.to_string().contains("outside 0..=65535"),
+            "{past_limit}"
+        );
+    }
+
+    #[test]
+    fn a_missing_numeric_id_says_so_instead_of_claiming_zero() {
+        let algorithm = serde_json::from_str::<DnssecAlgorithm>("null").unwrap_err();
+        assert!(
+            algorithm.to_string().contains("algorithm is missing"),
+            "{algorithm}"
+        );
+        let digest = serde_json::from_str::<DnssecDigestType>("null").unwrap_err();
+        assert!(
+            digest.to_string().contains("digest type is missing"),
+            "{digest}"
+        );
+        let flag = serde_json::from_str::<DnssecFlag>("null").unwrap_err();
+        assert!(flag.to_string().contains("flag is missing"), "{flag}");
+
+        // In a row an absent id is absent, not zero.
+        let key: DnssecKey = serde_json::from_str(r#"{"id":7}"#).expect("row");
+        assert_eq!(key.algorithm, None);
+        assert_eq!(key.key_tag, None);
+        assert_eq!(key.status, None);
+    }
+
+    #[test]
+    fn numeric_strings_are_accepted_for_response_ids() {
+        let key: DnssecKey =
+            serde_json::from_str(r#"{"keyTag":"1234","algorithmId":"13","flagId":"257"}"#)
+                .expect("row");
+        assert_eq!(key.key_tag, Some(1234));
+        assert_eq!(key.algorithm, Some(DnssecAlgorithm::EcdsaP256));
+        assert_eq!(key.flag, Some(DnssecFlag::ZoneSep));
     }
 }

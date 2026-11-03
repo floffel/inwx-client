@@ -525,6 +525,15 @@ proptest! {
         }
     }
 
+    /// A response id survives as it arrived: the lenient parsers never lose a
+    /// number, they only stop recognising it.
+    #[test]
+    fn dnssec_response_ids_survive(algorithm in any::<u8>(), digest in any::<u8>(), flag in any::<u16>()) {
+        prop_assert_eq!(DnssecAlgorithm::from_u8_lenient(algorithm).as_u8(), algorithm);
+        prop_assert_eq!(DnssecDigestType::from_u8_lenient(digest).as_u8(), digest);
+        prop_assert_eq!(DnssecFlag::from_u16_lenient(flag).as_u16(), flag);
+    }
+
     #[test]
     fn dnssec_queries_keep_their_filters(page in 0u32..10, limit in 0u32..100) {
         let query = DnssecKeyQuery::new().with_page(page, limit);

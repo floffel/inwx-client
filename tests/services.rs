@@ -180,6 +180,9 @@ async fn list_dns_keys_sends_every_filter() {
         .unwrap();
     assert_eq!(keys.len(), 1);
     assert!(keys[0].is_active());
+    assert_eq!(keys[0].algorithm, Some(DnssecAlgorithm::EcdsaP256));
+    assert_eq!(keys[0].digest_type, Some(DnssecDigestType::Sha256));
+    assert_eq!(keys[0].status, Some(DnssecKeyStatus::Ok));
 
     let call = transport.only_call();
     assert_eq!(call.method, "dnssec.listkeys");
@@ -191,6 +194,28 @@ async fn list_dns_keys_sends_every_filter() {
     assert_eq!(call.params["createdAfter"], "2026-01-01T00:00:00");
     assert_eq!(call.params["createdBefore"], "2026-12-31T00:00:00");
     assert_eq!(call.params["pagelimit"], 0);
+}
+
+#[tokio::test]
+async fn list_dns_keys_keeps_a_key_signed_with_an_unknown_algorithm() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "dnskey": [
+        { "id": 7, "algorithmId": 13, "status": "OK" },
+        { "id": 8, "algorithmId": 17, "digestTypeId": 5, "status": "SOMETHING" }
+    ] }));
+
+    let keys = client(transport)
+        .list_dns_keys(&DnssecKeyQuery::new())
+        .await
+        .unwrap();
+    assert_eq!(keys.len(), 2, "an unknown algorithm must not drop the key");
+    assert_eq!(keys[1].id, Some(8));
+    assert_eq!(keys[1].algorithm, Some(DnssecAlgorithm::Other(17)));
+    assert_eq!(keys[1].digest_type, Some(DnssecDigestType::Other(5)));
+    assert_eq!(
+        keys[1].status,
+        Some(DnssecKeyStatus::Other("SOMETHING".into()))
+    );
 }
 
 // -------------------------------------------------------- NAMESERVER SET ----

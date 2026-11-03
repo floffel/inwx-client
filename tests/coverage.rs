@@ -142,7 +142,12 @@ fn enums_serialize_and_deserialize_through_serde() {
     );
     let algorithm: DnssecAlgorithm = serde_json::from_str("15").unwrap();
     assert_eq!(algorithm, DnssecAlgorithm::Ed25519);
-    assert!(serde_json::from_str::<DnssecAlgorithm>("99").is_err());
+    // An id the table does not list is carried; only a number that does not fit
+    // the field is refused.
+    assert_eq!(
+        serde_json::from_str::<DnssecAlgorithm>("99").unwrap(),
+        DnssecAlgorithm::Other(99)
+    );
     assert!(serde_json::from_str::<DnssecAlgorithm>("999").is_err());
 
     assert_eq!(
@@ -151,12 +156,20 @@ fn enums_serialize_and_deserialize_through_serde() {
     );
     let digest: DnssecDigestType = serde_json::from_str("\"2\"").unwrap();
     assert_eq!(digest, DnssecDigestType::Sha256);
+    assert_eq!(
+        serde_json::from_str::<DnssecDigestType>("5").unwrap(),
+        DnssecDigestType::Other(5)
+    );
     assert!(serde_json::from_str::<DnssecDigestType>("999").is_err());
 
     assert_eq!(serde_json::to_string(&DnssecFlag::Zone).unwrap(), "256");
     let flag: DnssecFlag = serde_json::from_str("257").unwrap();
     assert_eq!(flag, DnssecFlag::ZoneSep);
-    assert!(serde_json::from_str::<DnssecFlag>("999").is_err());
+    assert_eq!(
+        serde_json::from_str::<DnssecFlag>("258").unwrap(),
+        DnssecFlag::Other(258)
+    );
+    assert!(serde_json::from_str::<DnssecFlag>("70000").is_err());
 
     // HostingPeriod is only ever sent, never parsed back by the API.
     assert_eq!(
