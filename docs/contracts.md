@@ -176,7 +176,11 @@ absent id is `None`, never a silently substituted `0`.
 
 Validation: the DNSKEY parser enforces `IN DNSKEY`, protocol `3`, flag **257
 only** — the method's description says "only ZONE+SEP keys (flag value 257) are
-accepted" — a documented algorithm and a documented digest type. `calculateDigest`
+accepted" — a documented algorithm and a documented digest type. Both records
+carry their owner, and `AddDnsKeyRequest` compares it with the request's domain
+(case-insensitively, ignoring the presentation's trailing dot): the API keys
+the digest by `domainName`, so a key or DS string for a foreign zone is refused
+instead of being published against the wrong domain. `calculateDigest`
 and `ds` are mutually exclusive because the documentation says the calculation
 *overrides* `ds`, which would silently discard a caller's value.
 
