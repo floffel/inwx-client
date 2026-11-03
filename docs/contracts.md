@@ -172,7 +172,11 @@ Responses are read leniently: `dnssec.listkeys` returns `keyTag` as `u16` and
 `DnssecFlag`, `DnssecDigestType` and `DnssecKeyStatus`. A number outside the
 tables above is carried as `Other(..)` instead of failing the row, so a key
 signed with a later-assigned algorithm does not disappear from the list; an
-absent id is `None`, never a silently substituted `0`.
+absent id is `None`, never a silently substituted `0`. The same holds for
+`dnssecStatus`: `dnssec.info` leaves it out for a domain without DNSSEC, so
+`DnssecState::status` is an `Option` and an absent or `null` field is `None`
+— not a defaulted `MANUAL`, which would claim keys are managed through this
+API and make "no status reported" indistinguishable from a real `MANUAL`.
 
 Validation: the DNSKEY parser enforces `IN DNSKEY`, protocol `3`, flag **257
 only** — the method's description says "only ZONE+SEP keys (flag value 257) are

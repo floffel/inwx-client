@@ -6,10 +6,10 @@ mod common;
 
 use common::{client, client_without_retries, MockTransport};
 use inwx_client::{
-    AddDnsKeyRequest, DnsKey, DnssecAlgorithm, DnssecDigestType, DnssecKeyQuery, DnssecKeyStatus,
-    DomainName, DsRecord, DynDnsAccount, DynDnsAccountRef, Email, Handle, HostingOrder,
-    HostingPeriod, Hostname, NameserverSetCreate, NameserverSetType, NameserverSetUpdate,
-    TagUpdate, Timestamp,
+    AddDnsKeyRequest, DnsKey, DnssecAlgorithm, DnssecDigestType, DnssecDomainStatus,
+    DnssecKeyQuery, DnssecKeyStatus, DomainName, DsRecord, DynDnsAccount, DynDnsAccountRef, Email,
+    Handle, HostingOrder, HostingPeriod, Hostname, NameserverSetCreate, NameserverSetType,
+    NameserverSetUpdate, TagUpdate, Timestamp,
 };
 use serde_json::json;
 
@@ -142,7 +142,9 @@ async fn dnssec_info_sends_the_domain_filter_and_parses_the_states() {
         .unwrap();
     assert_eq!(states.len(), 2);
     assert_eq!(states[0].key_count, Some(2));
-    assert_eq!(states[0].status.as_str(), "MANUAL");
+    assert_eq!(states[0].status, Some(DnssecDomainStatus::Manual));
+    // No status field: absent, not defaulted to `MANUAL`.
+    assert_eq!(states[1].status, None);
 
     let all = client.dnssec_info(None).await.unwrap();
     assert_eq!(all.len(), 0);
@@ -151,6 +153,20 @@ async fn dnssec_info_sends_the_domain_filter_and_parses_the_states() {
     assert_eq!(calls[0].method, "dnssec.info");
     assert_eq!(calls[0].params["domains"][0], "example.com");
     assert_eq!(calls[1].params, json!({}));
+}
+
+#[tokio::test]
+async fn dnssec_info_keeps_a_record_whose_status_is_null() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "data": [
+        { "domain": "example.com", "dnssecStatus": null }
+    ] }));
+
+    let states = client(transport.clone()).dnssec_info(None).await.unwrap();
+    // A `null` status is an unanswered status, not a reason to drop the row.
+    assert_eq!(states.len(), 1);
+    assert_eq!(states[0].domain.as_str(), "example.com");
+    assert_eq!(states[0].status, None);
 }
 
 #[tokio::test]
