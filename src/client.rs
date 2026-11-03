@@ -924,6 +924,7 @@ impl<T: Transport> InwxClient<T> {
         if cookie.is_empty() {
             return Err(Error::Authentication {
                 message: "login succeeded but the response carried no session cookie".to_owned(),
+                source: None,
             });
         }
         *self

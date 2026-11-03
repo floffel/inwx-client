@@ -158,7 +158,7 @@ async fn login_without_a_cookie_is_an_authentication_error() {
     let error = client.login().await.unwrap_err();
 
     match error {
-        Error::Authentication { message } => assert!(message.contains("cookie")),
+        Error::Authentication { message, .. } => assert!(message.contains("cookie")),
         other => panic!("unexpected: {other}"),
     }
 }

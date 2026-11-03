@@ -1,8 +1,12 @@
 //! Everything the client can fail with.
 //!
-//! One enum, `#[non_exhaustive]`, with a source chain: JSON failures keep the
-//! `serde_json::Error` as `source`, so `err.source()` still reports the line and
-//! column.
+//! One enum, `#[non_exhaustive]`, with a source chain that survives the
+//! boundary: JSON failures keep the `serde_json::Error` as `source`, so
+//! `err.source()` still reports the line and column, and every failure that had
+//! a cause — a `reqwest`, TLS or `io` error from a transport, a login that
+//! produced no cookie — keeps that cause in `source` instead of flattening its
+//! text into the message. The short `message` is what `Display` prints;
+//! [`Error::with_source`] is how a cause is attached.
 
 use std::fmt;
 use std::ops::Deref;
@@ -12,6 +16,24 @@ use thiserror::Error;
 
 use crate::rpc::Detail;
 use crate::transport::TransportStage;
+
+/// A boxed cause carried by one of the transport-shaped [`enum@Error`]
+/// variants, so `err.source()` walks down to the failure that really happened:
+/// the `reqwest` error behind a failed request, the TLS error behind that, the
+/// `io` error behind a truncated body.
+///
+/// It is `Send + Sync + 'static` because [`enum@Error`] is: the error travels
+/// out of the task and thread the client ran on, like the client itself.
+///
+/// ```rust
+/// use inwx_client::{Error, ErrorSource, TransportStage};
+///
+/// let cause: ErrorSource = Box::new(std::io::Error::other("connection reset"));
+/// let err = Error::transport_at(TransportStage::AfterSend, "could not read the answer")
+///     .with_source(cause);
+/// assert!(err.is_uncertain());
+/// ```
+pub type ErrorSource = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 /// Error type returned by every fallible operation in this crate.
 ///
@@ -90,15 +112,23 @@ pub enum Error {
     /// struct literal — and the only ways in are [`Error::transport_at`] and
     /// [`Error::transport_before_send`], which derive the flag from
     /// [`TransportStage`] instead of taking it from the caller.
+    ///
+    /// The underlying transport failure is kept in `source`
+    /// ([`Error::with_source`], or [`Error::transport_at_caused_by`]), so the
+    /// cause is still walkable instead of having been flattened into `message`.
     #[non_exhaustive]
     #[error("transport error: {message}")]
     Transport {
-        /// Description from the transport.
+        /// Short description from the transport, the one `Display` prints.
         message: String,
         /// `true` when another attempt could plausibly succeed: only ever set
         /// for a failure at [`TransportStage::BeforeSend`], never after the
         /// request was written.
         retryable: bool,
+        /// The failure behind the description — the `reqwest`, TLS or `io`
+        /// error — when the transport had one to hand in.
+        #[source]
+        source: Option<ErrorSource>,
     },
 
     /// The request had already been written when the transport failed: a
@@ -111,7 +141,7 @@ pub enum Error {
     /// this for a mutating command; read-only ones are replayed, see
     /// [`is_read_only_method`](crate::is_read_only_method).
     ///
-    /// ```
+    /// ```rust
     /// use inwx_client::Error;
     ///
     /// let err = Error::uncertain("timeout waiting for response");
@@ -120,8 +150,12 @@ pub enum Error {
     /// ```
     #[error("uncertain transport failure: {message} (the command may have been executed)")]
     Uncertain {
-        /// Description from the transport.
+        /// Short description from the transport, the one `Display` prints.
         message: String,
+        /// The failure behind the description, or `None` when the transport
+        /// built this from a description alone. See [`Error::with_source`].
+        #[source]
+        source: Option<ErrorSource>,
     },
 
     /// The API rejected the session (`2200`, `2201`, `2202`) and the client
@@ -131,6 +165,10 @@ pub enum Error {
     Authentication {
         /// The API message, or a description of why re-login was impossible.
         message: String,
+        /// The failure that produced this, when there was one — for example the
+        /// session error a transport reported. See [`Error::with_source`].
+        #[source]
+        source: Option<ErrorSource>,
     },
 
     /// The client was asked to call an authenticated method with no session and
@@ -250,6 +288,11 @@ pub enum Error {
         /// crate never sleeps on it, so a caller that waits should cap it
         /// against its own deadline.
         retry_after: Option<Duration>,
+        /// The failure behind the answer, when there was one — a decode or
+        /// framing error from a custom transport, say. `None` for a plain
+        /// non-2xx answer, whose detail is `body`. See [`Error::with_source`].
+        #[source]
+        source: Option<ErrorSource>,
     },
 
     /// A response body crossed the transport's size cap, so it was discarded
@@ -352,6 +395,10 @@ impl Error {
     /// been written is [`Error::uncertain`]; when the stage is known, prefer
     /// [`Error::transport_at`], which picks the variant from it.
     ///
+    /// The message is all this form takes. When the transport still holds the
+    /// failure it caught, use [`Error::transport_at_caused_by`] instead — the
+    /// cause then stays walkable through `source`.
+    ///
     /// ```
     /// use inwx_client::Error;
     ///
@@ -376,7 +423,12 @@ impl Error {
     /// process ([`TransportStage::Local`]) becomes a terminal
     /// [`Error::Transport`].
     ///
-    /// ```
+    /// The message is all this form takes. When the transport still holds the
+    /// failure it caught, use [`Error::transport_at_caused_by`] instead — the
+    /// cause then stays walkable through `source` instead of existing only as
+    /// text.
+    ///
+    /// ```rust
     /// use inwx_client::{Error, TransportStage};
     ///
     /// let before = Error::transport_at(TransportStage::BeforeSend, "dns lookup failed");
@@ -398,13 +450,63 @@ impl Error {
             TransportStage::BeforeSend => Self::Transport {
                 message,
                 retryable: true,
+                source: None,
             },
-            TransportStage::AfterSend => Self::Uncertain { message },
+            TransportStage::AfterSend => Self::Uncertain {
+                message,
+                source: None,
+            },
             TransportStage::Local => Self::Transport {
                 message,
                 retryable: false,
+                source: None,
             },
         }
+    }
+
+    /// Builds the error for a transport failure at `stage` and keeps `source`
+    /// as its cause.
+    ///
+    /// Same classification as [`Error::transport_at`] — the retry flag still
+    /// comes from the stage, never from the caller — with the failure the
+    /// transport caught attached as the `source`. That is the form a real
+    /// transport should use: flattening a `reqwest` or `io` error into the
+    /// message destroys everything below it, so a caller can neither walk the
+    /// chain nor match on what actually failed.
+    ///
+    /// ```rust
+    /// use inwx_client::{Error, TransportStage};
+    /// use std::error::Error as _;
+    ///
+    /// let failure = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused");
+    /// let err = Error::transport_at_caused_by(
+    ///     TransportStage::BeforeSend,
+    ///     "could not connect",
+    ///     failure,
+    /// );
+    ///
+    /// assert!(err.is_retryable());
+    /// assert_eq!(
+    ///     err.source().map(ToString::to_string),
+    ///     Some(String::from("refused")),
+    /// );
+    /// // The message stays short: the cause is not duplicated into it.
+    /// assert_eq!(err.to_string(), "transport error: could not connect");
+    ///
+    /// // A failure after the request was written keeps its cause too, but is
+    /// // never retryable.
+    /// let reset = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset");
+    /// let err = Error::transport_at_caused_by(TransportStage::AfterSend, "reset", reset);
+    /// assert!(err.is_uncertain());
+    /// assert!(err.source().is_some());
+    /// ```
+    #[must_use]
+    pub fn transport_at_caused_by(
+        stage: TransportStage,
+        message: impl Into<String>,
+        source: impl Into<ErrorSource>,
+    ) -> Self {
+        Self::transport_at(stage, message).with_source(source)
     }
 
     /// Builds an [`Error::Uncertain`] for a failure that happened after the
@@ -416,18 +518,26 @@ impl Error {
     /// [`Error::transport_before_send`] when the request was demonstrably never
     /// written.
     ///
-    /// ```
+    /// This form takes only the description. When the transport still holds the
+    /// error it caught (a reset from `reqwest`, an `io` error from a truncated
+    /// read), chain [`Error::with_source`] onto it so the cause survives.
+    ///
+    /// ```rust
     /// use inwx_client::Error;
     ///
-    /// let err = Error::uncertain("timeout after 30s");
+    /// let err = Error::uncertain("timeout waiting for response");
     /// assert!(err.is_uncertain());
-    /// // Never blindly replayed: the API may have registered the domain.
     /// assert!(!err.is_retryable());
+    ///
+    /// let caused = Error::uncertain("connection reset")
+    ///     .with_source(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+    /// assert!(std::error::Error::source(&caused).is_some());
     /// ```
     #[must_use]
     pub fn uncertain(message: impl Into<String>) -> Self {
         Self::Uncertain {
             message: message.into(),
+            source: None,
         }
     }
 
@@ -456,7 +566,54 @@ impl Error {
             status,
             body: body.into(),
             retry_after: None,
+            source: None,
         }
+    }
+
+    /// Attaches `source` as the cause of this error, so `err.source()` walks
+    /// into it instead of the failure existing only as text in `message`.
+    ///
+    /// This is the way in for a transport: hand over the `reqwest`, TLS or `io`
+    /// error that was caught, not its `Display` string. Everything below it —
+    /// the resolve error under a connect failure, the TLS error under that —
+    /// stays reachable, and a caller can match on the concrete type rather than
+    /// parse a message.
+    ///
+    /// Supported on [`Error::Transport`], [`Error::Uncertain`],
+    /// [`Error::Authentication`] and [`Error::Http`]. On any other variant it is
+    /// a no-op, like [`with_retry_after`](Self::with_retry_after), so a path
+    /// that builds an error without matching first stays readable.
+    ///
+    /// `message` is not rewritten: it is what `Display` prints, and keeping the
+    /// cause out of it is what stops the same text (and any URL in it) from
+    /// appearing twice in a logged chain.
+    ///
+    /// ```rust
+    /// use inwx_client::Error;
+    /// use std::error::Error as _;
+    ///
+    /// let failure = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused");
+    /// let err = Error::transport_before_send("could not connect").with_source(failure);
+    ///
+    /// assert_eq!(err.source().map(ToString::to_string), Some("refused".to_owned()));
+    /// assert_eq!(err.to_string(), "transport error: could not connect");
+    ///
+    /// // A variant with no cause slot ignores it rather than inventing one.
+    /// let plain = Error::validation("record.ttl", "out of range")
+    ///     .with_source(std::io::Error::other("unreachable"));
+    /// assert!(plain.source().is_none());
+    /// ```
+    #[must_use]
+    pub fn with_source(mut self, source: impl Into<ErrorSource>) -> Self {
+        let source = source.into();
+        match &mut self {
+            Self::Transport { source: slot, .. }
+            | Self::Uncertain { source: slot, .. }
+            | Self::Authentication { source: slot, .. }
+            | Self::Http { source: slot, .. } => *slot = Some(source),
+            _ => {}
+        }
+        self
     }
 
     /// Records the delay a `Retry-After` header asked for on an
@@ -675,8 +832,11 @@ impl Error {
     ///
     /// assert!(Error::NotAuthenticated.is_missing_credentials());
     /// // An expired session is a different problem: a login can cure it.
-    /// assert!(!Error::Authentication { message: "session expired".into() }
-    ///     .is_missing_credentials());
+    /// assert!(!Error::Authentication {
+    ///     message: "session expired".into(),
+    ///     source: None,
+    /// }
+    /// .is_missing_credentials());
     /// assert!(!Error::validation("domain", "empty").is_missing_credentials());
     /// ```
     #[must_use]
@@ -1085,7 +1245,178 @@ mod tests {
             status,
             body: "gateway trouble".into(),
             retry_after: None,
+            source: None,
         }
+    }
+
+    /// The cause of an error, read through the trait the chain is walked with.
+    fn cause(error: &Error) -> Option<String> {
+        std::error::Error::source(error).map(ToString::to_string)
+    }
+
+    /// Everything an error reports about itself, as one comparable value: the
+    /// classification, the authentication reading and the message.
+    fn verdict(error: &Error) -> (bool, bool, bool, String) {
+        (
+            error.is_retryable(),
+            error.is_uncertain(),
+            error.is_authentication(),
+            error.to_string(),
+        )
+    }
+
+    /// A cause handed in stays reachable through `source`, and `Display` keeps
+    /// printing the short message: the failure is not flattened into text that
+    /// a caller would have to parse.
+    #[test]
+    fn a_cause_survives_as_the_source_instead_of_text() {
+        let err = Error::transport_at_caused_by(
+            TransportStage::BeforeSend,
+            "could not connect",
+            std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused"),
+        );
+
+        assert_eq!(cause(&err), Some(String::from("refused")));
+        assert_eq!(err.to_string(), "transport error: could not connect");
+        assert!(!err.to_string().contains("refused"));
+        // The verdict still comes from the stage, not from the cause.
+        assert!(err.is_retryable());
+        assert!(!err.is_uncertain());
+    }
+
+    /// The chain is walked past the first cause: an error that wraps another
+    /// keeps its own `source` reachable through the boxed one.
+    #[test]
+    fn the_chain_walks_below_the_first_cause() {
+        #[derive(Debug)]
+        struct Wrapped {
+            message: &'static str,
+            inner: std::io::Error,
+        }
+
+        impl fmt::Display for Wrapped {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(self.message)
+            }
+        }
+
+        impl std::error::Error for Wrapped {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.inner)
+            }
+        }
+
+        let err = Error::transport_at_caused_by(
+            TransportStage::AfterSend,
+            "connection reset",
+            Wrapped {
+                message: "hyper connection reset",
+                inner: std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset by peer"),
+            },
+        );
+
+        let first = std::error::Error::source(&err).expect("the wrapper is the first cause");
+        assert_eq!(first.to_string(), "hyper connection reset");
+        let second = first.source().expect("the wrapper has a cause of its own");
+        assert_eq!(second.to_string(), "reset by peer");
+        assert!(second.source().is_none(), "the chain ends where it ends");
+    }
+
+    /// Every variant that has a cause slot accepts one, and `with_source`
+    /// replaces an earlier cause rather than stacking a second one.
+    #[test]
+    fn with_source_reaches_every_variant_that_carries_a_cause() {
+        let cause_of = |text: &'static str| std::io::Error::other(text);
+
+        for error in [
+            Error::transport_before_send("dns lookup failed").with_source(cause_of("cause")),
+            Error::uncertain("timeout").with_source(cause_of("cause")),
+            Error::http(503, "unavailable").with_source(cause_of("cause")),
+            Error::Authentication {
+                message: String::from("no cookie"),
+                source: None,
+            }
+            .with_source(cause_of("cause")),
+        ] {
+            assert_eq!(cause(&error), Some(String::from("cause")), "{error}");
+        }
+
+        let replaced = Error::uncertain("timeout")
+            .with_source(cause_of("first"))
+            .with_source(cause_of("second"));
+        assert_eq!(cause(&replaced), Some(String::from("second")));
+    }
+
+    /// A variant without a cause slot ignores a cause instead of growing a
+    /// second field, and `Json` keeps the parser error it already carries.
+    #[test]
+    fn variants_without_a_cause_slot_stay_chainless() {
+        let builders: [fn() -> Error; 6] = [
+            || Error::validation("domain", "empty"),
+            || Error::NotAuthenticated,
+            || Error::MissingField {
+                method: "domain.info",
+                field: "resData.id",
+            },
+            || Error::unexpected_answer("nameserver.check", "details", "expected an array"),
+            || Error::ResponseTooLarge {
+                limit: 8,
+                observed: Some(9),
+            },
+            || Error::Api {
+                code: 2300,
+                message: String::from("object pending transfer"),
+                reason_code: None,
+                reason: None,
+                details: Vec::new(),
+            },
+        ];
+
+        for build in builders {
+            let plain = build();
+            assert!(cause(&plain).is_none(), "{plain}");
+            let late = build().with_source(std::io::Error::other("late"));
+            assert!(cause(&late).is_none(), "{late}");
+            assert_eq!(
+                verdict(&plain),
+                verdict(&late),
+                "attaching a cause changed the verdict for {plain}"
+            );
+        }
+
+        let json: Error = serde_json::from_str::<serde_json::Value>("{not json")
+            .expect_err("garbage is not JSON")
+            .into();
+        let parsed = cause(&json);
+        assert!(parsed.is_some(), "the parser error is the source");
+        assert_eq!(
+            cause(&json.with_source(std::io::Error::other("late"))),
+            parsed,
+            "a later cause must not replace the line/column of the parser"
+        );
+    }
+
+    /// The message-only constructors invent nothing: no cause means no source,
+    /// so a caller can rely on `source()` being `Some` only when there was a
+    /// real failure behind the error.
+    #[test]
+    fn the_message_only_constructors_have_no_source() {
+        for error in [
+            Error::transport_before_send("dns lookup failed"),
+            Error::transport_at(TransportStage::AfterSend, "timeout"),
+            Error::uncertain("timeout"),
+            Error::http(503, "unavailable"),
+        ] {
+            assert!(cause(&error).is_none(), "{error}");
+        }
+    }
+
+    /// The boxed cause does not cost the error its thread safety: it still
+    /// travels out of the task it was created in.
+    #[test]
+    fn the_error_stays_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Error>();
     }
 
     /// The retry flag of a transport failure is derived from the stage, never
@@ -1180,12 +1511,14 @@ mod tests {
                 status: 503,
                 body: body.to_owned().into(),
                 retry_after: None,
+                source: None,
             };
             assert!(error.is_retryable());
             let terminal = Error::Http {
                 status: 404,
                 body: body.to_owned().into(),
                 retry_after: None,
+                source: None,
             };
             assert!(!terminal.is_retryable());
         }
@@ -1356,6 +1689,7 @@ mod tests {
         assert!(!Error::NotAuthenticated.is_retryable());
         assert!(!Error::Authentication {
             message: String::from("no cookie"),
+            source: None,
         }
         .is_retryable());
         assert!(!Error::MissingField {
@@ -1392,6 +1726,7 @@ mod tests {
         // caller may hold fresh credentials.
         assert!(Error::Authentication {
             message: String::from("no cookie"),
+            source: None,
         }
         .is_authentication());
 

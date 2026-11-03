@@ -470,6 +470,9 @@ fn parse_content_length(value: Option<&str>) -> Option<u64> {
 /// * classify a failure that happened before the request was written (DNS,
 ///   connect, TLS) as [`Error::transport_before_send`], or — when the stage is
 ///   at hand — as [`Error::transport_at`], which picks the variant from it,
+///   handing the failure that was caught to
+///   [`Error::transport_at_caused_by`] so it survives as the `source`: a
+///   flattened message destroys the chain below it,
 /// * classify a failure that happened after it was written (a timeout waiting
 ///   for the answer, a reset mid-response, a truncated body) as
 ///   [`Error::uncertain`](Error::uncertain) — the API may have executed the
@@ -606,9 +609,7 @@ impl ChunkSource for reqwest::Response {
     type Chunk = bytes::Bytes;
 
     async fn next_chunk(&mut self) -> Result<Option<Self::Chunk>> {
-        self.chunk()
-            .await
-            .map_err(|error| describe_reqwest_error(&error))
+        self.chunk().await.map_err(describe_reqwest_error)
     }
 }
 
@@ -627,7 +628,7 @@ impl Transport for ReqwestTransport {
             .body(request.body.to_vec())
             .send()
             .await
-            .map_err(|error| describe_reqwest_error(&error))?;
+            .map_err(describe_reqwest_error)?;
         let status = response.status().as_u16();
         let headers = response
             .headers()
@@ -655,7 +656,12 @@ impl Transport for ReqwestTransport {
 }
 
 /// Where a `reqwest` failure sits relative to the moment the request was
-/// written.
+/// written, with the short description that goes into the error message.
+///
+/// The description names the kind of failure only. What actually went wrong —
+/// the resolve error, the refused connection, the TLS handshake — stays in the
+/// `reqwest::Error` that becomes the `source`, rather than being flattened into
+/// the message as text nobody can match on.
 ///
 /// The `reqwest` kind flags are exclusive and a connect timeout is reported as
 /// [`reqwest::Error::is_timeout`], not [`reqwest::Error::is_connect`], so the
@@ -664,25 +670,34 @@ impl Transport for ReqwestTransport {
 #[cfg(feature = "http")]
 fn classify_reqwest_error(error: &reqwest::Error) -> (&'static str, TransportStage) {
     if error.is_timeout() {
-        ("timeout", TransportStage::AfterSend)
+        (
+            "timed out waiting for the answer",
+            TransportStage::AfterSend,
+        )
     } else if error.is_connect() {
-        ("connect", TransportStage::BeforeSend)
+        ("could not connect", TransportStage::BeforeSend)
     } else if error.is_builder() {
-        ("request", TransportStage::Local)
+        ("could not build the request", TransportStage::Local)
     } else if error.is_body() || error.is_decode() {
-        ("body", TransportStage::AfterSend)
+        (
+            "could not read the response body",
+            TransportStage::AfterSend,
+        )
     } else {
-        ("request", TransportStage::AfterSend)
+        ("request failed", TransportStage::AfterSend)
     }
 }
 
-/// Maps a `reqwest` failure to the error for its stage without echoing headers
-/// (the cookie header must never reach a log line).
+/// Maps a `reqwest` failure to the error for its stage, keeping the failure
+/// itself as the `source`.
+///
+/// The message stays short and header-free: `reqwest::Error` renders the URL
+/// but never request headers, and the cookie header must not reach a log line
+/// even through a cause chain.
 #[cfg(feature = "http")]
-fn describe_reqwest_error(error: &reqwest::Error) -> Error {
-    let (kind, stage) = classify_reqwest_error(error);
-    // `reqwest::Error` renders the URL but never request headers.
-    Error::transport_at(stage, format!("{kind}: {error}"))
+fn describe_reqwest_error(error: reqwest::Error) -> Error {
+    let (description, stage) = classify_reqwest_error(&error);
+    Error::transport_at_caused_by(stage, description, error)
 }
 
 #[cfg(test)]
@@ -929,5 +944,37 @@ mod tests {
             assert_eq!(error.is_retryable(), stage.is_safe_to_retry());
             assert_eq!(error.is_uncertain(), stage == TransportStage::AfterSend);
         }
+    }
+
+    /// A `reqwest` failure becomes the `source` of the error, not text inside
+    /// its message: the description names the kind, and the error itself — with
+    /// whatever it wraps — stays walkable.
+    #[cfg(feature = "http")]
+    #[test]
+    fn a_reqwest_failure_is_kept_as_the_cause() {
+        let failure = reqwest::Client::new()
+            .post("://not a url")
+            .body(Vec::new())
+            .build()
+            .expect_err("a malformed URL cannot be built");
+        assert!(
+            failure.is_builder(),
+            "a malformed URL must fail before anything is sent"
+        );
+
+        let error = describe_reqwest_error(failure);
+
+        assert_eq!(
+            error.to_string(),
+            "transport error: could not build the request"
+        );
+        // A request that was never built is a local mistake: terminal, and
+        // certainly not an ambiguous outcome.
+        assert!(!error.is_retryable());
+        assert!(!error.is_uncertain());
+        assert!(
+            std::error::Error::source(&error).is_some(),
+            "the reqwest error is kept as the cause"
+        );
     }
 }

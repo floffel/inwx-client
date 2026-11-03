@@ -488,6 +488,7 @@ fn error_helpers_cover_every_branch() {
 
     let auth = Error::Authentication {
         message: "no cookie".into(),
+        source: None,
     };
     assert!(auth.is_authentication());
     assert!(!auth.is_retryable());
@@ -506,6 +507,7 @@ fn error_helpers_cover_every_branch() {
 
     let uncertain = Error::Uncertain {
         message: "timeout waiting for response".into(),
+        source: None,
     };
     assert!(uncertain.is_uncertain());
     assert!(!uncertain.is_retryable());
@@ -561,6 +563,7 @@ fn error_helpers_cover_every_branch() {
         status: 502,
         body: "bad gateway".into(),
         retry_after: None,
+        source: None,
     };
     assert!(http.to_string().contains("502"));
     // A gateway hiccup is transient; a rejected request is terminal.
@@ -571,6 +574,7 @@ fn error_helpers_cover_every_branch() {
         status: 403,
         body: "forbidden".into(),
         retry_after: None,
+        source: None,
     };
     assert!(!forbidden.is_retryable());
     assert!(!forbidden.is_uncertain());
@@ -585,6 +589,34 @@ fn error_helpers_cover_every_branch() {
         Some(std::time::Duration::from_secs(30))
     );
     assert!(throttled.is_retryable());
+}
+
+/// A cause handed in stays reachable through the error trait after it crossed
+/// the crate boundary, and `Display` keeps printing the short message.
+#[test]
+fn an_error_cause_survives_the_crate_boundary() {
+    // The boxed cause is the public `ErrorSource`, so a caller can hold one
+    // without naming the trait object.
+    let cause: inwx_client::ErrorSource = Box::new(std::io::Error::new(
+        std::io::ErrorKind::ConnectionRefused,
+        "refused",
+    ));
+    let caused = Error::transport_at_caused_by(TransportStage::BeforeSend, "connect", cause);
+    assert_eq!(caused.to_string(), "transport error: connect");
+    assert_eq!(
+        std::error::Error::source(&caused).map(ToString::to_string),
+        Some(String::from("refused"))
+    );
+    assert!(caused.is_retryable());
+
+    // The same through the builder, on a failure that was already ambiguous.
+    let late = Error::uncertain("timeout").with_source(std::io::Error::other("detail"));
+    assert!(late.is_uncertain());
+    assert!(!late.is_retryable());
+    assert!(std::error::Error::source(&late).is_some());
+    // A variant without a cause slot is untouched by the builder.
+    let plain = Error::validation("domain", "empty").with_source(std::io::Error::other("late"));
+    assert!(std::error::Error::source(&plain).is_none());
 }
 
 #[test]
