@@ -765,12 +765,17 @@ impl Serialize for DnsKey {
 
 /// A DS record in presentation format (`ds`), checked before it is sent.
 ///
-/// The documentation's example is `domain.tld. IN DS 1234 13 2 56DC12…`.
+/// The documentation's example is `domain.tld. IN DS 1234 13 2 56DC12…`. The
+/// owner is kept, not just skipped: the API keys the digest by the request's
+/// `domainName`, so a DS for a foreign zone would be attached to the wrong
+/// domain. [`AddDnsKeyRequest::with_ds`] compares the owner against the
+/// request's domain for that reason.
 ///
 /// ```
 /// use inwx_client::{DsRecord, DnssecAlgorithm, DnssecDigestType};
 ///
 /// let ds = DsRecord::parse("example.com. IN DS 1234 13 2 56DC12")?;
+/// assert_eq!(ds.owner(), "example.com.");
 /// assert_eq!(ds.key_tag(), 1234);
 /// assert_eq!(ds.algorithm(), DnssecAlgorithm::EcdsaP256);
 /// assert_eq!(ds.digest_type(), DnssecDigestType::Sha256);
@@ -780,6 +785,7 @@ impl Serialize for DnsKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DsRecord {
     raw: String,
+    owner: String,
     key_tag: u16,
     algorithm: DnssecAlgorithm,
     digest_type: DnssecDigestType,
@@ -807,7 +813,8 @@ impl DsRecord {
         let tokens = raw.split_whitespace().collect::<Vec<_>>();
         // One slice pattern for the seven fields: the bound and the extraction
         // are the same step, so a short record is an error instead of a panic.
-        let Some([_, class, kind, key_tag, algorithm, digest_type, digest, ..]) = tokens.get(..)
+        let Some([owner, class, kind, key_tag, algorithm, digest_type, digest, ..]) =
+            tokens.get(..)
         else {
             return Err(Error::validation(
                 "dnssec.ds",
@@ -837,6 +844,7 @@ impl DsRecord {
         }
         Ok(Self {
             raw: raw.to_owned(),
+            owner: owner.to_string(),
             key_tag,
             algorithm: DnssecAlgorithm::from_u8(algorithm)?,
             digest_type: DnssecDigestType::from_u8(digest_type)?,
@@ -856,6 +864,18 @@ impl DsRecord {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.raw
+    }
+
+    /// The record owner as written (usually the zone with a trailing dot).
+    ///
+    /// ```
+    /// use inwx_client::DsRecord;
+    /// assert_eq!(DsRecord::parse("example.com. IN DS 1234 13 2 AA")?.owner(), "example.com.");
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn owner(&self) -> &str {
+        &self.owner
     }
 
     /// The key tag.
@@ -1083,6 +1103,29 @@ impl DnssecKey {
     }
 }
 
+/// Checks that a record's owner names the zone a request is sent for.
+///
+/// Shared by the DNSKEY and the DS validation so the two halves of the same
+/// critical section cannot drift apart: both trim the presentation's trailing
+/// dot and compare ASCII case-insensitively, because [`DomainName`] is stored
+/// lower-cased and without a dot while a presentation record normally carries
+/// both.
+fn check_zone_owner(
+    owner: &str,
+    domain: &DomainName,
+    field: &'static str,
+    kind: &str,
+) -> Result<()> {
+    let owner = owner.trim_end_matches('.');
+    if !owner.eq_ignore_ascii_case(domain.as_str()) {
+        return Err(Error::validation(
+            field,
+            format!("the owner is {owner:?}, not {domain:?}; a {kind} must be owned by its zone"),
+        ));
+    }
+    Ok(())
+}
+
 /// A `dnssec.adddnskey` request.
 ///
 /// Either a DS record is supplied, or the API is asked to calculate one — never
@@ -1129,15 +1172,7 @@ impl AddDnsKeyRequest {
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     pub fn new(domain: DomainName, dnskey: DnsKey) -> Result<Self> {
-        let owner = dnskey.owner().trim_end_matches('.');
-        if !owner.eq_ignore_ascii_case(domain.as_str()) {
-            return Err(Error::validation(
-                "dnssec.dnskey",
-                format!(
-                    "the key belongs to {owner:?}, not to {domain}; a DNSKEY must be owned by its zone"
-                ),
-            ));
-        }
+        check_zone_owner(dnskey.owner(), &domain, "dnssec.dnskey", "DNSKEY")?;
         Ok(Self {
             domain,
             dnskey,
@@ -1151,7 +1186,11 @@ impl AddDnsKeyRequest {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when a digest calculation was already requested.
+    /// [`Error::Validation`] when a digest calculation was already requested,
+    /// or when the DS owner does not match the domain: the digest is sent under
+    /// the request's `domainName`, so a record for a foreign zone (or a
+    /// copy-pasted owner with a typo) would be published against the wrong
+    /// domain.
     ///
     /// ```
     /// use inwx_client::{AddDnsKeyRequest, DnsKey, DsRecord, DnssecDigestType, DomainName};
@@ -1162,6 +1201,15 @@ impl AddDnsKeyRequest {
     /// )?
     /// .with_ds(DsRecord::parse("example.com. IN DS 1234 13 2 AA")?)?;
     /// assert_eq!(request.params()["ds"], "example.com. IN DS 1234 13 2 AA");
+    ///
+    /// // A DS for another zone is refused, not attached to this domain.
+    /// let foreign = DsRecord::parse("example.net. IN DS 1234 13 2 AA")?;
+    /// assert!(AddDnsKeyRequest::new(
+    ///     DomainName::parse("example.com")?,
+    ///     DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12")?,
+    /// )?
+    /// .with_ds(foreign)
+    /// .is_err());
     ///
     /// // Asking for a calculated digest on top of it is refused, not ignored.
     /// assert!(request.calculating_digest(DnssecDigestType::Sha256).is_err());
@@ -1174,6 +1222,7 @@ impl AddDnsKeyRequest {
                 "cannot be combined with calculateDigest (the API would discard it)",
             ));
         }
+        check_zone_owner(ds.owner(), &self.domain, "dnssec.ds", "DS record")?;
         self.ds = Some(ds);
         Ok(self)
     }
@@ -1672,6 +1721,34 @@ mod tests {
     fn key_owner_must_match_the_domain() {
         let key = DnsKey::parse("example.net. IN DNSKEY 257 3 13 ac12").unwrap();
         assert!(AddDnsKeyRequest::new(DomainName::parse("example.com").unwrap(), key).is_err());
+    }
+
+    #[test]
+    fn ds_owner_must_match_the_domain() {
+        let request = || {
+            AddDnsKeyRequest::new(
+                DomainName::parse("example.com").unwrap(),
+                DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12").unwrap(),
+            )
+            .expect("request")
+        };
+
+        // A foreign zone is refused: the digest is keyed by `domainName`.
+        let foreign = DsRecord::parse("example.net. IN DS 1234 13 2 AA").unwrap();
+        let error = request().with_ds(foreign).unwrap_err();
+        assert!(error.to_string().contains("example.net"), "{error}");
+
+        // A parent or child of the domain is a different zone.
+        for owner in ["com.", "sub.example.com.", "example.com.evil."] {
+            let ds = DsRecord::parse(&format!("{owner} IN DS 1234 13 2 AA")).unwrap();
+            assert!(request().with_ds(ds).is_err(), "{owner}");
+        }
+
+        // The trailing dot and the case are presentation noise, not a mismatch.
+        for owner in ["example.com.", "example.com", "EXAMPLE.COM."] {
+            let ds = DsRecord::parse(&format!("{owner} IN DS 1234 13 2 AA")).unwrap();
+            assert!(request().with_ds(ds).is_ok(), "{owner}");
+        }
     }
 
     #[test]

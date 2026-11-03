@@ -372,6 +372,7 @@ fn dnssec_error_branches() {
     // Accessors and formatting.
     let ds = DsRecord::parse("example.com. IN DS 1234 13 2 AA").unwrap();
     assert_eq!(ds.as_str(), "example.com. IN DS 1234 13 2 AA");
+    assert_eq!(ds.owner(), "example.com.");
     assert_eq!(ds.key_tag(), 1234);
     assert_eq!(ds.algorithm(), DnssecAlgorithm::EcdsaP256);
     assert_eq!(ds.digest_type(), DnssecDigestType::Sha256);

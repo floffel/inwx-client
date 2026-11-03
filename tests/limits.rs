@@ -2,12 +2,12 @@
 //! just inside the limit and the one just outside it.
 
 use inwx_client::{
-    parse_ip, AuthCode, AuthInfoUpdate, CertificateId, CertificateOrder, CertificateTerm,
-    CertificateUpdate, Credentials, DnsKey, DnssecKeyQuery, DomainLogQuery, DomainName, DsRecord,
-    Email, Error, Handle, HostingPeriod, Hostname, NameserverSetCreate, NameserverSetType,
-    Password, PostalDelivery, RefundRequest, RemoveClientHold, SetClientHold, StatementQuery,
-    TagUpdate, Timestamp, TldGroup, TldRules, TransferCodeUpdate, ZoneCreate, ZoneUpdate,
-    MAX_AUTH_CODE_LEN, MAX_DOMAIN_LEN, MAX_LABEL_LEN, MAX_PAGE_LIMIT, MAX_PASSWORD_LEN,
+    parse_ip, AddDnsKeyRequest, AuthCode, AuthInfoUpdate, CertificateId, CertificateOrder,
+    CertificateTerm, CertificateUpdate, Credentials, DnsKey, DnssecKeyQuery, DomainLogQuery,
+    DomainName, DsRecord, Email, Error, Handle, HostingPeriod, Hostname, NameserverSetCreate,
+    NameserverSetType, Password, PostalDelivery, RefundRequest, RemoveClientHold, SetClientHold,
+    StatementQuery, TagUpdate, Timestamp, TldGroup, TldRules, TransferCodeUpdate, ZoneCreate,
+    ZoneUpdate, MAX_AUTH_CODE_LEN, MAX_DOMAIN_LEN, MAX_LABEL_LEN, MAX_PAGE_LIMIT, MAX_PASSWORD_LEN,
 };
 use zeroize::Zeroize as _;
 
@@ -496,6 +496,38 @@ fn dnskey_boundaries() {
     assert!(DsRecord::parse("example.com. IN DS 65536 13 2 AA").is_err());
     assert!(DsRecord::parse("example.com. IN DS 1 13 2 ZZ").is_err());
     assert!(DsRecord::parse("example.com. IN DS 1 99 2 AA").is_err());
+}
+
+#[test]
+fn ds_owner_boundary() {
+    let request = || {
+        AddDnsKeyRequest::new(
+            domain("example.com"),
+            DnsKey::parse("example.com. IN DNSKEY 257 3 13 ac12").unwrap(),
+        )
+        .unwrap()
+    };
+    let ds = |owner: &str| DsRecord::parse(&format!("{owner} IN DS 1234 13 2 AA")).unwrap();
+
+    // Just inside: the zone itself, with or without the presentation dot and
+    // in any ASCII case — `DomainName` stores the lower-cased form.
+    for owner in ["example.com.", "example.com", "Example.COM."] {
+        assert!(request().with_ds(ds(owner)).is_ok(), "{owner}");
+        assert_eq!(ds(owner).owner(), owner);
+    }
+
+    // Just outside: a parent, a child, a sibling and a name that only looks
+    // like the zone. Each is a different zone, so the digest would be keyed
+    // to the wrong `domainName`.
+    for owner in [
+        "com.",
+        "sub.example.com.",
+        "example.net.",
+        "example.com.evil.",
+        "example.co",
+    ] {
+        assert!(request().with_ds(ds(owner)).is_err(), "{owner}");
+    }
 }
 
 #[test]
