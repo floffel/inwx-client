@@ -128,7 +128,7 @@ client.create_record(&domain, &record).await?;
 client.delete_record(&id).await?;
 ```
 ";
-    assert!(production_mutators(doc).is_empty());
+    assert_eq!(production_mutators(doc).len(), 0, "no production mutation");
 }
 
 /// Just inside, the other spelling: a client that was pointed at
@@ -141,7 +141,7 @@ let client = InwxClient::new(ReqwestTransport::new()).with_base_url(SANDBOX_BASE
 client.delete_record(&id).await?;
 ```
 ";
-    assert!(production_mutators(doc).is_empty());
+    assert_eq!(production_mutators(doc).len(), 0, "no production mutation");
 }
 
 /// Just inside: a read-only production block is fine — reading a live zone is
@@ -154,7 +154,7 @@ let client = InwxClient::new(ReqwestTransport::new());
 for record in client.list_records(&domain).await? { println!(\"{record:?}\"); }
 ```
 ";
-    assert!(production_mutators(doc).is_empty());
+    assert_eq!(production_mutators(doc).len(), 0, "no production mutation");
 }
 
 /// Just inside: a scripted transport touches nothing, so it needs no marker.
@@ -166,7 +166,7 @@ let client = InwxClient::new(Scripted);
 client.create_record(&domain, &record).await?;
 ```
 ";
-    assert!(production_mutators(doc).is_empty());
+    assert_eq!(production_mutators(doc).len(), 0, "no production mutation");
 }
 
 /// The crate-level docs are the first thing rustdoc shows.
