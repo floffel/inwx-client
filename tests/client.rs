@@ -371,6 +371,31 @@ async fn a_non_json_error_body_becomes_an_http_error() {
 }
 
 #[tokio::test]
+async fn a_secret_echoed_in_an_error_body_is_redacted() {
+    let transport = MockTransport::new();
+    transport.status(400, "user=bob&password=hunter2&action=login");
+
+    let client = client_without_retries(transport);
+    let error = client
+        .list_domains(&DomainListQuery::default())
+        .await
+        .unwrap_err();
+
+    let message = error.to_string();
+    assert!(!message.contains("hunter2"), "{message}");
+    assert!(message.contains("<redacted>"), "{message}");
+    assert!(!format!("{error:?}").contains("hunter2"));
+    match error {
+        Error::Http { status, body } => {
+            assert_eq!(status, 400);
+            assert!(!body.contains("hunter2"));
+            assert!(body.contains("bob"));
+        }
+        other => panic!("unexpected: {other}"),
+    }
+}
+
+#[tokio::test]
 async fn an_api_error_envelope_is_parsed_even_on_a_non_2xx_status() {
     let transport = MockTransport::new();
     transport.status(

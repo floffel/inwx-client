@@ -337,7 +337,14 @@ async fn a_long_error_body_is_truncated_in_the_http_error() {
     match error {
         Error::Http { status, body } => {
             assert_eq!(status, 400);
-            assert_eq!(body.chars().count(), 512);
+            assert_eq!(
+                body.as_str().chars().count(),
+                inwx_client::MAX_HTTP_BODY_CHARS + " [truncated]".len()
+            );
+            assert!(body
+                .as_str()
+                .starts_with(&"x".repeat(inwx_client::MAX_HTTP_BODY_CHARS)));
+            assert!(body.as_str().ends_with("[truncated]"));
         }
         other => panic!("unexpected: {other}"),
     }

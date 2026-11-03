@@ -4,6 +4,9 @@
 //! `serde_json::Error` as `source`, so `err.source()` still reports the line and
 //! column.
 
+use std::fmt;
+use std::ops::Deref;
+
 use thiserror::Error;
 
 use crate::rpc::Detail;
@@ -188,6 +191,12 @@ pub enum Error {
     /// [`InwxClient::call`](crate::InwxClient::call) backs off on 429 and 5xx,
     /// and never replays an ambiguous outcome for a method that can write.
     ///
+    /// The body comes from a gateway or a misconfigured endpoint, so it can be
+    /// arbitrarily large and can echo the request back. It is therefore kept as
+    /// an [`HttpBody`], which bounds it to [`MAX_HTTP_BODY_CHARS`] characters on
+    /// a character boundary and redacts known secrets before the error ever
+    /// exists — `Display` and `Debug` print that same safe text.
+    ///
     /// ```
     /// use inwx_client::Error;
     ///
@@ -207,8 +216,9 @@ pub enum Error {
     Http {
         /// HTTP status code.
         status: u16,
-        /// Body, truncated to 512 characters.
-        body: String,
+        /// Body, bounded to [`MAX_HTTP_BODY_CHARS`] characters and with
+        /// sensitive values redacted — see [`HttpBody`].
+        body: HttpBody,
     },
 
     /// A response body crossed the transport's size cap, so it was discarded
@@ -384,6 +394,29 @@ impl Error {
         }
     }
 
+    /// Builds an [`Error::Http`] for a non-2xx answer whose body is not an INWX
+    /// envelope. The body is bounded and redacted by [`HttpBody`] on the way in,
+    /// so the error stays safe to log whatever the endpoint sent.
+    ///
+    /// ```
+    /// use inwx_client::Error;
+    ///
+    /// let err = Error::http(503, "<html>service unavailable</html>");
+    /// assert_eq!(err.to_string(), "http 503: <html>service unavailable</html>");
+    /// assert!(err.is_retryable());
+    ///
+    /// // Whatever the page echoes back, the password does not reach the message.
+    /// let echoed = Error::http(400, r#"{"password":"hunter2"}"#);
+    /// assert!(!echoed.to_string().contains("hunter2"));
+    /// ```
+    #[must_use]
+    pub fn http(status: u16, body: impl Into<HttpBody>) -> Self {
+        Self::Http {
+            status,
+            body: body.into(),
+        }
+    }
+
     /// Result code of an [`Error::Api`], or `None` for every other variant.
     ///
     /// ```
@@ -552,6 +585,305 @@ impl Error {
 /// ```
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Most characters of an HTTP error body that an [`Error::Http`] keeps.
+///
+/// Long enough for a gateway page or a short INWX complaint, short enough that
+/// a log line stays a log line.
+///
+/// ```
+/// use inwx_client::{HttpBody, MAX_HTTP_BODY_CHARS};
+///
+/// let short = HttpBody::new("bad gateway");
+/// assert_eq!(short.as_str(), "bad gateway");
+///
+/// let long = HttpBody::new(&"x".repeat(MAX_HTTP_BODY_CHARS + 1));
+/// assert!(long.as_str().starts_with(&"x".repeat(MAX_HTTP_BODY_CHARS)));
+/// assert!(long.as_str().ends_with("[truncated]"));
+/// ```
+pub const MAX_HTTP_BODY_CHARS: usize = 512;
+
+/// Appended when a body had to be cut, so truncation is visible in a log.
+const TRUNCATION_MARKER: &str = " [truncated]";
+
+/// Stands in for the value of a sensitive key.
+const REDACTED_VALUE: &str = "<redacted>";
+
+/// Keys whose values must not reach a log line, compared case-insensitively
+/// against the whole key so that `mypassword` stays untouched.
+const SENSITIVE_KEYS: &[&str] = &[
+    "apikey",
+    "api_key",
+    "authcode",
+    "auth_code",
+    "newpassword",
+    "oldpassword",
+    "pass",
+    "passwd",
+    "password",
+    "secret",
+    "sessionid",
+    "session_id",
+    "token",
+];
+
+/// The body of an [`Error::Http`], bounded and redacted at construction time.
+///
+/// A non-2xx answer that is not an INWX envelope comes from a gateway, a proxy
+/// or a misconfigured endpoint, and it can be arbitrarily large — or echo back
+/// the request, credentials included, which is how the API reports bad
+/// parameters. Handing that to a caller verbatim would put an unbounded and
+/// possibly secret-bearing page into every log line the caller writes.
+///
+/// So a body enters the error only through this type, and every constructor
+/// enforces the same two rules:
+///
+/// * at most [`MAX_HTTP_BODY_CHARS`] characters survive, cut on a character
+///   boundary and followed by `" [truncated]"` when anything was dropped;
+/// * the value of a known sensitive key (`password`, `passwd`, `pass`,
+///   `authcode`, `secret`, `token`, `sessionid`, `apikey`, and the
+///   `new`/`old` password forms — JSON `"key": "value"` and form/query
+///   `key=value` alike) becomes `<redacted>`.
+///
+/// [`Display`](fmt::Display) labels the body and [`Debug`](fmt::Debug) quotes
+/// it, but both print exactly that bounded, redacted text — there is no path
+/// that emits the raw string.
+///
+/// ```
+/// use inwx_client::HttpBody;
+///
+/// let echoed = HttpBody::new(r#"{"password":"hunter2","user":"bob"}"#);
+/// assert_eq!(echoed.as_str(), r#"{"password":"<redacted>","user":"bob"}"#);
+///
+/// // Form-encoded answers are the same: the secret goes, the rest stays.
+/// let form = HttpBody::new("user=bob&pass=hunter2&action=login");
+/// assert_eq!(form.as_str(), "user=bob&pass=<redacted>&action=login");
+/// ```
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct HttpBody(String);
+
+impl HttpBody {
+    /// Bounds and redacts `body`.
+    ///
+    /// The text is redacted first and cut afterwards, so a redaction that
+    /// lengthens a value can never push the result past
+    /// [`MAX_HTTP_BODY_CHARS`].
+    ///
+    /// ```
+    /// use inwx_client::HttpBody;
+    ///
+    /// let body = HttpBody::new("relay said no");
+    /// assert_eq!(body.to_string(), "relay said no");
+    /// ```
+    #[must_use]
+    pub fn new(body: &str) -> Self {
+        Self(bounded(&redact(body)))
+    }
+
+    /// Bounds and redacts a raw response body.
+    ///
+    /// Only the bytes that can still matter are decoded: four bytes per kept
+    /// character is the widest a UTF-8 code point gets, so the whole page is
+    /// never copied into a `String` first. Invalid UTF-8 becomes `U+FFFD` as
+    /// usual, and a replacement character produced by cutting a sequence at the
+    /// byte cap is removed again by the character truncation that follows.
+    ///
+    /// ```
+    /// use inwx_client::HttpBody;
+    ///
+    /// let body = HttpBody::from_bytes(b"\xff<html>bad request</html>");
+    /// assert!(body.as_str().ends_with("<html>bad request</html>"));
+    /// ```
+    #[must_use]
+    pub fn from_bytes(body: &[u8]) -> Self {
+        let cap = MAX_HTTP_BODY_CHARS.saturating_mul(4);
+        let prefix = body.get(..body.len().min(cap)).unwrap_or_default();
+        Self::new(&String::from_utf8_lossy(prefix))
+    }
+
+    /// The bounded, redacted text — the only view of the body this type offers.
+    ///
+    /// ```
+    /// use inwx_client::HttpBody;
+    ///
+    /// let body = HttpBody::new("nope");
+    /// assert_eq!(body.as_str(), "nope");
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for HttpBody {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// Quotes the bounded text, so a derived `Debug` on [`enum@Error`] stays readable.
+impl fmt::Debug for HttpBody {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, formatter)
+    }
+}
+
+impl From<String> for HttpBody {
+    fn from(body: String) -> Self {
+        Self::new(&body)
+    }
+}
+
+impl From<&str> for HttpBody {
+    fn from(body: &str) -> Self {
+        Self::new(body)
+    }
+}
+
+impl AsRef<str> for HttpBody {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Deref for HttpBody {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Cuts `text` to [`MAX_HTTP_BODY_CHARS`] characters, one character at a time so
+/// the result can never split a code point.
+fn bounded(text: &str) -> String {
+    let capacity = text
+        .len()
+        .min(MAX_HTTP_BODY_CHARS * 4 + TRUNCATION_MARKER.len());
+    let mut kept = String::with_capacity(capacity);
+    for (index, character) in text.chars().enumerate() {
+        if index == MAX_HTTP_BODY_CHARS {
+            kept.push_str(TRUNCATION_MARKER);
+            return kept;
+        }
+        kept.push(character);
+    }
+    kept
+}
+
+/// Replaces the value of every known sensitive key with `<redacted>`.
+fn redact(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut redacted = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        match sensitive_value_at(text, cursor) {
+            Some((value_start, value_end)) => {
+                // Every offset here sits on an ASCII byte of the key or of its
+                // separator, so the range is a valid character boundary.
+                redacted.push_str(text.get(copied..value_start).unwrap_or_default());
+                redacted.push_str(REDACTED_VALUE);
+                copied = value_end;
+                cursor = value_end;
+            }
+            None => cursor += 1,
+        }
+    }
+    redacted.push_str(text.get(copied..).unwrap_or_default());
+    redacted
+}
+
+/// Span of the value of a sensitive key starting at `start`, quotes excluded.
+///
+/// Returns `None` when `start` is not the beginning of a whole sensitive key
+/// followed by `:` or `=` and a value.
+fn sensitive_value_at(text: &str, start: usize) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    if let Some(previous) = start.checked_sub(1).and_then(|index| bytes.get(index)) {
+        // Only a whole key counts: `mypassword` is a different key.
+        if previous.is_ascii_alphanumeric() || *previous == b'_' {
+            return None;
+        }
+    }
+    let key_end = key_end(bytes, start)?;
+    let key = text.get(start..key_end)?;
+    if !SENSITIVE_KEYS
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(key))
+    {
+        return None;
+    }
+    // A JSON key is wrapped in quotes; the separator follows the closing one.
+    let mut cursor = key_end;
+    if let Some(&quote @ (b'"' | b'\'')) = start.checked_sub(1).and_then(|index| bytes.get(index)) {
+        if bytes.get(cursor) != Some(&quote) {
+            return None;
+        }
+        cursor += 1;
+    }
+    let cursor = skip_ascii_whitespace(bytes, cursor);
+    let cursor = match bytes.get(cursor) {
+        Some(b':' | b'=') => cursor + 1,
+        _ => return None,
+    };
+    let cursor = skip_ascii_whitespace(bytes, cursor);
+    value_span(bytes, cursor)
+}
+
+/// Index just past the identifier at `start`, or `None` when there is none.
+fn key_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut end = start;
+    while let Some(byte) = bytes.get(end) {
+        if byte.is_ascii_alphanumeric() || *byte == b'_' {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    (end > start).then_some(end)
+}
+
+fn skip_ascii_whitespace(bytes: &[u8], mut cursor: usize) -> usize {
+    while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor += 1;
+    }
+    cursor
+}
+
+/// Span of the value at `cursor`: inside the quotes when there are some, up to
+/// the next separator otherwise.
+fn value_span(bytes: &[u8], cursor: usize) -> Option<(usize, usize)> {
+    match bytes.get(cursor) {
+        Some(&quote @ (b'"' | b'\'')) => {
+            let value_start = cursor + 1;
+            let mut end = value_start;
+            while let Some(&byte) = bytes.get(end) {
+                if byte == b'\\' {
+                    // An escaped character is data, including an escaped quote.
+                    end += 2;
+                    continue;
+                }
+                if byte == quote {
+                    return Some((value_start, end));
+                }
+                end += 1;
+            }
+            Some((value_start, bytes.len().min(end)))
+        }
+        Some(_) => {
+            let mut end = cursor;
+            while let Some(&byte) = bytes.get(end) {
+                if byte.is_ascii_whitespace() || matches!(byte, b'&' | b',' | b';' | b'}' | b']') {
+                    break;
+                }
+                end += 1;
+            }
+            Some((cursor, end.min(bytes.len())))
+        }
+        None => None,
+    }
+}
+
 /// Statuses worth another attempt when the answer was not an INWX envelope.
 ///
 /// `429` says the caller is being rate limited and `502`/`503`/`504` say a
@@ -574,7 +906,7 @@ mod tests {
     fn http(status: u16) -> Error {
         Error::Http {
             status,
-            body: String::from("gateway trouble"),
+            body: "gateway trouble".into(),
         }
     }
 
@@ -636,12 +968,12 @@ mod tests {
         for body in ["", "rate limited", &long] {
             let error = Error::Http {
                 status: 503,
-                body: body.to_owned(),
+                body: body.to_owned().into(),
             };
             assert!(error.is_retryable());
             let terminal = Error::Http {
                 status: 404,
-                body: body.to_owned(),
+                body: body.to_owned().into(),
             };
             assert!(!terminal.is_retryable());
         }
@@ -731,5 +1063,104 @@ mod tests {
             assert!(!error.is_authentication());
             assert!(!error.is_missing_credentials());
         }
+    }
+
+    /// Boundary pair on the documented cap: an exact fit is kept verbatim, one
+    /// character more is cut and marked.
+    #[test]
+    fn the_body_bound_is_exact() {
+        let inside = "x".repeat(MAX_HTTP_BODY_CHARS);
+        let kept = HttpBody::new(&inside);
+        assert_eq!(kept.as_str(), inside);
+        assert!(!kept.as_str().contains("[truncated]"));
+
+        let outside = "x".repeat(MAX_HTTP_BODY_CHARS + 1);
+        let cut = HttpBody::new(&outside);
+        assert_eq!(
+            cut.as_str(),
+            format!("{}{TRUNCATION_MARKER}", "x".repeat(MAX_HTTP_BODY_CHARS))
+        );
+    }
+
+    /// The cut lands on a character boundary: no half code point and no
+    /// replacement character at the seam.
+    #[test]
+    fn truncation_keeps_multibyte_characters_whole() {
+        let body = HttpBody::new(&"ä".repeat(MAX_HTTP_BODY_CHARS + 100));
+        assert!(body.as_str().starts_with(&"ä".repeat(MAX_HTTP_BODY_CHARS)));
+        assert!(body.as_str().ends_with(TRUNCATION_MARKER));
+        assert!(!body.as_str().contains('\u{FFFD}'));
+        assert_eq!(
+            body.as_str().chars().count(),
+            MAX_HTTP_BODY_CHARS + TRUNCATION_MARKER.len()
+        );
+    }
+
+    /// Raw bytes are cut before they are decoded, so an oversized page never
+    /// becomes a full `String`; invalid UTF-8 is still rendered lossily.
+    #[test]
+    fn raw_bytes_are_bounded_before_decoding() {
+        let huge = vec![b'x'; 8 * 1024 * 1024];
+        assert_eq!(
+            HttpBody::from_bytes(&huge).as_str().chars().count(),
+            MAX_HTTP_BODY_CHARS + TRUNCATION_MARKER.len()
+        );
+
+        let invalid = HttpBody::from_bytes(b"\xff\xfe<html>bad request</html>");
+        assert!(invalid.as_str().ends_with("<html>bad request</html>"));
+    }
+
+    /// A body echoing the request loses its secrets in JSON and in form
+    /// encoding, whatever the case of the key, and keeps everything else.
+    #[test]
+    fn known_secret_values_are_redacted() {
+        let json = HttpBody::new(
+            r#"{"user":"bob","password":"hunter2","reason":"bad login","apiKey":"k-1"}"#,
+        );
+        assert_eq!(
+            json.as_str(),
+            r#"{"user":"bob","password":"<redacted>","reason":"bad login","apiKey":"<redacted>"}"#
+        );
+
+        let form = HttpBody::new("user=bob&PASSWORD=hunter2&authcode=ABC-DEF&action=login");
+        assert_eq!(
+            form.as_str(),
+            "user=bob&PASSWORD=<redacted>&authcode=<redacted>&action=login"
+        );
+
+        // A whole key only: `mypassword` is a different field.
+        let other = HttpBody::new(r#"{"mypassword":"kept"}"#);
+        assert_eq!(other.as_str(), r#"{"mypassword":"kept"}"#);
+
+        // An escaped quote is data, so the value ends where JSON ends it.
+        let escaped = HttpBody::new(r#"{"password":"a\"b","user":"bob"}"#);
+        assert_eq!(
+            escaped.as_str(),
+            r#"{"password":"<redacted>","user":"bob"}"#
+        );
+
+        // Prose without a key/value separator is left alone.
+        assert_eq!(
+            HttpBody::new("password is required").as_str(),
+            "password is required"
+        );
+    }
+
+    /// `Display` and `Debug` print the bounded, redacted text and nothing else,
+    /// so neither a huge page nor a secret reaches a log line.
+    #[test]
+    fn display_and_debug_stay_within_the_bound() {
+        let long = Error::http(500, "y".repeat(50_000));
+        assert_eq!(
+            long.to_string().chars().count(),
+            "http 500: ".len() + MAX_HTTP_BODY_CHARS + TRUNCATION_MARKER.len()
+        );
+        assert!(format!("{long:?}").chars().count() < 1_000);
+        assert!(format!("{long:?}").contains("[truncated]"));
+
+        let echoed = Error::http(400, format!(r#"{{"password":"{}"}}"#, "s".repeat(10_000)));
+        assert!(!echoed.to_string().contains("ssssssssss"));
+        assert!(echoed.to_string().contains("<redacted>"));
+        assert!(format!("{echoed:?}").contains("<redacted>"));
     }
 }

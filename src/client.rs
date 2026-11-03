@@ -15,7 +15,7 @@ use serde_json::{json, Map, Value};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
-use crate::error::{Error, Result};
+use crate::error::{Error, HttpBody, Result};
 use crate::rpc::{RpcRequest, RpcResponse};
 use crate::transport::{Request, Response, Transport};
 use crate::types::de;
@@ -1199,10 +1199,7 @@ impl<T: Transport> InwxClient<T> {
                         Ok(envelope) => envelope.into_result(),
                         Err(_) => Err(Error::Http {
                             status,
-                            body: String::from_utf8_lossy(response.body())
-                                .chars()
-                                .take(512)
-                                .collect(),
+                            body: HttpBody::from_bytes(response.body()),
                         }),
                     };
                 }
