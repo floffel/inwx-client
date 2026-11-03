@@ -664,7 +664,11 @@ async fn list_documents_defaults_to_the_first_page_of_fifty() {
         .list_documents(&DocumentQuery::new())
         .await
         .unwrap();
-    assert!(documents.is_empty());
+    assert_eq!(
+        documents.len(),
+        0,
+        "an empty array is an answer, not an error"
+    );
 
     let call = transport.only_call();
     assert_eq!(call.method, "document.list");

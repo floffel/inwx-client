@@ -416,7 +416,7 @@ fn dnssec_error_branches() {
 }
 
 #[tokio::test]
-async fn dnssec_answers_without_arrays_are_tolerated() {
+async fn dnssec_answers_without_a_list_fail_instead_of_reporting_nothing() {
     let transport = MockTransport::new();
     transport.ok(json!({}));
     transport.ok(json!({}));
@@ -424,24 +424,13 @@ async fn dnssec_answers_without_arrays_are_tolerated() {
     transport.ok(json!({ "dnskey": {} }));
 
     let client = client(transport);
-    assert_eq!(client.dnssec_info(None).await.unwrap().len(), 0);
-    assert_eq!(
-        client
-            .list_dns_keys(&DnssecKeyQuery::new())
-            .await
-            .unwrap()
-            .len(),
-        0
-    );
-    assert_eq!(client.dnssec_info(None).await.unwrap().len(), 0);
-    assert_eq!(
-        client
-            .list_dns_keys(&DnssecKeyQuery::new())
-            .await
-            .unwrap()
-            .len(),
-        0
-    );
+    // A list that is absent is an answer that failed, not a domain without
+    // DNSSEC and not a domain without keys.
+    assert!(client.dnssec_info(None).await.is_err());
+    assert!(client.list_dns_keys(&DnssecKeyQuery::new()).await.is_err());
+    // A list of the wrong shape is a renamed answer, treated the same way.
+    assert!(client.dnssec_info(None).await.is_err());
+    assert!(client.list_dns_keys(&DnssecKeyQuery::new()).await.is_err());
 }
 
 #[test]
