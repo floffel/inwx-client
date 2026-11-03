@@ -281,16 +281,40 @@ impl DocumentUpload {
 
     /// Marks the call as a dry run (`testing`).
     ///
+    /// The API then checks the request and stores nothing, and
+    /// [`upload_document`](crate::InwxClient::upload_document) answers
+    /// [`DocumentUploadOutcome::DryRun`] instead of a stored document.
+    ///
     /// ```
     /// use inwx_client::DocumentUpload;
     ///
     /// let upload = DocumentUpload::new("a.pdf", b"x").unwrap().with_testing(true);
     /// assert_eq!(upload.params()["testing"], true);
+    /// assert!(upload.is_dry_run());
     /// ```
     #[must_use]
     pub fn with_testing(mut self, testing: bool) -> Self {
         self.testing = testing;
         self
+    }
+
+    /// Whether this upload is a dry run, so nothing will be stored.
+    ///
+    /// ```
+    /// use inwx_client::DocumentUpload;
+    ///
+    /// let real = DocumentUpload::new("a.pdf", b"x")?;
+    /// assert!(!real.is_dry_run());
+    ///
+    /// // Straight back to a real upload, should the check pass.
+    /// let dry = real.clone().with_testing(true);
+    /// assert!(dry.is_dry_run());
+    /// assert!(!dry.with_testing(false).is_dry_run());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn is_dry_run(&self) -> bool {
+        self.testing
     }
 
     /// The `document.upload` parameters, with the body base64-encoded.
@@ -339,6 +363,190 @@ impl fmt::Debug for DocumentUpload {
             .field("comment", &self.comment)
             .field("testing", &self.testing)
             .finish()
+    }
+}
+
+/// What a `document.upload` did: stored a file, or stored nothing because the
+/// request was a dry run.
+///
+/// The answer used to be a plain [`DocumentEntry`], whose `id` is an `Option` —
+/// so "the API stored the file but the answer named no id" and "nothing was
+/// stored at all" arrived as the same `Ok`. A caller that recorded the upload as
+/// done then had a document it could never download or delete, and the obvious
+/// recovery, uploading again, duplicates it. The two outcomes are separate
+/// values now: a real upload either names its document or fails as
+/// [`Error::Ambiguous`], and a dry run says so.
+///
+/// ```
+/// use inwx_client::{DocumentUploadOutcome, Error};
+///
+/// let stored = DocumentUploadOutcome::stored(81);
+/// assert_eq!(stored.id(), Some(81));
+/// assert!(stored.is_stored());
+/// assert!(!stored.is_dry_run());
+///
+/// let dry = DocumentUploadOutcome::dry_run();
+/// assert_eq!(dry.id(), None);
+/// assert!(dry.is_dry_run());
+/// assert!(matches!(dry.stored_id(), Err(Error::MissingField { .. })));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DocumentUploadOutcome {
+    /// The API stored the file and named it.
+    Stored {
+        /// Document id from the answer, and therefore a handle for
+        /// [`download_document`](crate::InwxClient::download_document) and
+        /// [`delete_document`](crate::InwxClient::delete_document).
+        id: i64,
+        /// The rest of the row the API answered with, `id` filled in from the
+        /// same answer — useful to confirm the file name and size the service
+        /// recorded. Boxed so the outcome stays as small as its id: the row is
+        /// usually dropped once the caller has read the id.
+        entry: Box<DocumentEntry>,
+    },
+    /// A dry run ([`DocumentUpload::with_testing`]): the API checked the
+    /// request and stored nothing, so there is no id and nothing to list.
+    DryRun,
+}
+
+impl DocumentUploadOutcome {
+    /// Builds a `Stored` outcome for `id`.
+    ///
+    /// The row carries the id and nothing else; a real upload fills in the
+    /// fields the API echoed back. [`upload_document`](crate::InwxClient::upload_document)
+    /// only ever stores a positive id, because a non-positive one would be
+    /// refused by `download_document` and `delete_document`.
+    ///
+    /// ```
+    /// use inwx_client::DocumentUploadOutcome;
+    ///
+    /// let outcome = DocumentUploadOutcome::stored(81);
+    /// assert_eq!(outcome.id(), Some(81));
+    /// assert_eq!(outcome.stored_id()?, 81);
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn stored(id: i64) -> Self {
+        Self::Stored {
+            id,
+            entry: Box::new(DocumentEntry {
+                id: Some(id),
+                ..DocumentEntry::default()
+            }),
+        }
+    }
+
+    /// The `DryRun` outcome: nothing was stored.
+    ///
+    /// ```
+    /// use inwx_client::DocumentUploadOutcome;
+    ///
+    /// assert!(DocumentUploadOutcome::dry_run().is_dry_run());
+    /// ```
+    #[must_use]
+    pub fn dry_run() -> Self {
+        Self::DryRun
+    }
+
+    /// The id of the stored document, or `None` for a dry run.
+    ///
+    /// ```
+    /// use inwx_client::DocumentUploadOutcome;
+    ///
+    /// assert_eq!(DocumentUploadOutcome::stored(81).id(), Some(81));
+    /// assert_eq!(DocumentUploadOutcome::dry_run().id(), None);
+    /// ```
+    #[must_use]
+    pub fn id(&self) -> Option<i64> {
+        match self {
+            Self::Stored { id, .. } => Some(*id),
+            Self::DryRun => None,
+        }
+    }
+
+    /// The row the API answered with, or `None` for a dry run.
+    ///
+    /// ```
+    /// use inwx_client::DocumentUploadOutcome;
+    ///
+    /// assert!(DocumentUploadOutcome::stored(81).entry().is_some());
+    /// assert!(DocumentUploadOutcome::dry_run().entry().is_none());
+    /// ```
+    #[must_use]
+    pub fn entry(&self) -> Option<&DocumentEntry> {
+        match self {
+            Self::Stored { entry, .. } => Some(entry),
+            Self::DryRun => None,
+        }
+    }
+
+    /// Takes the row out, or `None` for a dry run.
+    ///
+    /// ```
+    /// use inwx_client::DocumentUploadOutcome;
+    ///
+    /// let name = DocumentUploadOutcome::stored(81)
+    ///     .into_entry()
+    ///     .and_then(|entry| entry.filename);
+    /// assert_eq!(name, None);
+    /// ```
+    #[must_use]
+    pub fn into_entry(self) -> Option<DocumentEntry> {
+        match self {
+            Self::Stored { entry, .. } => Some(*entry),
+            Self::DryRun => None,
+        }
+    }
+
+    /// Whether a file was stored.
+    ///
+    /// ```
+    /// use inwx_client::DocumentUploadOutcome;
+    ///
+    /// assert!(DocumentUploadOutcome::stored(81).is_stored());
+    /// assert!(!DocumentUploadOutcome::dry_run().is_stored());
+    /// ```
+    #[must_use]
+    pub fn is_stored(&self) -> bool {
+        self.id().is_some()
+    }
+
+    /// Whether the call was a dry run and stored nothing.
+    ///
+    /// ```
+    /// use inwx_client::DocumentUploadOutcome;
+    ///
+    /// assert!(DocumentUploadOutcome::dry_run().is_dry_run());
+    /// assert!(!DocumentUploadOutcome::stored(81).is_dry_run());
+    /// ```
+    #[must_use]
+    pub fn is_dry_run(&self) -> bool {
+        matches!(self, Self::DryRun)
+    }
+
+    /// The id, or a typed error when nothing was stored.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::MissingField`] for a dry run: it stored nothing, so there is no
+    /// document to name.
+    ///
+    /// ```
+    /// use inwx_client::{DocumentUploadOutcome, Error};
+    ///
+    /// assert_eq!(DocumentUploadOutcome::stored(81).stored_id()?, 81);
+    /// assert!(matches!(
+    ///     DocumentUploadOutcome::dry_run().stored_id(),
+    ///     Err(Error::MissingField { field: "documentId", .. })
+    /// ));
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    pub fn stored_id(&self) -> Result<i64> {
+        self.id().ok_or(Error::MissingField {
+            method: "document.upload",
+            field: "documentId",
+        })
     }
 }
 
@@ -620,17 +828,24 @@ impl DocumentQuery {
 impl<T: Transport> InwxClient<T> {
     /// Uploads a document (`document.upload`).
     ///
+    /// Answers [`DocumentUploadOutcome::Stored`] with the id and the row the API
+    /// echoed back, or [`DocumentUploadOutcome::DryRun`] when the request was
+    /// marked with [`DocumentUpload::with_testing`] and nothing was stored.
+    ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
     /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
-    /// use inwx_client::{DocumentUpload, InwxClient, ReqwestTransport};
+    /// use inwx_client::{DocumentUpload, DocumentUploadOutcome, InwxClient, ReqwestTransport};
     ///
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
     /// let upload = DocumentUpload::new("mandate.pdf", &std::fs::read("mandate.pdf")?)?
     ///     .with_document_type("mandate")?;
-    /// let stored = client.upload_document(&upload).await?;
-    /// println!("{:?}", stored.id);
+    ///
+    /// match client.upload_document(&upload).await? {
+    ///     DocumentUploadOutcome::Stored { id, entry } => println!("stored as {id} ({entry:?})"),
+    ///     _ => println!("nothing was stored"),
+    /// }
     /// # Ok(())
     /// # }
     /// ```
@@ -638,10 +853,44 @@ impl<T: Transport> InwxClient<T> {
     /// # Errors
     ///
     /// [`Error::Validation`] for an unusable file name or body, plus the usual
-    /// transport and API errors.
-    pub async fn upload_document(&self, upload: &DocumentUpload) -> Result<DocumentEntry> {
+    /// transport and API errors. An accepted upload whose answer names no usable
+    /// id — missing, not a number, or zero — is [`Error::Ambiguous`]: the file
+    /// may well be stored, so listing the documents beats uploading again, which
+    /// would leave a duplicate behind.
+    pub async fn upload_document(&self, upload: &DocumentUpload) -> Result<DocumentUploadOutcome> {
         let data = self.call("document.upload", upload.params()).await?;
-        serde_json::from_value(data).map_err(Error::from)
+        if upload.is_dry_run() {
+            // Nothing was stored, so an id in the answer would name nothing:
+            // reading one would invent a handle for a document that does not
+            // exist. The outcome is certain either way.
+            return Ok(DocumentUploadOutcome::dry_run());
+        }
+        let entry: DocumentEntry = serde_json::from_value(data).map_err(|source| {
+            Error::ambiguous(
+                "document.upload",
+                "the answer could not be read, so the stored document has no id; \
+                 list the documents before uploading again",
+            )
+            .with_source(source)
+        })?;
+        // `download_document` and `delete_document` refuse a non-positive id, so
+        // one from the API is not a handle: report the upload as ambiguous
+        // instead of handing out a value the crate itself would reject.
+        let id = entry.id.filter(|id| *id > 0).ok_or_else(|| {
+            Error::ambiguous(
+                "document.upload",
+                "the answer carries no usable documentId, so the stored document \
+                 cannot be downloaded or deleted; list the documents before \
+                 uploading again",
+            )
+        })?;
+        Ok(DocumentUploadOutcome::Stored {
+            id,
+            entry: Box::new(DocumentEntry {
+                id: Some(id),
+                ..entry
+            }),
+        })
     }
 
     /// Lists stored documents (`document.list`).
@@ -779,6 +1028,28 @@ mod tests {
         assert_eq!(params["content"], "aGk=");
         assert_eq!(params["type"], "NOTE");
         assert!(params.get("testing").is_none());
+    }
+
+    #[test]
+    fn a_stored_outcome_names_its_id_and_a_dry_run_names_nothing() {
+        let stored = DocumentUploadOutcome::stored(81);
+        assert_eq!(stored.id(), Some(81));
+        assert_eq!(stored.stored_id().unwrap(), 81);
+        assert!(stored.is_stored());
+        assert!(!stored.is_dry_run());
+        assert_eq!(stored.entry().and_then(|entry| entry.id), Some(81));
+        assert_eq!(
+            stored.clone().into_entry().and_then(|entry| entry.id),
+            Some(81)
+        );
+
+        let dry = DocumentUploadOutcome::dry_run();
+        assert_eq!(dry.id(), None);
+        assert!(dry.is_dry_run());
+        assert!(!dry.is_stored());
+        assert!(dry.entry().is_none());
+        assert!(dry.clone().into_entry().is_none());
+        assert!(dry.stored_id().is_err());
     }
 
     #[test]

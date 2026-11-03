@@ -574,6 +574,15 @@ characters), the body is neither empty nor larger than `MAX_DOCUMENT_BYTES`
 bigger again — and the body is absent from `Debug`, because these documents are
 mandates and ID copies.
 
+The answer is a `DocumentUploadOutcome`, not a bare `DocumentEntry`. The row's
+`id` is optional in the documented shape, so "stored, but the answer named no
+id" and "nothing stored (a dry run)" would otherwise arrive as the same `Ok` —
+one a document that can never be downloaded or deleted, the other no document at
+all. `upload_document` therefore answers `Stored { id, entry }` only when the
+answer carries a positive `documentId`; anything else on a real upload is
+`Error::Ambiguous` (uncertain, never retried, "list the documents before
+uploading again"), and a `with_testing(true)` request answers `DryRun`.
+
 ## Account roles (issue #74, `src/account.rs`)
 
 Chapter 2 §2.1 (`account.*`) also covers granting a role to a handle:
