@@ -1031,7 +1031,7 @@ fn reseller_documents_and_pdfs_fill_their_parameters() {
         .unwrap()
         .with_page(1, 5)
         .unwrap();
-    let params = query.params().unwrap();
+    let params = query.params();
     assert_eq!(params["type"], "MANDATE");
     assert_eq!(params["customerNumber"], 123_456);
     assert_eq!(params["domainName"], "example.com");

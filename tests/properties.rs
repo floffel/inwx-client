@@ -824,6 +824,7 @@ proptest! {
 
     /// The reseller list queries keep the paging contract: the page is
     /// one-based, the limit is sent as given, and a limit of zero is refused.
+    /// `DocumentQuery` refuses a page of zero instead of clamping it.
     #[test]
     fn reseller_queries_keep_paging(page in 0u32..10, limit in 1u32..100) {
         let host = HostQuery::new().with_page(page, limit).unwrap().params().unwrap();
@@ -833,8 +834,13 @@ proptest! {
         let handles = NicHandleQuery::new().with_page(page, limit).unwrap().params().unwrap();
         prop_assert_eq!(handles["page"].as_u64().unwrap(), u64::from(page.max(1)));
 
-        let documents = DocumentQuery::new().with_page(page, limit).unwrap().params().unwrap();
-        prop_assert_eq!(documents["pagelimit"].as_u64().unwrap(), u64::from(limit));
+        if page == 0 {
+            prop_assert!(DocumentQuery::new().with_page(page, limit).is_err());
+        } else {
+            let documents = DocumentQuery::new().with_page(page, limit).unwrap().params();
+            prop_assert_eq!(documents["page"].as_u64().unwrap(), u64::from(page));
+            prop_assert_eq!(documents["pagelimit"].as_u64().unwrap(), u64::from(limit));
+        }
 
         let applications = ApplicationQuery::new().with_page(page, limit).unwrap().params().unwrap();
         prop_assert_eq!(applications["page"].as_u64().unwrap(), u64::from(page.max(1)));
@@ -849,6 +855,7 @@ proptest! {
 
         prop_assert!(HostQuery::new().with_page(1, 0).is_err());
         prop_assert!(DocumentQuery::new().with_page(1, 0).is_err());
+        prop_assert!(DocumentQuery::new().with_page(0, limit).is_err());
         prop_assert!(ApplicationQuery::new().with_page(1, 0).is_err());
         prop_assert!(NicHandleQuery::new().with_page(1, 0).is_err());
         prop_assert!(CustomerDownloadQuery::new(1).unwrap().with_page(1, 0).is_err());

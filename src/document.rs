@@ -456,7 +456,7 @@ impl DownloadedDocument {
 ///     .with_document_type("mandate")?
 ///     .with_customer_number(123456)?
 ///     .with_page(1, 20)?;
-/// let params = query.params()?;
+/// let params = query.params();
 /// assert_eq!(params["type"], "MANDATE");
 /// assert_eq!(params["pagelimit"], 20);
 /// # Ok::<(), inwx_client::Error>(())
@@ -476,7 +476,7 @@ impl DocumentQuery {
     ///
     /// ```
     /// use inwx_client::DocumentQuery;
-    /// assert!(DocumentQuery::new().params().unwrap().is_object());
+    /// assert!(DocumentQuery::new().params().is_object());
     /// ```
     #[must_use]
     pub fn new() -> Self {
@@ -492,7 +492,7 @@ impl DocumentQuery {
     /// ```
     /// use inwx_client::DocumentQuery;
     ///
-    /// assert_eq!(DocumentQuery::new().with_document_type("mandate")?.params()?["type"], "MANDATE");
+    /// assert_eq!(DocumentQuery::new().with_document_type("mandate")?.params()["type"], "MANDATE");
     /// assert!(DocumentQuery::new().with_document_type("").is_err());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
@@ -527,7 +527,7 @@ impl DocumentQuery {
     /// use inwx_client::{DocumentQuery, DomainName};
     ///
     /// let query = DocumentQuery::new().with_domain(DomainName::parse("example.com")?);
-    /// assert_eq!(query.params()?["domainName"], "example.com");
+    /// assert_eq!(query.params()["domainName"], "example.com");
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     #[must_use]
@@ -545,7 +545,7 @@ impl DocumentQuery {
     /// ```
     /// use inwx_client::DocumentQuery;
     ///
-    /// assert_eq!(DocumentQuery::new().with_filename("a.pdf")?.params()?["filename"], "a.pdf");
+    /// assert_eq!(DocumentQuery::new().with_filename("a.pdf")?.params()["filename"], "a.pdf");
     /// assert!(DocumentQuery::new().with_filename("a/b.pdf").is_err());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
@@ -558,34 +558,46 @@ impl DocumentQuery {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the page size is zero.
+    /// [`Error::Validation`] when `page` is `0` (INWX pages start at `1`), or
+    /// when the page size is zero.
     ///
     /// ```
     /// use inwx_client::DocumentQuery;
     ///
-    /// assert_eq!(DocumentQuery::new().with_page(1, 1)?.params()?["pagelimit"], 1);
+    /// assert_eq!(DocumentQuery::new().with_page(1, 1)?.params()["pagelimit"], 1);
+    /// assert_eq!(DocumentQuery::new().with_page(2, 50)?.params()["page"], 2);
+    /// assert!(DocumentQuery::new().with_page(0, 1).is_err());
     /// assert!(DocumentQuery::new().with_page(1, 0).is_err());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     pub fn with_page(mut self, page: u32, limit: u32) -> Result<Self> {
+        if page == 0 {
+            return Err(Error::validation(
+                "page",
+                "must be at least 1 (pages start at 1)",
+            ));
+        }
         self.limit = Some(validate_page_limit(limit)?);
-        self.page = Some(page.max(1));
+        self.page = Some(page);
         Ok(self)
     }
 
     /// The `document.list` parameters.
     ///
-    /// # Errors
-    ///
-    /// Never fails today: every value is validated when it is set, so the
-    /// parameters are always sendable. The `Result` keeps the shape of the
-    /// builders that can refuse a value.
+    /// Unset filters are omitted; `page` defaults to `1` and `pagelimit` to
+    /// `50`. Every value was checked by the setter that stored it, so building
+    /// the map cannot fail.
     ///
     /// ```
     /// use inwx_client::DocumentQuery;
-    /// assert!(DocumentQuery::new().params().unwrap().is_object());
+    ///
+    /// let params = DocumentQuery::new().params();
+    /// assert_eq!(params["page"], 1);
+    /// assert_eq!(params["pagelimit"], 50);
+    /// assert!(params.get("type").is_none());
     /// ```
-    pub fn params(&self) -> Result<Value> {
+    #[must_use]
+    pub fn params(&self) -> Value {
         let mut params = Map::new();
         if let Some(document_type) = &self.document_type {
             params.insert("type".to_owned(), json!(document_type));
@@ -601,7 +613,7 @@ impl DocumentQuery {
         }
         params.insert("page".to_owned(), json!(self.page.unwrap_or(1)));
         params.insert("pagelimit".to_owned(), json!(self.limit.unwrap_or(50)));
-        Ok(Value::Object(params))
+        Value::Object(params)
     }
 }
 
@@ -651,10 +663,10 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the query carries a bad filter or page size,
-    /// plus the usual transport and API errors.
+    /// The usual transport and API errors. The query itself cannot fail here:
+    /// every filter and the page size were checked when they were set.
     pub async fn list_documents(&self, query: &DocumentQuery) -> Result<Vec<DocumentEntry>> {
-        let params = query.params()?;
+        let params = query.params();
         let data = self.call("document.list", params).await?;
         Ok(parse_rows(&data, "document"))
     }
@@ -744,7 +756,9 @@ mod tests {
     fn ids_and_page_limits_are_checked_before_the_wire() {
         assert!(DocumentQuery::new().with_customer_number(0).is_err());
         assert!(DocumentQuery::new().with_page(1, 0).is_err());
+        assert!(DocumentQuery::new().with_page(0, 1).is_err());
         assert!(DocumentQuery::new().with_page(1, 1).is_ok());
+        assert!(DocumentQuery::new().with_page(u32::MAX, 1).is_ok());
     }
 
     #[test]
