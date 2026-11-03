@@ -736,7 +736,7 @@ use inwx_client::{
     CustomerDownload, CustomerDownloadQuery, CustomerUpdate, DataExport, DocumentEntry,
     DocumentQuery, DocumentUpload, DownloadedDocument, HostCheckResult, HostCreate, HostQuery,
     HostRecord, HostUpdate, Message, MessageAck, NicHandle, NicHandleQuery, PdfFile, PdfHandle,
-    PdfRender, PolledMessage, MAX_HOST_ADDRESSES,
+    PdfRender, PolledMessage, SavedName, MAX_HOST_ADDRESSES,
 };
 
 proptest! {
@@ -766,6 +766,22 @@ proptest! {
         let trimmed = name.trim();
         let expected = !trimmed.is_empty() && trimmed != "." && trimmed != "..";
         prop_assert_eq!(DocumentUpload::new(&name, b"x").is_ok(), expected);
+    }
+
+    /// A name that a download hands out is a name on the way out too: whatever
+    /// the answer carries, an accepted value has no separator, no control
+    /// character, is not empty and stays within 255 characters.
+    #[test]
+    fn a_parsed_saved_name_can_never_leave_the_directory(name in any_text()) {
+        if let Ok(saved) = SavedName::parse(&name) {
+            let text = saved.as_str();
+            prop_assert!(!text.is_empty());
+            prop_assert!(!text.contains('/') && !text.contains('\\'));
+            prop_assert!(!text.chars().any(char::is_control));
+            prop_assert!(text.chars().count() <= 255);
+            let reparsed = SavedName::parse(text).unwrap();
+            prop_assert_eq!(reparsed.as_str(), text);
+        }
     }
 
     /// Whatever body is uploaded arrives base64-encoded and decodes back

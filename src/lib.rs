@@ -361,7 +361,7 @@ pub use dnssec::{
 };
 pub use document::{
     DocumentEntry, DocumentKind, DocumentQuery, DocumentUpload, DocumentUploadOutcome,
-    DownloadedDocument, MAX_DOCUMENT_BYTES,
+    DownloadedDocument, SavedName, MAX_DOCUMENT_BYTES,
 };
 pub use domain::{
     AuthInfoUpdate, ClientHoldResult, DomainCheck, DomainControlResult, DomainCreate, DomainInfo,
