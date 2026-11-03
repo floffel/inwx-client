@@ -5,8 +5,9 @@ mod common;
 
 use inwx_client::{
     ContactListing, ContactQuery, Credentials, DomainListQuery, DomainListing, DomainName,
-    Hostname, Listing, Pagination, Period, RecordId, RecordSpec, RecordType, RemoveClientHold,
-    RpcResponse, SetClientHold, ZoneListing, MAX_ITEMS, MAX_PAGES, MAX_PAGE_SIZE, MAX_TTL,
+    Hostname, HttpBody, Listing, Pagination, Period, RecordId, RecordSpec, RecordType,
+    RemoveClientHold, RpcResponse, SetClientHold, ZoneListing, MAX_HTTP_BODY_CHARS, MAX_ITEMS,
+    MAX_PAGES, MAX_PAGE_SIZE, MAX_TTL,
 };
 use proptest::prelude::*;
 use serde_json::Value;
@@ -603,21 +604,58 @@ proptest! {
         outside in terminal_status(),
         body in arbitrary(),
     ) {
-        let transient = Error::Http { status: inside, body: body.clone() };
+        let transient = Error::Http { status: inside, body: body.clone().into() };
         prop_assert!(transient.is_retryable());
-        prop_assert!(transient.to_string().contains(&body));
         prop_assert!(!transient.is_uncertain());
+        // The message carries exactly the bounded, redacted body.
+        prop_assert_eq!(
+            transient.to_string(),
+            format!("http {inside}: {}", HttpBody::new(&body))
+        );
 
-        let terminal = Error::Http { status: outside, body };
+        let terminal = Error::Http { status: outside, body: body.into() };
         prop_assert!(!terminal.is_retryable());
         prop_assert!(!terminal.is_uncertain());
+    }
+
+    /// Whatever the endpoint sent, the body kept in the error is bounded, and
+    /// bounding it again changes nothing.
+    #[test]
+    fn http_bodies_are_bounded_and_idempotent(body in arbitrary()) {
+        let once = HttpBody::new(&body);
+        prop_assert!(
+            once.as_str().chars().count() <= MAX_HTTP_BODY_CHARS + " [truncated]".len()
+        );
+        let twice = HttpBody::new(once.as_str());
+        prop_assert_eq!(twice.as_str(), once.as_str());
+        prop_assert!(once.as_str().is_char_boundary(0));
+        prop_assert!(once.as_str().chars().count() <= MAX_HTTP_BODY_CHARS || once.as_str().ends_with(" [truncated]"));
+    }
+
+    /// A body echoing a secret loses the value, in JSON and in form encoding.
+    #[test]
+    fn echoed_secrets_never_reach_the_message(
+        secret in "[a-f0-9]{8,32}",
+        quoted in any::<bool>(),
+    ) {
+        let body = if quoted {
+            format!(r#"{{"password":"{secret}","user":"bob"}}"#)
+        } else {
+            format!("password={secret}&user=bob")
+        };
+        let error = Error::Http { status: 400, body: body.into() };
+        prop_assert!(!error.to_string().contains(&secret));
+        prop_assert!(error.to_string().contains("<redacted>"));
+        let debug = format!("{error:?}");
+        prop_assert!(!debug.contains(&secret));
+        prop_assert!(error.to_string().contains("bob"));
     }
 
     /// Sweeping the whole `u16` range keeps the set exactly the four documented
     /// statuses — a future widening to "all of 5xx" would fail here.
     #[test]
     fn only_the_four_http_statuses_are_retryable(status in any::<u16>()) {
-        let error = Error::Http { status, body: String::new() };
+        let error = Error::Http { status, body: String::new().into() };
         prop_assert_eq!(error.is_retryable(), matches!(status, 429 | 502 | 503 | 504));
     }
 }
