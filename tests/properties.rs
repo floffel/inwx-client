@@ -4,13 +4,14 @@
 mod common;
 
 use inwx_client::{
-    ContactListing, ContactQuery, Credentials, DomainListQuery, DomainListing, DomainName,
-    Hostname, HttpBody, Listing, Pagination, Period, RecordId, RecordSpec, RecordType,
-    RemoveClientHold, RpcResponse, SetClientHold, ZoneListing, MAX_HTTP_BODY_CHARS, MAX_ITEMS,
-    MAX_PAGES, MAX_PAGE_SIZE, MAX_TTL,
+    retry_after_from_header, ContactListing, ContactQuery, Credentials, DomainListQuery,
+    DomainListing, DomainName, Hostname, HttpBody, Listing, Pagination, Period, RecordId,
+    RecordSpec, RecordType, RemoveClientHold, RpcResponse, SetClientHold, ZoneListing,
+    MAX_HTTP_BODY_CHARS, MAX_ITEMS, MAX_PAGES, MAX_PAGE_SIZE, MAX_TTL,
 };
 use proptest::prelude::*;
 use serde_json::Value;
+use std::time::Duration;
 
 /// Arbitrary record-type tokens, including ones the API does not know.
 fn type_token() -> impl Strategy<Value = String> {
@@ -604,7 +605,11 @@ proptest! {
         outside in terminal_status(),
         body in arbitrary(),
     ) {
-        let transient = Error::Http { status: inside, body: body.clone().into() };
+        let transient = Error::Http {
+            status: inside,
+            body: body.clone().into(),
+            retry_after: None,
+        };
         prop_assert!(transient.is_retryable());
         prop_assert!(!transient.is_uncertain());
         // The message carries exactly the bounded, redacted body.
@@ -613,7 +618,11 @@ proptest! {
             format!("http {inside}: {}", HttpBody::new(&body))
         );
 
-        let terminal = Error::Http { status: outside, body: body.into() };
+        let terminal = Error::Http {
+            status: outside,
+            body: body.into(),
+            retry_after: None,
+        };
         prop_assert!(!terminal.is_retryable());
         prop_assert!(!terminal.is_uncertain());
     }
@@ -643,7 +652,11 @@ proptest! {
         } else {
             format!("password={secret}&user=bob")
         };
-        let error = Error::Http { status: 400, body: body.into() };
+        let error = Error::Http {
+            status: 400,
+            body: body.into(),
+            retry_after: None,
+        };
         prop_assert!(!error.to_string().contains(&secret));
         prop_assert!(error.to_string().contains("<redacted>"));
         let debug = format!("{error:?}");
@@ -655,8 +668,59 @@ proptest! {
     /// statuses — a future widening to "all of 5xx" would fail here.
     #[test]
     fn only_the_four_http_statuses_are_retryable(status in any::<u16>()) {
-        let error = Error::Http { status, body: String::new().into() };
+        let error = Error::Http {
+            status,
+            body: String::new().into(),
+            retry_after: None,
+        };
         prop_assert_eq!(error.is_retryable(), matches!(status, 429 | 502 | 503 | 504));
+    }
+
+    /// The delay a server asks for survives the trip into the error unchanged,
+    /// whatever it is, and never moves the retry verdict.
+    #[test]
+    fn a_retry_after_round_trips_unchanged(
+        status in any::<u16>(),
+        secs in any::<u64>(),
+        nanos in 0u32..1_000_000_000,
+    ) {
+        let delay = Duration::new(secs, nanos);
+        let error = Error::http(status, "answer")
+            .with_retry_after(delay);
+        prop_assert_eq!(error.retry_after(), Some(delay));
+        // The header is advisory only: the status alone decides.
+        prop_assert_eq!(error.is_retryable(), matches!(status, 429 | 502 | 503 | 504));
+
+        // A held header reads back as the duration that was written.
+        let written = error.retry_after().unwrap_or_default();
+        prop_assert_eq!((written.as_secs(), written.subsec_nanos()), (secs, nanos));
+    }
+
+    /// The public reader never panics on arbitrary text, and a value made only
+    /// of digits is exactly that many seconds.
+    #[test]
+    fn reading_a_retry_after_header_is_total(text in "\\PC{0,40}") {
+        let parsed = retry_after_from_header(&text);
+        let trimmed = text.trim();
+        if !trimmed.is_empty() && trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
+            prop_assert_eq!(
+                parsed,
+                trimmed.parse::<u64>().ok().map(Duration::from_secs)
+            );
+        }
+        // Whatever the text, a delay never exceeds what a `Duration` holds.
+        if let Some(delay) = parsed {
+            prop_assert!(delay <= Duration::from_secs(u64::MAX));
+        }
+    }
+
+    /// Any delay written as the header's number form reads back unchanged.
+    #[test]
+    fn retry_after_numbers_round_trip(secs in any::<u64>()) {
+        prop_assert_eq!(
+            retry_after_from_header(&secs.to_string()),
+            Some(Duration::from_secs(secs))
+        );
     }
 }
 

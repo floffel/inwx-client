@@ -8,14 +8,14 @@
 
 use std::fmt;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
-use crate::error::{Error, HttpBody, Result};
+use crate::error::{retry_after_at, Error, HttpBody, Result};
 use crate::rpc::{RpcRequest, RpcResponse};
 use crate::transport::{Request, Response, Transport};
 use crate::types::de;
@@ -1197,10 +1197,7 @@ impl<T: Transport> InwxClient<T> {
                              executed, check the current state before retrying"
                         ))),
                         Ok(envelope) => envelope.into_result(),
-                        Err(_) => Err(Error::Http {
-                            status,
-                            body: HttpBody::from_bytes(response.body()),
-                        }),
+                        Err(_) => Err(http_error(&response)),
                     };
                 }
                 Err(error) if replay_allowed(&error, method) => {
@@ -1387,6 +1384,39 @@ fn status_replay_allowed(status: u16, method: &str) -> bool {
 /// duplicate the mutation.
 fn status_is_uncertain(status: u16, method: &str) -> bool {
     is_retryable_status(status) && !is_read_only_method(method)
+}
+
+/// The [`Error::Http`] for a non-2xx answer whose body is not an INWX
+/// envelope, carrying the `Retry-After` the endpoint asked for.
+///
+/// The delay is attached as data. Nothing here waits: whether a caller honours
+/// it, and for how long, is that caller's decision — the status is what
+/// decides whether a replay is allowed at all.
+fn http_error(response: &Response) -> Error {
+    let error = Error::http(response.status(), HttpBody::from_bytes(response.body()));
+    match retry_after_in(response) {
+        Some(delay) => error.with_retry_after(delay),
+        None => error,
+    }
+}
+
+/// The delay the answer's `Retry-After` header asks for, if it carried a
+/// usable one and more than one such header agrees.
+fn retry_after_in(response: &Response) -> Option<Duration> {
+    // One clock reading for every header on this answer, so a repeated value
+    // cannot disagree with itself.
+    let now = SystemTime::now();
+    let mut values = response
+        .header_all("retry-after")
+        .map(|value| retry_after_at(value, now));
+    let first = values.next()??;
+    // A gateway that repeats the header contradicts itself; refuse to guess
+    // and fall back to the caller's own backoff.
+    if values.all(|other| other == Some(first)) {
+        Some(first)
+    } else {
+        None
+    }
 }
 
 /// Collects every `Set-Cookie` header into a single `Cookie` value.
@@ -1806,5 +1836,75 @@ mod tests {
         let uncertain = Error::uncertain("timeout");
         assert!(replay_allowed(&uncertain, "account.info"));
         assert!(!replay_allowed(&uncertain, "account.unlock"));
+    }
+
+    /// The header lookup: absent, present once, repeated consistently, and
+    /// repeated inconsistently.
+    #[test]
+    fn retry_after_reads_the_header_case_insensitively() {
+        let response = |headers: Vec<(&str, &str)>| {
+            Response::new(
+                429,
+                headers
+                    .into_iter()
+                    .map(|(name, value)| (name.to_owned(), value.to_owned())),
+                b"slow down".to_vec(),
+            )
+        };
+
+        assert_eq!(retry_after_in(&response(Vec::new())), None);
+        assert_eq!(
+            retry_after_in(&response(vec![("Retry-After", "30")])),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            retry_after_in(&response(vec![("retry-after", "  45 ")])),
+            Some(Duration::from_secs(45))
+        );
+        // Two headers that agree are one answer.
+        assert_eq!(
+            retry_after_in(&response(vec![
+                ("Retry-After", "30"),
+                ("retry-after", "30"),
+            ])),
+            Some(Duration::from_secs(30))
+        );
+        // Two that disagree are no answer at all.
+        assert_eq!(
+            retry_after_in(&response(vec![
+                ("Retry-After", "30"),
+                ("retry-after", "60"),
+            ])),
+            None
+        );
+        // An unreadable value is not a zero delay.
+        assert_eq!(
+            retry_after_in(&response(vec![("Retry-After", "soon")])),
+            None
+        );
+        // A different header never stands in for it.
+        assert_eq!(
+            retry_after_in(&response(vec![("X-Retry-After", "30")])),
+            None
+        );
+    }
+
+    /// The error a non-envelope 429 produces carries the header, and the one
+    /// without a header says so instead of guessing.
+    #[test]
+    fn the_http_error_carries_the_retry_after_it_saw() {
+        let throttled = Response::new(
+            429,
+            [("Retry-After".to_owned(), "90".to_owned())],
+            b"<html>slow down</html>".to_vec(),
+        );
+        let error = http_error(&throttled);
+        assert_eq!(error.retry_after(), Some(Duration::from_secs(90)));
+        assert!(error.is_retryable());
+        assert_eq!(error.to_string(), "http 429: <html>slow down</html>");
+
+        let plain = Response::new(503, std::iter::empty(), b"unavailable".to_vec());
+        assert_eq!(http_error(&plain).retry_after(), None);
+        assert!(http_error(&plain).is_retryable());
     }
 }

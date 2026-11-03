@@ -560,17 +560,31 @@ fn error_helpers_cover_every_branch() {
     let http = Error::Http {
         status: 502,
         body: "bad gateway".into(),
+        retry_after: None,
     };
     assert!(http.to_string().contains("502"));
     // A gateway hiccup is transient; a rejected request is terminal.
     assert!(http.is_retryable());
+    // No header seen, so there is nothing to pace on.
+    assert_eq!(http.retry_after(), None);
     let forbidden = Error::Http {
         status: 403,
         body: "forbidden".into(),
+        retry_after: None,
     };
     assert!(!forbidden.is_retryable());
     assert!(!forbidden.is_uncertain());
     assert_eq!(forbidden.code(), None);
+    assert_eq!(forbidden.retry_after(), None);
+
+    // The header an answer carried is part of the error a caller sees.
+    let throttled =
+        Error::http(429, "slow down").with_retry_after(std::time::Duration::from_secs(30));
+    assert_eq!(
+        throttled.retry_after(),
+        Some(std::time::Duration::from_secs(30))
+    );
+    assert!(throttled.is_retryable());
 }
 
 #[test]

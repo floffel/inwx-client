@@ -362,12 +362,51 @@ async fn a_non_json_error_body_becomes_an_http_error() {
         .unwrap_err();
 
     match error {
-        Error::Http { status, body } => {
+        Error::Http { status, body, .. } => {
             assert_eq!(status, 400);
             assert!(body.contains("bad request"));
         }
         other => panic!("unexpected: {other}"),
     }
+}
+
+#[tokio::test]
+async fn a_retry_after_header_reaches_the_error_a_caller_sees() {
+    let transport = MockTransport::new();
+    transport.push(Reply::Response(Response::new(
+        429,
+        [("Retry-After".to_owned(), "7".to_owned())],
+        b"<html>too many requests</html>".to_vec(),
+    )));
+
+    let client = client_without_retries(transport);
+    let error = client
+        .list_domains(&DomainListQuery::default())
+        .await
+        .unwrap_err();
+
+    assert!(error.is_retryable());
+    assert_eq!(error.retry_after(), Some(std::time::Duration::from_secs(7)));
+}
+
+#[tokio::test]
+async fn a_transient_status_on_a_write_carries_no_retry_after() {
+    // The outcome is unknown, so there is nothing to pace a replay on.
+    let transport = MockTransport::new();
+    transport.push(Reply::Response(Response::new(
+        429,
+        [("Retry-After".to_owned(), "7".to_owned())],
+        b"too many requests".to_vec(),
+    )));
+
+    let client = client_without_retries(transport);
+    let error = client
+        .unlock_account(&UnlockAccount::new("sub-account").unwrap())
+        .await
+        .unwrap_err();
+
+    assert!(error.is_uncertain());
+    assert_eq!(error.retry_after(), None);
 }
 
 #[tokio::test]
@@ -386,7 +425,7 @@ async fn a_secret_echoed_in_an_error_body_is_redacted() {
     assert!(message.contains("<redacted>"), "{message}");
     assert!(!format!("{error:?}").contains("hunter2"));
     match error {
-        Error::Http { status, body } => {
+        Error::Http { status, body, .. } => {
             assert_eq!(status, 400);
             assert!(!body.contains("hunter2"));
             assert!(body.contains("bob"));

@@ -185,6 +185,11 @@ Every method below is implemented against the published INWX API documentation
   do not give up on a gateway hiccup. Whether a mutating command is actually
   replayed stays with the idempotency rules above and
   [issue #2](https://github.com/floffel/inwx-client/issues/2).
+* **`Retry-After` is carried, not obeyed.** When a non-envelope answer asks for a
+  pause, the delay ends up on the error (`Error::retry_after`, both the
+  delay-seconds and the HTTP-date form) so a caller can pace its own retry
+  instead of guessing. The client never sleeps on a header it read from a
+  gateway, and the delay says nothing about whether a replay is allowed.
 * **Uncertain is not retried.** A timeout or a reset after the request was
   written is `Error::Uncertain`: the API may already have run the command. It is
   replayed only for a read-only method (`is_read_only_method`), never for a
@@ -237,7 +242,7 @@ documentation does not state:
 | --- | --- |
 | Cookie name, `Path`, `HttpOnly`, expiry | **unverified** — the client never assumes a name; it replays every `Set-Cookie` pair it received, so the name does not matter. Whether the cookie alone is sufficient for every method is not documented. |
 | `pagelimit` ceiling | **unverified** — the API documents `page`/`pagelimit` and a `count` in the answer, but no maximum page size. `MAX_PAGE_SIZE` (1000), `MAX_ITEMS` (100\_000) and `MAX_PAGES` (10\_000) are crate-side ceilings, documented as such. |
-| Rate limits and `Retry-After` | **unverified** — the docs do not mention either. The client backs off on 429 without reading a header, so a sent header is ignored. |
+| Rate limits and `Retry-After` | **unverified** — the docs do not mention either. A `Retry-After` header is read when present and reported on `Error::Http` (delay-seconds or HTTP-date), but the client backs off on 429 without waiting for it, and whether INWX sends one at all is not documented. |
 | API-key authentication | **unverified** — no method is documented; the crate implements password login only. |
 | `nameserver.info` returning the record array | documented (Table 2.208) and implemented; that it *also* serves as the record listing (there is no `nameserver.listRecords`) is an inference from the documented method list. |
 | Prices as `float` | documented; parsed as `f64` and accepted from strings. Display-only: use the amount returned by `create`/`renew` for accounting. |
@@ -316,6 +321,7 @@ cargo doc --no-deps --all-features
 cargo llvm-cov --no-default-features --summary-only --fail-under-lines 95
 cargo +nightly fuzz run parse_response
 cargo +nightly fuzz run parse_name
+cargo +nightly fuzz run parse_retry_after
 ```
 
 * **Unit** — permissive scalars, cookie collection, retry backoff, record and
@@ -376,6 +382,9 @@ cargo +nightly fuzz run parse_name
   (ASCII, lower-case, in length, no empty label, no edge hyphen) and survive a
   second pass unchanged, with `DomainName` and `Hostname` agreeing wherever the
   canonical form has a TLD.
+  `fuzz/fuzz_targets/parse_retry_after.rs` does the same for the `Retry-After`
+  reader: a digits-only value must be exactly that many seconds (or nothing,
+  when it overflows), and no text may panic.
 
 ## License
 

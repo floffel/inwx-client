@@ -48,4 +48,13 @@ test = false
 doc = false
 bench = false
 
+# The `Retry-After` header: never panics, and a digits-only value is exactly
+# that many seconds. Its curated seeds live in fuzz/corpus/parse_retry_after.
+[[bin]]
+name = "parse_retry_after"
+path = "fuzz_targets/parse_retry_after.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
