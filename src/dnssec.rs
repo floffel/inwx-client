@@ -558,6 +558,12 @@ impl<'de> Deserialize<'de> for DnssecKeyStatus {
 
 /// One domain's DNSSEC state, from `dnssec.info`.
 ///
+/// `status` is an `Option` because `dnssec.info` leaves `dnssecStatus` out for a
+/// domain without DNSSEC (and sends `null` for some records). An absent field is
+/// `None` — "the API reported no status" — which is a different answer from
+/// `Some(DnssecDomainStatus::Manual)`, "keys are managed manually through this
+/// API". No value is invented for a field the API did not send.
+///
 /// ```
 /// use inwx_client::{DnssecDomainStatus, DnssecState};
 ///
@@ -565,7 +571,15 @@ impl<'de> Deserialize<'de> for DnssecKeyStatus {
 ///     r#"{"domain":"example.com","keyCount":2,"dnssecStatus":"MANUAL"}"#,
 /// )?;
 /// assert_eq!(state.key_count, Some(2));
-/// assert_eq!(state.status, DnssecDomainStatus::Manual);
+/// assert_eq!(state.status, Some(DnssecDomainStatus::Manual));
+///
+/// // Unsigned: the field is absent, or present and `null`. Both are `None`,
+/// // and both keep the record.
+/// let absent: DnssecState = serde_json::from_str(r#"{"domain":"example.net"}"#)?;
+/// assert_eq!(absent.status, None);
+/// let null: DnssecState =
+///     serde_json::from_str(r#"{"domain":"example.org","dnssecStatus":null}"#)?;
+/// assert_eq!(null.status, None);
 /// # Ok::<(), serde_json::Error>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -575,15 +589,32 @@ pub struct DnssecState {
     /// Number of keys the API reports.
     #[serde(default, rename = "keyCount", deserialize_with = "de::opt_i64")]
     pub key_count: Option<i64>,
-    /// DNSSEC status of the domain.
-    #[serde(default = "default_domain_status", rename = "dnssecStatus")]
-    pub status: DnssecDomainStatus,
+    /// DNSSEC status of the domain, when the API reports one.
+    #[serde(
+        default,
+        rename = "dnssecStatus",
+        deserialize_with = "opt_domain_status"
+    )]
+    pub status: Option<DnssecDomainStatus>,
 }
 
-/// `dnssec.info` omits the status for unsigned domains; `MANUAL` is the only
-/// value that keeps a missing field from claiming "signed".
-fn default_domain_status() -> DnssecDomainStatus {
-    DnssecDomainStatus::Manual
+/// Reads `dnssecStatus`, which `dnssec.info` omits for a domain without DNSSEC
+/// and sends as `null` in some answers.
+///
+/// Both shapes are `None`, so the two sides of the boundary behave the same: the
+/// field carries what the API said and nothing else, a caller can tell a
+/// reported `MANUAL` from an omitted field, and a `null` record is kept instead
+/// of being dropped by the per-row parse of the list.
+fn opt_domain_status<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<DnssecDomainStatus>, D::Error> {
+    let raw = de::opt_string(deserializer)?;
+    match raw.as_deref().map(str::trim) {
+        Some(raw) if !raw.is_empty() => DnssecDomainStatus::parse(raw)
+            .map(Some)
+            .map_err(D::Error::custom),
+        _ => Ok(None),
+    }
 }
 
 /// A DNSKEY in presentation format (`dnskey`), checked before it is sent.
@@ -1716,6 +1747,32 @@ impl<T: Transport> InwxClient<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_without_a_reported_status_keeps_it_absent() {
+        let state = |json: &str| serde_json::from_str::<DnssecState>(json).unwrap();
+
+        // Absent, `null` and a blank string all mean "the API said nothing".
+        for json in [
+            r#"{"domain":"example.net"}"#,
+            r#"{"domain":"example.net","dnssecStatus":null}"#,
+            r#"{"domain":"example.net","dnssecStatus":""}"#,
+            r#"{"domain":"example.net","dnssecStatus":"  "}"#,
+        ] {
+            assert_eq!(state(json).status, None, "{json}");
+        }
+
+        // A reported status is carried, and is never confused with `None`.
+        for (wire, status) in [
+            ("MANUAL", DnssecDomainStatus::Manual),
+            ("manual", DnssecDomainStatus::Manual),
+            ("UPDATE", DnssecDomainStatus::Update),
+            ("DELETE_ALL", DnssecDomainStatus::DeleteAll),
+        ] {
+            let json = format!(r#"{{"domain":"example.net","dnssecStatus":"{wire}"}}"#);
+            assert_eq!(state(&json).status, Some(status), "{wire}");
+        }
+    }
 
     #[test]
     fn key_owner_must_match_the_domain() {
