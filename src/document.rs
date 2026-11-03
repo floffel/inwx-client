@@ -28,8 +28,9 @@ use crate::client::InwxClient;
 use crate::error::{Error, Result};
 use crate::transport::Transport;
 use crate::types::{
-    de, decode_base64, encode_base64, parse_rows, validate_filename, validate_id,
-    validate_page_limit, validate_text, validate_upper_token, DomainName,
+    decode_base64, encode_base64, field_map, parse_rows, pick_bool, pick_i64, pick_text,
+    validate_filename, validate_id, validate_page_limit, validate_text, validate_upper_token,
+    DomainName,
 };
 
 /// Largest document body this crate accepts, before encoding.
@@ -55,6 +56,12 @@ const MAX_COMMENT_LEN: usize = 4096;
 
 /// One stored document, as listed by `document.list`.
 ///
+/// The API is mid-rename on several of these keys, so a row may carry the new
+/// spelling, the old one, or both: `documentId`/`id`, `mimeType`/`mime_type`,
+/// `customerNumber`/`customer_number`, `domainName`/`domain` and
+/// `createdAt`/`created_at` are merged instead of rejected, and the first
+/// spelling that carries a value wins.
+///
 /// ```
 /// use inwx_client::DocumentEntry;
 ///
@@ -65,63 +72,61 @@ const MAX_COMMENT_LEN: usize = 4096;
 /// assert_eq!(entry.size, Some(10_240));
 /// # Ok::<(), serde_json::Error>(())
 /// ```
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+///
+/// ```
+/// use inwx_client::DocumentEntry;
+///
+/// // Both spellings in one row: the answer is merged, not refused.
+/// let entry: DocumentEntry = serde_json::from_str(
+///     r#"{"documentId":81,"id":81,"mimeType":"application/pdf","mime_type":"application/pdf"}"#,
+/// )?;
+/// assert_eq!(entry.id, Some(81));
+/// assert_eq!(entry.mime_type.as_deref(), Some("application/pdf"));
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DocumentEntry {
     /// Document id, used by `download` and `delete`.
-    #[serde(
-        default,
-        rename = "documentId",
-        alias = "id",
-        deserialize_with = "de::opt_i64"
-    )]
     pub id: Option<i64>,
     /// Stored file name.
-    #[serde(default, deserialize_with = "de::opt_string")]
     pub filename: Option<String>,
     /// Document class, carried verbatim.
-    #[serde(default, rename = "type", deserialize_with = "de::opt_string")]
     pub document_type: Option<String>,
     /// MIME type, when the API reports one.
-    #[serde(
-        default,
-        rename = "mimeType",
-        alias = "mime_type",
-        deserialize_with = "de::opt_string"
-    )]
     pub mime_type: Option<String>,
     /// Size in bytes.
-    #[serde(default, deserialize_with = "de::opt_i64")]
     pub size: Option<i64>,
     /// Owning customer.
-    #[serde(
-        default,
-        rename = "customerNumber",
-        alias = "customer_number",
-        deserialize_with = "de::opt_i64"
-    )]
     pub customer_number: Option<i64>,
     /// Domain the document belongs to, when it names one.
-    #[serde(
-        default,
-        rename = "domainName",
-        alias = "domain",
-        deserialize_with = "de::opt_string"
-    )]
     pub domain: Option<String>,
     /// Upload date, as text.
-    #[serde(
-        default,
-        rename = "createdAt",
-        alias = "created_at",
-        deserialize_with = "de::opt_string"
-    )]
     pub created_at: Option<String>,
     /// State of the document, carried verbatim.
-    #[serde(default, deserialize_with = "de::opt_string")]
     pub status: Option<String>,
     /// Whether the document has been read.
-    #[serde(default, rename = "read", deserialize_with = "de::opt_bool")]
     pub read: Option<bool>,
+}
+
+/// Reads a row by key, so both spellings of a renamed field land in one place.
+impl<'de> Deserialize<'de> for DocumentEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let fields = field_map(deserializer)?;
+        Ok(Self {
+            id: pick_i64(&fields, &["documentId", "id"]),
+            filename: pick_text(&fields, &["filename"]),
+            document_type: pick_text(&fields, &["type"]),
+            mime_type: pick_text(&fields, &["mimeType", "mime_type"]),
+            size: pick_i64(&fields, &["size"]),
+            customer_number: pick_i64(&fields, &["customerNumber", "customer_number"]),
+            domain: pick_text(&fields, &["domainName", "domain"]),
+            created_at: pick_text(&fields, &["createdAt", "created_at"]),
+            status: pick_text(&fields, &["status"]),
+            read: pick_bool(&fields, &["read"]),
+        })
+    }
 }
 
 /// The `document.upload` request: a file name, a body and optional metadata.
@@ -339,6 +344,10 @@ impl fmt::Debug for DocumentUpload {
 
 /// A downloaded document (`document.download`).
 ///
+/// Like [`DocumentEntry`], the answer is read by key: `documentId`/`id` and
+/// `content`/`data` are merged when INWX sends both spellings, and the first
+/// spelling that carries a value wins.
+///
 /// ```
 /// use inwx_client::DownloadedDocument;
 ///
@@ -350,38 +359,45 @@ impl fmt::Debug for DocumentUpload {
 /// assert!(document.is_pdf());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+///
+/// ```
+/// use inwx_client::DownloadedDocument;
+///
+/// // The body arrives under both keys during the rename.
+/// let document: DownloadedDocument =
+///     serde_json::from_str(r#"{"content":"aGk=","data":"aGk="}"#)?;
+/// assert_eq!(document.bytes()?, b"hi");
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DownloadedDocument {
     /// Document id, when the API echoes it.
-    #[serde(
-        default,
-        rename = "documentId",
-        alias = "id",
-        deserialize_with = "de::opt_i64"
-    )]
     pub id: Option<i64>,
     /// Stored file name.
-    #[serde(default, deserialize_with = "de::opt_string")]
     pub filename: Option<String>,
     /// Base64-encoded body.
-    #[serde(
-        default,
-        rename = "content",
-        alias = "data",
-        deserialize_with = "de::opt_string"
-    )]
     pub content: Option<String>,
     /// MIME type, when the API reports one.
-    #[serde(
-        default,
-        rename = "mimeType",
-        alias = "mime_type",
-        deserialize_with = "de::opt_string"
-    )]
     pub mime_type: Option<String>,
     /// Size in bytes, when the API reports one.
-    #[serde(default, deserialize_with = "de::opt_i64")]
     pub size: Option<i64>,
+}
+
+/// Reads a download by key, so both spellings of a renamed field land in one
+/// place.
+impl<'de> Deserialize<'de> for DownloadedDocument {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let fields = field_map(deserializer)?;
+        Ok(Self {
+            id: pick_i64(&fields, &["documentId", "id"]),
+            filename: pick_text(&fields, &["filename"]),
+            content: pick_text(&fields, &["content", "data"]),
+            mime_type: pick_text(&fields, &["mimeType", "mime_type"]),
+            size: pick_i64(&fields, &["size"]),
+        })
+    }
 }
 
 impl DownloadedDocument {
@@ -761,5 +777,80 @@ mod tests {
         let snake: DocumentEntry =
             serde_json::from_str(r#"{"id":81,"mime_type":"application/pdf"}"#).unwrap();
         assert_eq!(snake.mime_type, entry.mime_type);
+    }
+
+    #[test]
+    fn a_row_carrying_both_spellings_is_merged_not_rejected() {
+        let both: DocumentEntry = serde_json::from_str(
+            r#"{"documentId":81,"id":81,"mimeType":"application/pdf",
+                "mime_type":"application/pdf","customerNumber":123456,
+                "customer_number":123456,"domainName":"example.com","domain":"example.com",
+                "createdAt":"2026-03-01","created_at":"2026-03-01"}"#,
+        )
+        .unwrap();
+        assert_eq!(both.id, Some(81));
+        assert_eq!(both.mime_type.as_deref(), Some("application/pdf"));
+        assert_eq!(both.customer_number, Some(123_456));
+        assert_eq!(both.domain.as_deref(), Some("example.com"));
+        assert_eq!(both.created_at.as_deref(), Some("2026-03-01"));
+    }
+
+    #[test]
+    fn the_first_spelling_that_carries_a_value_wins() {
+        // Both spellings present: the one the API renamed to decides, so the
+        // row cannot flip its id on the way through the merge.
+        let both: DocumentEntry = serde_json::from_str(r#"{"documentId":81,"id":82}"#).unwrap();
+        assert_eq!(both.id, Some(81));
+
+        // Only the old spelling: the same value, one key later.
+        let only_old: DocumentEntry = serde_json::from_str(r#"{"id":82}"#).unwrap();
+        assert_eq!(only_old.id, Some(82));
+
+        // A `null` leading spelling is not a value and hands over.
+        let nulled: DocumentEntry = serde_json::from_str(r#"{"documentId":null,"id":81}"#).unwrap();
+        assert_eq!(nulled.id, Some(81));
+
+        // Neither spelling unusable: absent, where the leading key exists.
+        let empty: DocumentEntry = serde_json::from_str(r#"{"documentId":null}"#).unwrap();
+        assert_eq!(empty.id, None);
+    }
+
+    #[test]
+    fn a_download_carrying_both_body_spellings_is_merged() {
+        let both: DownloadedDocument = serde_json::from_str(
+            r#"{"documentId":81,"id":81,"content":"aGk=","data":"aGk=","mimeType":"text/plain","mime_type":"text/plain"}"#,
+        )
+        .unwrap();
+        assert_eq!(both.id, Some(81));
+        assert_eq!(both.bytes().unwrap(), b"hi");
+        assert_eq!(both.mime_type.as_deref(), Some("text/plain"));
+
+        // The spellings disagreeing is a contradiction, not a second body: the
+        // leading key wins and the body stays one document.
+        let split: DownloadedDocument =
+            serde_json::from_str(r#"{"content":"aGk=","data":"Ynll"}"#).unwrap();
+        assert_eq!(split.bytes().unwrap(), b"hi");
+    }
+
+    #[test]
+    fn a_row_with_both_spellings_survives_the_list_parse() {
+        // Before the merge this row failed to deserialize and `parse_rows`
+        // dropped it, so a paging caller silently lost a document.
+        let data = json!({
+            "document": [
+                { "documentId": 1, "id": 1, "filename": "a.pdf" },
+                { "id": 2, "filename": "b.pdf" }
+            ]
+        });
+        let rows: Vec<DocumentEntry> = parse_rows(&data, "document");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].filename.as_deref(), Some("a.pdf"));
+        assert_eq!(rows[1].id, Some(2));
+    }
+
+    #[test]
+    fn a_row_that_is_not_an_object_is_still_an_error() {
+        assert!(serde_json::from_str::<DocumentEntry>("[]").is_err());
+        assert!(serde_json::from_str::<DownloadedDocument>("\"aGk=\"").is_err());
     }
 }
