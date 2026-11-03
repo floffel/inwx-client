@@ -658,18 +658,80 @@ async fn the_raw_call_escape_hatch_still_handles_sessions() {
     assert_eq!(transport.call_count(), 2);
 }
 
+/// A 2xx whose body is not an envelope: the request was written, so the command
+/// may have run. That is an `Undecodable` answer — uncertain, never replayed —
+/// not the certain decode failure a garbage `resData` payload is.
 #[tokio::test]
-async fn a_200_with_a_non_object_body_is_a_json_error() {
-    let transport = MockTransport::new();
-    transport.status(200, "[1,2,3]");
+async fn a_200_with_a_non_envelope_body_is_an_uncertain_undecodable_answer() {
+    for body in ["[1,2,3]", "<html>502 Bad Gateway</html>", "{\"code\":1000"] {
+        let transport = MockTransport::new();
+        transport.status(200, body);
 
-    let client = client(transport);
+        let client = client(transport.clone());
+        let error = client
+            .list_domains(&DomainListQuery::default())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, Error::Undecodable { .. }), "{body}");
+        assert!(error.is_uncertain(), "{body}");
+        assert!(!error.is_retryable(), "{body}");
+        assert_eq!(
+            transport.call_count(),
+            1,
+            "{body}: an unreadable answer is not replayed"
+        );
+        assert!(
+            error.to_string().contains("may have been executed"),
+            "{body}"
+        );
+    }
+}
+
+/// The case the classification exists for: a mutating command whose answer
+/// cannot be read. One attempt only — the record may already be gone — and the
+/// error says the command may have run instead of reading like a parse bug.
+#[tokio::test]
+async fn a_mutating_command_with_an_unreadable_answer_is_not_replayed() {
+    let transport = MockTransport::new();
+    transport.status(200, "<html>502 Bad Gateway</html>");
+    transport.ok_empty();
+
+    let client = client(transport.clone());
     let error = client
-        .list_domains(&DomainListQuery::default())
+        .delete_domain(&DomainName::parse("a.de").unwrap())
         .await
         .unwrap_err();
 
-    assert!(matches!(error, Error::Json { .. }));
+    assert!(matches!(error, Error::Undecodable { .. }), "{error:?}");
+    assert!(error.is_uncertain(), "{error:?}");
+    assert!(!error.is_retryable(), "{error:?}");
+    assert_eq!(
+        transport.call_count(),
+        1,
+        "the delete must not be replayed: it may already have run"
+    );
+    assert!(
+        std::error::Error::source(&error).is_some(),
+        "the parser error keeps the line and column"
+    );
+}
+
+/// A login whose answer cannot be read is uncertain as well: the session may
+/// have been opened server-side even though no cookie reached the client.
+#[tokio::test]
+async fn an_unreadable_login_answer_is_uncertain() {
+    let transport = MockTransport::new();
+    transport.status(200, "<html>502 Bad Gateway</html>");
+
+    let client = anonymous_client(transport.clone());
+    let error = client.login().await.unwrap_err();
+
+    assert!(matches!(error, Error::Undecodable { .. }), "{error:?}");
+    assert!(error.is_uncertain(), "{error:?}");
+    assert!(!error.is_retryable(), "{error:?}");
+    assert_eq!(transport.call_count(), 1);
+    assert!(!client.is_authenticated(), "no cookie was read");
 }
 
 #[tokio::test]

@@ -163,6 +163,13 @@ impl RpcResponse {
     /// [`Error::Json`] when the bytes are not a JSON object of the expected
     /// shape. The original `serde_json` error stays available as `source`.
     ///
+    /// This function cannot know whether a request preceded `bytes`, so an
+    /// unreadable body is reported as a decode failure. Code that parses the
+    /// answer to a request it has already sent must not use that classification
+    /// to conclude the command never ran: the client re-classifies that case and
+    /// answers [`Error::Undecodable`] for exactly that reason — the command may
+    /// have been executed.
+    ///
     /// ```
     /// use inwx_client::RpcResponse;
     ///
@@ -175,6 +182,20 @@ impl RpcResponse {
         // error. Parsing the object first keeps that accident out.
         let object: Map<String, Value> = serde_json::from_slice(bytes).map_err(Error::from)?;
         serde_json::from_value(Value::Object(object)).map_err(Error::from)
+    }
+
+    /// Parses the body of an answer to a request that had already been written.
+    ///
+    /// The framing rules are [`parse`](Self::parse)'s. The difference is what a
+    /// failure means: here the request is known to have left the process, so a
+    /// body that cannot be read is [`Error::Undecodable`] — the command may
+    /// already have run — instead of the local decode failure
+    /// [`Error::Json`]. Both keep the `serde_json` error as `source`.
+    pub(crate) fn parse_answer(bytes: &[u8]) -> Result<Self> {
+        Self::parse(bytes).map_err(|error| match error {
+            Error::Json { source } => Error::Undecodable { source },
+            other => other,
+        })
     }
 
     /// Whether the code is one of the documented success codes.
@@ -316,5 +337,50 @@ mod tests {
         for code in [0, 1200, 2003, 2200, 2303] {
             assert!(!is_success_code(code), "{code}");
         }
+    }
+
+    /// A body the client cannot read after its request has gone out is an
+    /// `Undecodable` answer — the outcome is unknown — while the public parser,
+    /// which cannot know whether a request preceded the bytes, keeps reporting
+    /// the local decode failure.
+    #[test]
+    fn an_unreadable_answer_after_a_write_is_undecodable() {
+        for body in [
+            b"<html>502 Bad Gateway</html>".as_slice(),
+            b"".as_slice(),
+            b"   ".as_slice(),
+            b"[1,2,3]".as_slice(),
+            br#"{"code":1000,"msg":"ok""#.as_slice(),
+        ] {
+            let label = String::from_utf8_lossy(body);
+            let public = RpcResponse::parse(body).unwrap_err();
+            let answered = RpcResponse::parse_answer(body).unwrap_err();
+
+            assert!(matches!(public, Error::Json { .. }), "{label}");
+            assert!(!public.is_uncertain(), "{label}");
+            assert!(answered.is_uncertain(), "{label}");
+            assert!(!answered.is_retryable(), "{label}");
+            assert!(
+                std::error::Error::source(&answered).is_some(),
+                "{label}: the parser error stays the cause"
+            );
+        }
+    }
+
+    /// The classification moves the failure only, never the success. Edge pair:
+    /// the smallest readable envelope, and the same document one brace short of
+    /// it.
+    #[test]
+    fn a_readable_answer_is_parsed_the_same_way_after_a_write() {
+        let readable = br#"{"code":1000}"#;
+        assert_eq!(
+            RpcResponse::parse_answer(readable).unwrap().code,
+            CODE_SUCCESS
+        );
+        assert_eq!(RpcResponse::parse(readable).unwrap().code, CODE_SUCCESS);
+
+        let cut = br#"{"code":1000"#;
+        assert!(RpcResponse::parse(cut).is_err());
+        assert!(RpcResponse::parse_answer(cut).is_err());
     }
 }

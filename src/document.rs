@@ -662,8 +662,8 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] for a non-positive id or an undecodable body, plus
-    /// the usual transport and API errors.
+    /// [`Error::Validation`] for a non-positive id or a payload that does not
+    /// fit the model, plus the usual transport and API errors.
     pub async fn download_document(&self, document_id: i64) -> Result<DownloadedDocument> {
         validate_id("document.id", document_id)?;
         let data = self

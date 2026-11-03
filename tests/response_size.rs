@@ -146,9 +146,10 @@ async fn an_empty_body_fits_a_zero_cap_and_one_byte_does_not() {
         .await
         .unwrap_err();
     assert!(
-        matches!(error, Error::Json { .. }),
+        matches!(error, Error::Undecodable { .. }),
         "the cap must let an empty body through to the parser, got: {error}"
     );
+    assert!(error.is_uncertain(), "{error}");
 
     let one_byte = MockTransport::new().with_max_response_bytes(0);
     one_byte.push(Reply::Response(Response::new(

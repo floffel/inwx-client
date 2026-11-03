@@ -378,8 +378,8 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] for a non-positive handle or an undecodable body,
-    /// plus the usual transport and API errors.
+    /// [`Error::Validation`] for a non-positive handle or a payload that does
+    /// not fit the model, plus the usual transport and API errors.
     pub async fn fetch_pdf(&self, pdf_id: i64) -> Result<PdfFile> {
         validate_id("pdf.id", pdf_id)?;
         let data = self.call("pdf.get", json!({ "pdfId": pdf_id })).await?;

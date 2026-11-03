@@ -350,16 +350,22 @@ async fn a_long_error_body_is_truncated_in_the_http_error() {
     }
 }
 
+/// A `200` with nothing readable in the body is an answer that arrived without
+/// an envelope: the command may have run, so it is uncertain rather than a
+/// certain decode failure.
 #[tokio::test]
-async fn a_null_body_on_200_is_a_json_error() {
+async fn a_blank_body_on_200_is_an_uncertain_undecodable_answer() {
     let transport = MockTransport::new();
     transport.status(200, "   ");
 
     let client = client(transport);
-    assert!(matches!(
-        client.list_domains(&DomainListQuery::default()).await,
-        Err(Error::Json { .. })
-    ));
+    let error = client
+        .list_domains(&DomainListQuery::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Undecodable { .. }), "{error:?}");
+    assert!(error.is_uncertain(), "{error:?}");
+    assert!(!error.is_retryable(), "{error:?}");
 }
 
 #[tokio::test]

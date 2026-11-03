@@ -7,6 +7,14 @@
 //! produced no cookie — keeps that cause in `source` instead of flattening its
 //! text into the message. The short `message` is what `Display` prints;
 //! [`Error::with_source`] is how a cause is attached.
+//!
+//! Certainty is part of the type. A failure that happened after the request was
+//! written leaves the outcome of the command unknown, and it is spelled two
+//! ways: [`Error::Uncertain`] for the transport (a timeout, a reset) and
+//! [`Error::Undecodable`] for decoding (an answer whose body cannot be read).
+//! Both answer [`Error::is_uncertain`] with `true` and are never replayed for a
+//! mutating command; [`Error::Json`] is the other side of that line — a payload
+//! that arrived intact and does not fit the model, behind a command that ran.
 
 use std::fmt;
 use std::ops::Deref;
@@ -84,8 +92,15 @@ pub enum Error {
         details: Vec<Detail>,
     },
 
-    /// A response body was not valid JSON, or a `resData` field had the wrong
-    /// type. `serde_json`'s line/column information is kept as `source`.
+    /// A body that arrived intact could not be decoded: it was not JSON, or a
+    /// `resData` field had the wrong type. `serde_json`'s line/column
+    /// information is kept as `source`.
+    ///
+    /// This is the *certain* decoding failure — local data with a shape the
+    /// model does not have, or a payload the caller parsed out of an answer it
+    /// already received. When the body of a written request cannot be read at
+    /// all, the outcome of the command is unknown instead and the error is
+    /// [`Error::Undecodable`].
     #[error("invalid JSON: {source}")]
     Json {
         /// The underlying `serde_json` error.
@@ -132,8 +147,11 @@ pub enum Error {
     },
 
     /// The request had already been written when the transport failed: a
-    /// timeout waiting for the answer, a reset mid-flight, a truncated or
-    /// undecodable body.
+    /// timeout waiting for the answer, a reset mid-flight, a read that stopped
+    /// early.
+    ///
+    /// An answer that arrives but cannot be decoded is the decode-side sibling
+    /// with the same verdict: [`Error::Undecodable`].
     ///
     /// The API may have executed the command, so the outcome is unknown rather
     /// than merely unsuccessful, and replaying it can duplicate a mutation.
@@ -156,6 +174,44 @@ pub enum Error {
         /// built this from a description alone. See [`Error::with_source`].
         #[source]
         source: Option<ErrorSource>,
+    },
+
+    /// The request had been written and an answer arrived, but its body could
+    /// not be read as a response envelope: a proxy error page, a cut-off `200`,
+    /// or a document that is JSON without being the object an envelope is.
+    ///
+    /// Kept apart from [`Error::Json`] on purpose. `Json` is a decode failure on
+    /// data that arrived intact — a `resData` payload in a shape the model does
+    /// not have, or a body the caller parsed itself; the command behind it is
+    /// known to have run. Here nothing is known: the exchange completed and the
+    /// bytes are unreadable, so the command *may* have been executed and the
+    /// caller must not read this as a local decoding bug.
+    ///
+    /// This is the decode-side sibling of [`Error::Uncertain`] and carries the
+    /// same verdict: [`is_uncertain`](Error::is_uncertain) is `true`,
+    /// [`is_retryable`](Error::is_retryable) is `false`, and
+    /// [`InwxClient::call`](crate::InwxClient::call) does not replay it. A
+    /// caller decides whether the current state can be checked instead.
+    ///
+    /// The `serde_json` error stays the `source`, so the line and column of the
+    /// cut are still reported.
+    ///
+    /// ```rust
+    /// use inwx_client::Error;
+    ///
+    /// let source = serde_json::from_str::<serde_json::Value>("<html>502 Bad Gateway</html>")
+    ///     .expect_err("a gateway page is not JSON");
+    /// let err = Error::Undecodable { source };
+    ///
+    /// assert!(err.is_uncertain());
+    /// assert!(!err.is_retryable());
+    /// assert!(err.to_string().contains("may have been executed"));
+    /// ```
+    #[error("undecodable answer: {source} (the command may have been executed)")]
+    Undecodable {
+        /// The parser error, with the line and column where reading stopped.
+        #[source]
+        source: serde_json::Error,
     },
 
     /// The API rejected the session (`2200`, `2201`, `2202`) and the client
@@ -720,6 +776,9 @@ impl Error {
     /// Validation, decoding and authentication errors are never retryable, and
     /// neither is [`Error::ResponseTooLarge`]: a body over the cap is a property
     /// of the answer, and the command behind it may already have run. An
+    /// [`Error::Undecodable`] is not retryable either — like
+    /// [`Error::Uncertain`] it means the command may have been executed, so it
+    /// is uncertain rather than merely failed. An
     /// [`Error::Http`] is classified by its status: `429`, `502`, `503` and
     /// `504` are retryable, all other non-2xx statuses (`400`, `401`, `403`,
     /// `404`, …) are terminal.
@@ -776,18 +835,34 @@ impl Error {
         }
     }
 
-    /// Whether the transport failed after the request had been written, so the
-    /// outcome of the command is unknown.
+    /// Whether the outcome of the command is unknown: the request was written
+    /// and the exchange then broke, either in transport (a timeout, a reset
+    /// mid-response, a truncated body) or in decoding (an answer whose body
+    /// cannot be read as an envelope).
     ///
-    /// ```
+    /// Both cases mean the API may already have executed the command, so a
+    /// replay can duplicate a mutation.
+    ///
+    /// ```rust
     /// use inwx_client::Error;
     ///
     /// assert!(Error::uncertain("timeout").is_uncertain());
     /// assert!(!Error::transport_before_send("dns lookup failed").is_uncertain());
+    ///
+    /// // The decode side of the same ambiguity: the answer arrived, the body
+    /// // did not survive it.
+    /// let cut = serde_json::from_str::<serde_json::Value>("{\"code\":10")
+    ///     .expect_err("the document is cut off");
+    /// assert!(Error::Undecodable { source: cut }.is_uncertain());
+    ///
+    /// // A payload with the wrong shape is certain instead: the command ran.
+    /// let payload = serde_json::from_value::<u8>(serde_json::json!("held"))
+    ///     .expect_err("a string is not a number");
+    /// assert!(!Error::Json { source: payload }.is_uncertain());
     /// ```
     #[must_use]
     pub fn is_uncertain(&self) -> bool {
-        matches!(self, Self::Uncertain { .. })
+        matches!(self, Self::Uncertain { .. } | Self::Undecodable { .. })
     }
 
     /// Whether this is a rejected session rather than a rejected command.
@@ -1394,6 +1469,73 @@ mod tests {
             parsed,
             "a later cause must not replace the line/column of the parser"
         );
+
+        // The decode-side sibling carries its parser error the same way, and
+        // refuses a replacement just as firmly.
+        let cut = || Error::Undecodable {
+            source: serde_json::from_str::<serde_json::Value>("{not json")
+                .expect_err("garbage is not JSON"),
+        };
+        assert!(cause(&cut()).is_some(), "the parser error is the source");
+        assert_eq!(
+            cause(&cut().with_source(std::io::Error::other("late"))),
+            cause(&cut()),
+            "a later cause must not replace the line/column of the parser"
+        );
+    }
+
+    /// The decode side of an ambiguous outcome: the answer arrived, the body did
+    /// not survive it. Same verdict as a transport failure after the write —
+    /// uncertain, never retryable — with the parser error walkable as the cause.
+    #[test]
+    fn an_undecodable_answer_is_uncertain_and_never_retryable() {
+        let error = Error::Undecodable {
+            source: serde_json::from_str::<serde_json::Value>(r#"{"code":1000,"msg":"ok""#)
+                .expect_err("the document is cut off"),
+        };
+
+        assert!(error.is_uncertain());
+        assert!(!error.is_retryable());
+        assert!(!error.is_authentication());
+        assert!(!error.is_missing_credentials());
+        assert!(!error.is_validation());
+        assert!(cause(&error).is_some(), "the parser error is the cause");
+        assert!(error.to_string().contains("may have been executed"));
+        assert_eq!(error.code(), None);
+        assert_eq!(error.retry_after(), None);
+
+        // An empty answer is the same: the exchange completed, nothing came
+        // back that could be read.
+        let empty = Error::Undecodable {
+            source: serde_json::from_slice::<serde_json::Value>(b"")
+                .expect_err("an empty body is not JSON"),
+        };
+        assert!(empty.is_uncertain());
+        assert!(!empty.is_retryable());
+    }
+
+    /// Boundary pair around the certainty of a decode failure: the same
+    /// unreadable-looking bytes, once cut off behind a written request (unknown
+    /// outcome) and once complete but in the wrong shape (certain failure).
+    #[test]
+    fn the_certainty_boundary_is_cut_off_versus_merely_unexpected() {
+        let cut = Error::Undecodable {
+            source: serde_json::from_str::<serde_json::Value>("{\"code\":10")
+                .expect_err("cut off mid-document"),
+        };
+        // One byte more closes the object: valid JSON, still not an envelope.
+        let whole = Error::Json {
+            source: serde_json::from_str::<serde_json::Map<String, serde_json::Value>>("[1,2,3]")
+                .expect_err("a sequence is not an envelope"),
+        };
+
+        assert!(cut.is_uncertain());
+        assert!(!whole.is_uncertain());
+        // Neither may be replayed, but for different reasons: the one may have
+        // run, the other is a shape the client does not model.
+        assert!(!cut.is_retryable());
+        assert!(!whole.is_retryable());
+        assert_ne!(cut.to_string(), whole.to_string());
     }
 
     /// The message-only constructors invent nothing: no cause means no source,

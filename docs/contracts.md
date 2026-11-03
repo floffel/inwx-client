@@ -619,6 +619,15 @@ replayed; `domain_info` decides whether the hold is already in place.
 
 Not shapes from the documentation, but limits this crate imposes anyway:
 
+- **Unreadable answers (`src/rpc.rs`, `src/client.rs`).** INWX documents one
+  envelope shape, so a `2xx` whose body is not that object came from something
+  other than the API — a proxy error page, a cut-off `200`, an answer stripped by
+  a middlebox. The request was written, so the command may have executed; that is
+  reported as `Error::Undecodable` (`is_uncertain()`, never replayed) rather than
+  as `Error::Json`, which stays the certain decode failure of a payload that
+  arrived intact. `RpcResponse::parse` keeps answering `Json` because it cannot
+  know whether a request preceded the bytes; the client re-classifies through
+  `parse_answer`.
 - **Response size cap (`src/transport.rs`).** One answer may not exceed
   `DEFAULT_MAX_RESPONSE_BYTES` (4 MiB). INWX does not bound a body, so without a
   cap a misbehaving or compromised endpoint decides how much memory the process
