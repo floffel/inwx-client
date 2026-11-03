@@ -917,7 +917,9 @@ impl<T: Transport> InwxClient<T> {
         self.add_language(&mut params);
 
         let response = self.send("account.login", params).await?;
-        let envelope = RpcResponse::parse(response.body())?;
+        // The login request was written too: a body that cannot be read leaves
+        // it open whether a session was opened server-side.
+        let envelope = RpcResponse::parse_answer(response.body())?;
         envelope.into_result()?;
 
         let cookie = collect_cookies(&response);
@@ -1127,6 +1129,12 @@ impl<T: Transport> InwxClient<T> {
     /// cannot have side effects. For a mutating method the error is returned
     /// as-is, because a second attempt could register twice.
     ///
+    /// A `2xx` answer whose body cannot be read as an envelope is
+    /// [`Error::Undecodable`]: the exchange completed, so the command may have
+    /// run, and the call answers that at once instead of replaying — whatever
+    /// the method, because the body carries nothing that would tell a duplicate
+    /// write from a first one.
+    ///
     /// The same rule covers HTTP: a 429 or a 5xx is replayed only for a
     /// read-only method. For a mutating method the status says nothing about
     /// whether the command already ran, so the call answers
@@ -1135,7 +1143,8 @@ impl<T: Transport> InwxClient<T> {
     /// # Errors
     ///
     /// [`Error::NotAuthenticated`], [`Error::Api`], [`Error::Transport`],
-    /// [`Error::Uncertain`], [`Error::Json`] or [`Error::Http`].
+    /// [`Error::Uncertain`], [`Error::Undecodable`], [`Error::Json`] or
+    /// [`Error::Http`].
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
         if !is_public_method(method) {
             self.ensure_session().await?;
@@ -1149,7 +1158,10 @@ impl<T: Transport> InwxClient<T> {
                 .await;
             match outcome {
                 Ok(response) if response.is_success() => {
-                    let envelope = RpcResponse::parse(response.body())?;
+                    // The request was written and a 2xx came back, so a body
+                    // that cannot be read leaves the outcome open: the parser
+                    // reports `Undecodable`, not a local decode failure.
+                    let envelope = RpcResponse::parse_answer(response.body())?;
                     if envelope.is_authentication() && !relogged_in && self.credentials.is_some() {
                         relogged_in = true;
                         self.clear_session();
@@ -1353,7 +1365,9 @@ pub fn is_read_only_method(method: &str) -> bool {
 ///
 /// Everything known to happen before the request was written is retried as
 /// before. An [`Error::Uncertain`] happened afterwards, so it is only replayed
-/// when the command cannot have side effects.
+/// when the command cannot have side effects. An [`Error::Undecodable`] never
+/// reaches this gate: `call` reports an unreadable `2xx` answer at once, since
+/// the body says nothing about whether the command ran.
 fn replay_allowed(error: &Error, method: &str) -> bool {
     match error {
         Error::Uncertain { .. } => is_read_only_method(method),

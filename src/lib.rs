@@ -245,6 +245,11 @@
 //!   replayed only for a read-only method ([`is_read_only_method`]), never for a
 //!   mutating one, so a registration cannot be submitted twice and a transfer
 //!   code or a domain block cannot be applied twice.
+//! * An answer that arrives but cannot be read as an envelope — a `200` carrying
+//!   a gateway page, a blank or cut-off body — is [`Error::Undecodable`]: the
+//!   exchange completed, so the command may have run, and the call reports that
+//!   at once instead of replaying it. [`Error::Json`] stays the certain decode
+//!   failure of a payload that arrived intact.
 //! * [`Password`] (the new password of `account.changepassword`) redacts itself
 //!   in `Debug` and `Display`, compares in constant time, is zeroized when it is
 //!   dropped and has no `Deserialize`: a secret is an input and is never parsed

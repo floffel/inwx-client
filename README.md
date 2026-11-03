@@ -193,7 +193,12 @@ Every method below is implemented against the published INWX API documentation
 * **Uncertain is not retried.** A timeout or a reset after the request was
   written is `Error::Uncertain`: the API may already have run the command. It is
   replayed only for a read-only method (`is_read_only_method`), never for a
-  mutating one, so a registration cannot be submitted twice.
+  mutating one, so a registration cannot be submitted twice. An answer that
+  arrives but cannot be read is `Error::Undecodable` — a `200` carrying a
+  gateway page, a blank or cut-off body — and carries the same verdict: the
+  exchange completed, so the command may have run and it is not replayed either.
+  `Error::Json` stays the *certain* decode failure, for a payload that arrived
+  intact and does not fit the model.
 * **Capped answers.** A response body may not exceed 4 MiB
   (`DEFAULT_MAX_RESPONSE_BYTES`, per transport
   `ReqwestTransport::with_max_response_bytes`). The cap is checked against

@@ -225,9 +225,11 @@ impl<T: Transport> InwxClient<T> {
     /// [`Error::NotAuthenticated`] without a session, [`Error::Api`] when the
     /// domain is not in this account (`2303`) or the product is unavailable,
     /// [`Error::Transport`]/[`Error::Http`] for a transport or HTTP failure,
-    /// [`Error::Json`] for an unreadable body, and [`Error::Uncertain`] when the
-    /// request was written but the answer never arrived — that outcome is never
-    /// replayed, because the order may already have been placed.
+    /// [`Error::Json`] for a payload that does not fit the model,
+    /// [`Error::Undecodable`] for an answer that cannot be read at all (also
+    /// uncertain — the order may have been placed), and [`Error::Uncertain`]
+    /// when the request was written but the answer never arrived — that outcome
+    /// is never replayed, because the order may already have been placed.
     pub async fn create_auth_info2(&self, order: &AuthInfo2Order) -> Result<AuthInfo2OrderResult> {
         let data = self.call("authinfo2.create", order.params()).await?;
         serde_json::from_value(data).map_err(Error::from)
