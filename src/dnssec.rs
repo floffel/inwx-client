@@ -1339,6 +1339,10 @@ impl AddDnsKeyRequest {
 /// A `dnssec.listkeys` query.
 ///
 /// Every filter is optional; an empty query asks for the first page of all keys.
+/// A single-valued filter called twice keeps the last value it was given, with
+/// one exception: [`with_domain`](Self::with_domain) refuses a *different* zone,
+/// because the answer decides which zone's keys a caller then edits or deletes,
+/// and a silent retarget there would be a destructive surprise.
 ///
 /// ```
 /// use inwx_client::{DnssecAlgorithm, DnssecKeyQuery};
@@ -1372,17 +1376,45 @@ impl DnssecKeyQuery {
 
     /// Filters by domain name.
     ///
+    /// Repeating the same name (in any presentation: case, root dot) is a
+    /// no-op, so a caller that reaches the builder twice with one zone cannot
+    /// notice. A *different* name is refused: the answer would otherwise list
+    /// another zone's keys under the caller's `domainName`, one `insert` away
+    /// from deleting the wrong zone's key.
+    ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when a different domain was already filtered.
+    /// [`Error::Validation`] when `domain` is not a domain name, or when a
+    /// different domain was already filtered.
     ///
     /// ```
     /// use inwx_client::DnssecKeyQuery;
-    /// assert!(DnssecKeyQuery::new().with_domain("example.com").is_ok());
+    ///
+    /// let query = DnssecKeyQuery::new().with_domain("example.com")?;
+    ///
+    /// // The same zone, spelled differently, is the same filter.
+    /// let query = query.with_domain("EXAMPLE.com.")?;
+    /// assert_eq!(query.params()["domainName"], "example.com");
+    ///
+    /// // A second zone is refused instead of replacing the first.
+    /// assert!(query.with_domain("example.net").is_err());
     /// assert!(DnssecKeyQuery::new().with_domain(" ").is_err());
+    /// # Ok::<(), inwx_client::Error>(())
     /// ```
     pub fn with_domain(mut self, domain: &str) -> Result<Self> {
         let domain = DomainName::parse(domain)?;
+        if let Some(existing) = self.params.get("domainName").and_then(Value::as_str) {
+            if existing != domain.as_str() {
+                return Err(Error::validation(
+                    "domainName",
+                    format!(
+                        "already filtered to {existing:?}; one query lists one zone, not {:?}",
+                        domain.as_str()
+                    ),
+                ));
+            }
+            return Ok(self);
+        }
         self.params
             .insert("domainName".to_owned(), json!(domain.as_str()));
         Ok(self)
@@ -1845,6 +1877,41 @@ mod tests {
             .unwrap()
             .created_before(&before)
             .is_err());
+    }
+
+    #[test]
+    fn query_refuses_a_second_zone() {
+        let query = DnssecKeyQuery::new()
+            .with_domain("example.com")
+            .expect("first domain");
+
+        // Just inside the boundary: the same zone, spelled differently.
+        for same in ["example.com", "example.com.", "Example.COM"] {
+            let again = query.clone().with_domain(same).expect("same zone");
+            assert_eq!(again.params()["domainName"], "example.com", "{same}");
+        }
+
+        // Just outside: a sibling zone and a child zone are other zones.
+        for other in ["example.net", "sub.example.com"] {
+            let error = query.clone().with_domain(other).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    Error::Validation {
+                        field: "domainName",
+                        ..
+                    }
+                ),
+                "{other}: {error:?}"
+            );
+            assert!(
+                error.to_string().contains("example.com"),
+                "{other}: {error}"
+            );
+        }
+
+        // The refused retarget leaves the query on the zone it names.
+        assert_eq!(query.params()["domainName"], "example.com");
     }
 
     #[test]
