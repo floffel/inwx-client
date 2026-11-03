@@ -936,7 +936,7 @@ fn decode_every_reseller_row(payload: &Value) {
     let _ = serde_json::from_value::<DocumentEntry>(payload.clone());
     let _ = serde_json::from_value::<DownloadedDocument>(payload.clone()).map(|doc| {
         let _ = doc.bytes();
-        doc.is_pdf()
+        doc.kind()
     });
     let _ = serde_json::from_value::<HostCheckResult>(payload.clone())
         .map(|check| check.is_available());

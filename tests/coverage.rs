@@ -877,17 +877,30 @@ fn reseller_value_types_run_their_trait_impls() {
     let export: DataExport = serde_json::from_str(r#"{"status":"PENDING"}"#).unwrap();
     assert!(export.is_pending());
 
-    // A downloaded document is a PDF by name, by magic bytes, or not at all.
+    // A downloaded document is classified by its bytes, never by its name
+    // (issue #123).
     let by_name: DownloadedDocument =
-        serde_json::from_str(r#"{"filename":"X.PDF","content":"aGk="}"#).unwrap();
-    assert!(by_name.is_pdf());
+        serde_json::from_str(r#"{"filename":"X.PDF","content":"/9j/4AAQ"}"#).unwrap();
+    assert_eq!(
+        by_name.kind().unwrap(),
+        inwx_client::DocumentKind::Other,
+        "a name ending in .pdf is not a PDF"
+    );
     let by_magic: DownloadedDocument =
         serde_json::from_str(r#"{"filename":"x.bin","content":"JVBERi0xLjc="}"#).unwrap();
-    assert!(by_magic.is_pdf());
+    assert_eq!(by_magic.kind().unwrap(), inwx_client::DocumentKind::Pdf);
     let text: DownloadedDocument =
+        serde_json::from_str(r#"{"filename":"x.txt","content":"aGVsbG8="}"#).unwrap();
+    assert_eq!(text.kind().unwrap(), inwx_client::DocumentKind::Other);
+    // Two bytes are too few for a header: the body stays unidentified.
+    let too_short: DownloadedDocument =
         serde_json::from_str(r#"{"filename":"x.txt","content":"aGk="}"#).unwrap();
-    assert!(!text.is_pdf());
+    assert_eq!(
+        too_short.kind().unwrap(),
+        inwx_client::DocumentKind::Unknown
+    );
     assert!(DownloadedDocument::default().bytes().is_err());
+    assert!(DownloadedDocument::default().kind().is_err());
 
     // A body shorter than the size its answer declared fails instead of being
     // handed over as a whole document (issue #124).

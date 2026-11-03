@@ -12,8 +12,8 @@ use common::{client, MockTransport};
 use inwx_client::{
     ApplicationCheck, ApplicationCreate, ApplicationQuery, ApplicationType, ApplicationUpdate,
     AuthInfo2Order, ContactVerificationSettingsUpdate, CustomerDownloadQuery, CustomerUpdate,
-    DocumentQuery, DocumentUpload, DocumentUploadOutcome, DomainName, Error, HostCheck, HostCreate,
-    HostQuery, HostUpdate, Hostname, MessageAck, NicHandleQuery, PdfRender,
+    DocumentKind, DocumentQuery, DocumentUpload, DocumentUploadOutcome, DomainName, Error,
+    HostCheck, HostCreate, HostQuery, HostUpdate, Hostname, MessageAck, NicHandleQuery, PdfRender,
 };
 use serde_json::json;
 
@@ -713,6 +713,51 @@ async fn a_download_carrying_both_field_spellings_is_merged() {
     assert_eq!(document.id, Some(81));
     assert_eq!(document.mime_type.as_deref(), Some("text/plain"));
     assert_eq!(document.bytes().unwrap(), b"hi");
+}
+
+#[tokio::test]
+async fn a_downloaded_file_is_classified_by_its_bytes_not_by_its_name() {
+    // Issue #123: `scan.pdf` holding a JPEG was reported as a PDF, because the
+    // name was checked before the body.
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "documentId": 81,
+        "filename": "scan.pdf",
+        "content": "/9j/4AAQSkZJRg==",
+        "mimeType": "image/jpeg",
+        "size": 10
+    }));
+    let jpeg = client(transport).download_document(81).await.unwrap();
+    assert_eq!(jpeg.kind().unwrap(), DocumentKind::Other);
+    assert_eq!(jpeg.bytes().unwrap().len(), 10);
+
+    // The header alone decides for a renamed PDF, whatever the MIME type says.
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "filename": "scan.bin",
+        "content": "JVBERi0xLjc=",
+        "mimeType": "application/octet-stream"
+    }));
+    let pdf = client(transport).download_document(81).await.unwrap();
+    assert_eq!(pdf.kind().unwrap(), DocumentKind::Pdf);
+
+    // A body shorter than the header is unidentified rather than "not a PDF".
+    let transport = MockTransport::new();
+    transport.ok(json!({ "filename": "a.pdf", "content": "aGk=" }));
+    let tiny = client(transport).download_document(81).await.unwrap();
+    assert_eq!(tiny.kind().unwrap(), DocumentKind::Unknown);
+}
+
+#[tokio::test]
+async fn a_download_whose_body_is_not_base64_fails_the_classification() {
+    // Before the fix the decode error was folded into `false`/`true`; now it is
+    // the error it is.
+    let transport = MockTransport::new();
+    transport.ok(json!({ "filename": "x.pdf", "content": "!!!not base64!!!" }));
+    let document = client(transport).download_document(81).await.unwrap();
+    let error = document.kind().unwrap_err();
+    assert!(error.is_validation());
+    assert!(document.bytes().is_err());
 }
 
 #[tokio::test]

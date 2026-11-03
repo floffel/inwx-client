@@ -9,6 +9,11 @@
 //! against it, so a body that was cut short in transit fails instead of being
 //! written to disk as a whole document.
 //!
+//! What a downloaded file *is* comes from its first bytes, never from its name:
+//! [`DownloadedDocument::kind`] reads the base64 prefix that carries the PDF
+//! header, so a JPEG renamed `scan.pdf` is not a PDF and a 16 MiB scan costs the
+//! same check as a 10 KiB one.
+//!
 //! ```
 //! use inwx_client::DocumentUpload;
 //!
@@ -57,6 +62,9 @@ pub const MAX_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TYPE_LEN: usize = 64;
 /// Longest comment this crate sends with a document.
 const MAX_COMMENT_LEN: usize = 4096;
+/// Bytes [`DownloadedDocument::kind`] decodes before it decides: the PDF header
+/// `%PDF-` and nothing more.
+const MAGIC_PREFIX_BYTES: usize = 5;
 
 /// One stored document, as listed by `document.list`.
 ///
@@ -554,6 +562,39 @@ impl DocumentUploadOutcome {
     }
 }
 
+/// What a downloaded body is, decided by its magic number.
+///
+/// [`DownloadedDocument::kind`] reads the base64 prefix that carries the first
+/// bytes of the file, so the answer costs the same on a small mandate and on a
+/// large scan. The file name is never consulted: a JPEG renamed `scan.pdf` is
+/// [`Other`](Self::Other), and a PDF named `scan.bin` is [`Pdf`](Self::Pdf).
+///
+/// ```
+/// use inwx_client::{DocumentKind, DownloadedDocument};
+///
+/// // Both spellings of the body key give the same answer.
+/// let document: DownloadedDocument = serde_json::from_str(
+///     r#"{"filename":"x.pdf","content":"JVBERi0xLjc=","mimeType":"text/plain"}"#,
+/// )?;
+/// assert_eq!(document.kind()?, DocumentKind::Pdf);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DocumentKind {
+    /// The body starts with the PDF header `%PDF-`.
+    Pdf,
+    /// The body is readable and does not start with that header.
+    Other,
+    /// The body is shorter than the header — fewer than five bytes — and the
+    /// `mimeType` the API reported does not say `application/pdf` either, so
+    /// nothing in the answer identifies the file.
+    ///
+    /// An empty body lands here too: it is decodable, but there is nothing to
+    /// read a magic number from.
+    Unknown,
+}
+
 /// A downloaded document (`document.download`).
 ///
 /// Like [`DocumentEntry`], the answer is read by key: `documentId`/`id` and
@@ -566,15 +607,18 @@ impl DocumentUploadOutcome {
 /// only thing that tells the two apart. A negative `size` is refused when the
 /// answer is parsed, because no decoded body can have one.
 ///
+/// The file name is not evidence of anything: [`kind`](Self::kind) reads the
+/// first bytes of the body, so `scan.pdf` holding a JPEG is not a PDF.
+///
 /// ```
-/// use inwx_client::DownloadedDocument;
+/// use inwx_client::{DocumentKind, DownloadedDocument};
 ///
 /// let document: DownloadedDocument = serde_json::from_str(
 ///     r#"{"filename":"mandate.pdf","content":"JVBERi0xLjc=","mimeType":"application/pdf"}"#,
 /// )?;
 /// assert_eq!(document.filename.as_deref(), Some("mandate.pdf"));
 /// assert_eq!(&document.bytes()?[..5], b"%PDF-");
-/// assert!(document.is_pdf());
+/// assert_eq!(document.kind()?, DocumentKind::Pdf);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 ///
@@ -690,26 +734,100 @@ impl DownloadedDocument {
         }
     }
 
-    /// Whether the body looks like a PDF, by file name or magic bytes.
+    /// What the body is, decided by its first bytes.
     ///
-    /// ```
-    /// use inwx_client::DownloadedDocument;
+    /// The answer decodes a base64 *prefix* — the eight characters that carry
+    /// the first six bytes — and compares it with the PDF header `%PDF-`. The
+    /// body is never decoded as a whole, so the check costs the same on a 10 KiB
+    /// mandate and on a 16 MiB scan.
     ///
-    /// let document: DownloadedDocument =
-    ///     serde_json::from_str(r#"{"filename":"x.pdf","content":"JVBERi0xLjc="}"#)?;
-    /// assert!(document.is_pdf());
-    /// # Ok::<(), serde_json::Error>(())
+    /// The file name is ignored entirely: a JPEG renamed `scan.pdf` is
+    /// [`DocumentKind::Other`], because the name says nothing about the bytes.
+    /// The `mimeType` the API reports is consulted only when the body is shorter
+    /// than the five-byte header, where the bytes alone cannot decide: a value
+    /// of `application/pdf` (parameters such as `; charset=binary` dropped, case
+    /// ignored) then gives [`DocumentKind::Pdf`], anything else
+    /// [`DocumentKind::Unknown`].
+    ///
+    /// This is a classification, not an integrity check. A body that starts
+    /// with the header but is corrupt further along is still
+    /// [`DocumentKind::Pdf`], and a body cut short in transit is caught by
+    /// [`bytes`](Self::bytes) against the declared size, not here.
+    ///
+    /// ```rust
+    /// use inwx_client::{DocumentKind, DownloadedDocument};
+    ///
+    /// // The header decides, whatever the file is called.
+    /// let pdf: DownloadedDocument = serde_json::from_str(
+    ///     r#"{"filename":"scan.bin","content":"JVBERi0xLjcK"}"#,
+    /// )?;
+    /// assert_eq!(pdf.kind()?, DocumentKind::Pdf);
+    ///
+    /// // A renamed JPEG is not a PDF, and `scan.pdf` does not make it one.
+    /// let renamed: DownloadedDocument = serde_json::from_str(
+    ///     r#"{"filename":"scan.pdf","content":"/9j/4AAQSkZJRg=="}"#,
+    /// )?;
+    /// assert_eq!(renamed.kind()?, DocumentKind::Other);
+    ///
+    /// // Four bytes are too few for a header: the reported MIME type decides.
+    /// let tiny: DownloadedDocument = serde_json::from_str(
+    ///     r#"{"content":"JVBE","mimeType":"application/pdf; charset=binary"}"#,
+    /// )?;
+    /// assert_eq!(tiny.kind()?, DocumentKind::Pdf);
+    /// let bare: DownloadedDocument = serde_json::from_str(r#"{"content":"JVBE"}"#)?;
+    /// assert_eq!(bare.kind()?, DocumentKind::Unknown);
+    ///
+    /// // A body that is not base64 is an error, not a quiet "not a PDF".
+    /// let broken: DownloadedDocument = serde_json::from_str(r#"{"content":"!!!"}"#)?;
+    /// assert!(broken.kind().is_err());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    #[must_use]
-    pub fn is_pdf(&self) -> bool {
-        if self
-            .filename
-            .as_deref()
-            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".pdf"))
-        {
-            return true;
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the answer carries no body, and when the body
+    /// is not base64 — an unreadable body is reported as such instead of being
+    /// folded into "not a PDF".
+    pub fn kind(&self) -> Result<DocumentKind> {
+        let prefix = self.decoded_prefix(MAGIC_PREFIX_BYTES)?;
+        if prefix.starts_with(b"%PDF-") {
+            return Ok(DocumentKind::Pdf);
         }
-        self.bytes().is_ok_and(|bytes| bytes.starts_with(b"%PDF-"))
+        if prefix.len() >= MAGIC_PREFIX_BYTES {
+            return Ok(DocumentKind::Other);
+        }
+        if self.declares_pdf_mime() {
+            Ok(DocumentKind::Pdf)
+        } else {
+            Ok(DocumentKind::Unknown)
+        }
+    }
+
+    /// Decodes at most the first `wanted` bytes of the body.
+    ///
+    /// Base64 is a 4-characters-to-3-bytes code, so the slice is cut on a quantum
+    /// boundary: the decoder never sees a half-filled group, and the rest of the
+    /// body is neither read nor allocated.
+    fn decoded_prefix(&self, wanted: usize) -> Result<Vec<u8>> {
+        let encoded = self.content.as_deref().ok_or_else(|| {
+            Error::validation("document.content", "the answer carries no document body")
+        })?;
+        let encoded = encoded.trim();
+        let chars = wanted.div_ceil(3).saturating_mul(4);
+        let cut = encoded
+            .char_indices()
+            .nth(chars)
+            .map_or(encoded, |(index, _)| &encoded[..index]);
+        decode_base64("document.content", cut)
+    }
+
+    /// Whether the `mimeType` the API reported is `application/pdf`, parameters
+    /// dropped and the case ignored.
+    fn declares_pdf_mime(&self) -> bool {
+        self.mime_type
+            .as_deref()
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/pdf"))
     }
 }
 
@@ -1288,5 +1406,90 @@ mod tests {
             document.bytes(),
             Err(Error::UnexpectedAnswer { field: "size", .. })
         ));
+    }
+
+    /// Builds a download answer without the round-trip through JSON.
+    fn download(content: &str, mime: Option<&str>, name: Option<&str>) -> DownloadedDocument {
+        DownloadedDocument {
+            content: Some(content.to_owned()),
+            mime_type: mime.map(str::to_owned),
+            filename: name.map(str::to_owned),
+            ..DownloadedDocument::default()
+        }
+    }
+
+    #[test]
+    fn a_name_ending_in_pdf_does_not_make_the_body_a_pdf() {
+        // The regression #123 reports: a JPEG renamed `scan.pdf` said "PDF"
+        // before the bytes were ever looked at.
+        let jpeg = "/9j/4AAQSkZJRg==";
+        for name in ["scan.pdf", "SCAN.PDF", "scan.pdf.pdf"] {
+            let document = download(jpeg, Some("image/jpeg"), Some(name));
+            assert_eq!(document.kind().unwrap(), DocumentKind::Other, "{name}");
+        }
+        let renamed = download(jpeg, Some("application/pdf"), Some("scan.pdf"));
+        assert_eq!(
+            renamed.kind().unwrap(),
+            DocumentKind::Other,
+            "the bytes outrank the reported type"
+        );
+    }
+
+    #[test]
+    fn four_bytes_of_header_are_too_short_and_five_are_enough() {
+        // The boundary pair: `%PDF` is one byte short of the header, so only the
+        // reported MIME type can still identify it; `%PDF-` is the header.
+        let short = download("JVBE", None, Some("x.pdf"));
+        assert_eq!(short.kind().unwrap(), DocumentKind::Unknown);
+        let header = download("JVBERi0=", None, Some("x.bin"));
+        assert_eq!(header.kind().unwrap(), DocumentKind::Pdf);
+    }
+
+    #[test]
+    fn the_reported_mime_type_is_read_without_parameters_and_case_insensitively() {
+        let four = |mime: Option<&str>| download("JVBE", mime, None).kind().unwrap();
+        assert_eq!(four(Some("application/pdf")), DocumentKind::Pdf);
+        assert_eq!(
+            four(Some("APPLICATION/PDF; charset=binary")),
+            DocumentKind::Pdf
+        );
+        assert_eq!(four(Some(" application/pdf ")), DocumentKind::Pdf);
+        assert_eq!(four(Some("application/pdfx")), DocumentKind::Unknown);
+        assert_eq!(
+            four(Some("application/octet-stream")),
+            DocumentKind::Unknown
+        );
+        assert_eq!(four(None), DocumentKind::Unknown);
+    }
+
+    #[test]
+    fn a_body_too_short_to_decode_is_an_error_rather_than_a_classification() {
+        // An unreadable body must not be reported as "not a PDF".
+        let broken = download("!!!not base64!!!", Some("application/pdf"), Some("x.pdf"));
+        let error = broken.kind().unwrap_err();
+        assert!(error.is_validation(), "{error}");
+        assert!(DownloadedDocument::default()
+            .kind()
+            .unwrap_err()
+            .is_validation());
+        // A padded, well-formed but empty body is readable: nothing to read.
+        assert_eq!(
+            download("", Some("text/plain"), None).kind().unwrap(),
+            DocumentKind::Unknown
+        );
+    }
+
+    #[test]
+    fn the_magic_number_is_read_from_a_prefix_and_not_from_the_whole_body() {
+        // Only the first eight base64 characters are decoded, so a body that is
+        // corrupt further along still classifies as a PDF — `bytes` is the gate
+        // for the content, this is the gate for the type.
+        let document = download("JVBERi0xLjcK!!!corrupt!!!", None, Some("x.bin"));
+        assert_eq!(document.kind().unwrap(), DocumentKind::Pdf);
+        assert!(document.bytes().is_err());
+
+        // Whitespace around the body is tolerated, as everywhere else.
+        let padded = download("  JVBERi0xLjc=  ", None, None);
+        assert_eq!(padded.kind().unwrap(), DocumentKind::Pdf);
     }
 }
