@@ -550,6 +550,24 @@ async fn list_documents_filters_and_reads_rows() {
 }
 
 #[tokio::test]
+async fn list_documents_defaults_to_the_first_page_of_fifty() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "document": [] }));
+
+    let documents = client(transport.clone())
+        .list_documents(&DocumentQuery::new())
+        .await
+        .unwrap();
+    assert!(documents.is_empty());
+
+    let call = transport.only_call();
+    assert_eq!(call.method, "document.list");
+    assert_eq!(call.params["page"], 1);
+    assert_eq!(call.params["pagelimit"], 50);
+    assert!(call.params.get("type").is_none());
+}
+
+#[tokio::test]
 async fn download_document_decodes_the_body() {
     let transport = MockTransport::new();
     transport.ok(json!({ "filename": "a.txt", "content": "aGk=" }));
