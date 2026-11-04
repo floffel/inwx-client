@@ -645,7 +645,7 @@ Source: <https://account.inwx.com/en/help/apidoc/f/ch02s17.html>
 
 | Method | Wrapper | Input table | Output table |
 | --- | --- | --- | --- |
-| `news.list` | `list_news` | 2.221 (derived) | 2.222 (derived) |
+| `news.list` | `NewsQuery` → `list_news` | 2.221 (derived) | 2.222 (derived) |
 
 ### `nichandle.list` (`src/nichandle.rs`)
 

@@ -1,7 +1,9 @@
 //! Account news (`news.list`): the announcements INWX posts for a reseller.
 //!
 //! One method, one page of items at a time. The crate does not mark anything
-//! read — the API reports a state, it does not change one here.
+//! read — the API reports a state, it does not change one here. Paging is set
+//! with [`NewsQuery`], so the page number and page size travel as named values
+//! instead of two adjacent `u32`s.
 //!
 //! ```
 //! use inwx_client::NewsItem;
@@ -76,17 +78,119 @@ impl NewsItem {
     }
 }
 
+/// A `news.list` query.
+///
+/// The page is 1-based and the page size is at least one. Both are set with
+/// their own named method, so a page number and a page size cannot be swapped
+/// by writing the arguments in the wrong order.
+///
+/// ```
+/// use inwx_client::NewsQuery;
+///
+/// let query = NewsQuery::new().with_page(2)?.with_limit(50)?;
+/// let params = query.params();
+/// assert_eq!(params["page"], 2);
+/// assert_eq!(params["pagelimit"], 50);
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewsQuery {
+    page: u32,
+    limit: u32,
+}
+
+impl Default for NewsQuery {
+    fn default() -> Self {
+        Self { page: 1, limit: 50 }
+    }
+}
+
+impl NewsQuery {
+    /// A query for the first page, 50 items per request.
+    ///
+    /// ```
+    /// use inwx_client::NewsQuery;
+    ///
+    /// let params = NewsQuery::new().params();
+    /// assert_eq!(params["page"], 1);
+    /// assert_eq!(params["pagelimit"], 50);
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the 1-based page number.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Validation`] when `page` is `0`; INWX pages start at
+    /// `1`, so `0` is refused rather than silently rewritten.
+    ///
+    /// ```
+    /// use inwx_client::NewsQuery;
+    ///
+    /// assert_eq!(NewsQuery::new().with_page(2)?.params()["page"], 2);
+    /// assert!(NewsQuery::new().with_page(0).is_err());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    pub fn with_page(mut self, page: u32) -> Result<Self> {
+        if page == 0 {
+            return Err(Error::validation(
+                "page",
+                "must be at least 1 (pages start at 1)",
+            ));
+        }
+        self.page = page;
+        Ok(self)
+    }
+
+    /// Sets the page size.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Validation`] when `limit` is `0`.
+    ///
+    /// ```
+    /// use inwx_client::NewsQuery;
+    ///
+    /// assert_eq!(NewsQuery::new().with_limit(20)?.params()["pagelimit"], 20);
+    /// assert!(NewsQuery::new().with_limit(0).is_err());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    pub fn with_limit(mut self, limit: u32) -> Result<Self> {
+        self.limit = validate_page_limit(limit)?;
+        Ok(self)
+    }
+
+    /// The `news.list` parameters.
+    ///
+    /// ```
+    /// use inwx_client::NewsQuery;
+    ///
+    /// let params = NewsQuery::new().with_page(3)?.with_limit(10)?.params();
+    /// assert_eq!(params["page"], 3);
+    /// assert_eq!(params["pagelimit"], 10);
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn params(&self) -> Value {
+        json!({ "page": self.page, "pagelimit": self.limit })
+    }
+}
+
 impl<T: Transport> InwxClient<T> {
     /// Lists news items, newest first (`news.list`).
     ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
     /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
-    /// use inwx_client::{InwxClient, ReqwestTransport};
+    /// use inwx_client::{InwxClient, NewsQuery, ReqwestTransport};
     ///
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
-    /// for item in client.list_news(1, 20).await? {
+    /// let query = NewsQuery::new().with_limit(20)?;
+    /// for item in client.list_news(&query).await? {
     ///     println!("{:?} {:?}", item.date, item.title);
     /// }
     /// # Ok(())
@@ -95,16 +199,11 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// [`crate::Error::Validation`] when the page size is zero,
     /// [`crate::Error::UnexpectedAnswer`] when the answer carries no `news` list or a
     /// row cannot be decoded, plus the usual transport and API errors.
-    pub async fn list_news(&self, page: u32, limit: u32) -> Result<Vec<NewsItem>> {
-        let limit = validate_page_limit(limit)?;
-        let page = page.max(1);
-        let data = self
-            .call("news.list", json!({ "page": page, "pagelimit": limit }))
-            .await?;
-        parse_news_page(&data, page)
+    pub async fn list_news(&self, query: &NewsQuery) -> Result<Vec<NewsItem>> {
+        let data = self.call("news.list", query.params()).await?;
+        parse_news_page(&data, query.page)
     }
 }
 
@@ -150,9 +249,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_page_limit_of_one_is_accepted_and_zero_is_not() {
-        assert_eq!(validate_page_limit(1).unwrap(), 1);
-        assert!(validate_page_limit(0).is_err());
+    fn a_news_query_accepts_the_bounds_and_refuses_just_outside() {
+        // Valid, just inside and just outside both bounds.
+        let query = NewsQuery::new()
+            .with_page(2)
+            .unwrap()
+            .with_limit(1)
+            .unwrap();
+        assert_eq!(query.params()["page"], 2);
+        assert_eq!(query.params()["pagelimit"], 1);
+        assert!(NewsQuery::new().with_page(u32::MAX).is_ok());
+        assert!(NewsQuery::new().with_limit(u32::MAX).is_ok());
+        // Page 0 is refused, not rewritten to 1.
+        assert!(NewsQuery::new().with_page(0).is_err());
+        assert!(NewsQuery::new().with_limit(0).is_err());
+        // The defaults are the first page and the documented page size.
+        assert_eq!(NewsQuery::default().params()["page"], 1);
+        assert_eq!(NewsQuery::default().params()["pagelimit"], 50);
     }
 
     #[test]
