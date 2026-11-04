@@ -1525,8 +1525,8 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the filter is empty, plus the usual transport
-    /// and API errors.
+    /// [`Error::Validation`] when the format is not CSV, the filter is empty,
+    /// or the limit is zero, plus the usual transport and API errors.
     pub async fn export_records(
         &self,
         format: DocumentFormat,
@@ -1534,9 +1534,18 @@ impl<T: Transport> InwxClient<T> {
         page: u32,
         limit: u32,
     ) -> Result<RecordExport> {
+        if format != DocumentFormat::Csv {
+            return Err(Error::validation(
+                "format",
+                format!("{format} is not supported; use CSV"),
+            ));
+        }
         let name = name_filter.trim();
         if name.is_empty() {
             return Err(Error::validation("name", "must not be empty (use `*`)"));
+        }
+        if limit == 0 {
+            return Err(Error::validation("limit", "must be at least 1"));
         }
         let data = self
             .call(
