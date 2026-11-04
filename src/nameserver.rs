@@ -7,6 +7,9 @@
 //! out of scope — see the README — but reachable through
 //! [`InwxClient::call`](crate::InwxClient::call).
 
+use std::net::IpAddr;
+
+use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 
@@ -32,20 +35,19 @@ use crate::types::{de, DomainName, Hostname};
 /// assert!(zone.is_master());
 /// # Ok::<(), serde_json::Error>(())
 /// ```
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ZoneInfo {
     /// Zone id (`roId`), usable instead of the domain name.
     #[serde(default, rename = "roId", deserialize_with = "de::opt_i64")]
     pub ro_id: Option<i64>,
     /// Zone name.
-    #[serde(default)]
-    pub domain: String,
+    pub domain: DomainName,
     /// `MASTER` or `SLAVE`.
     #[serde(default, rename = "type", deserialize_with = "de::opt_string")]
     pub zone_type: Option<String>,
     /// Master IP for slave zones.
-    #[serde(default, rename = "masterIp", deserialize_with = "de::opt_string")]
-    pub master_ip: Option<String>,
+    #[serde(default, rename = "masterIp", deserialize_with = "opt_ip")]
+    pub master_ip: Option<IpAddr>,
     /// Serial of the SOA record as the nameserver knows it.
     #[serde(default, rename = "SOAserial", deserialize_with = "de::opt_string")]
     pub soa_serial: Option<String>,
@@ -74,6 +76,21 @@ impl ZoneInfo {
     pub fn is_master(&self) -> bool {
         self.zone_type.as_deref() == Some("MASTER")
     }
+}
+
+/// Decodes an optional IP address, accepting the same scalar spellings as
+/// [`de::opt_string`] before validating the resulting text.
+fn opt_ip<'de, D>(deserializer: D) -> std::result::Result<Option<IpAddr>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(text) = de::opt_string(deserializer)? else {
+        return Ok(None);
+    };
+    text.trim()
+        .parse::<IpAddr>()
+        .map(Some)
+        .map_err(|_| D::Error::custom(format!("invalid IP address {text:?}")))
 }
 
 /// One entry of `nameserver.list`.
@@ -445,7 +462,16 @@ impl<T: Transport> InwxClient<T> {
         let data = self
             .call("nameserver.info", json!({ "domain": domain.as_str() }))
             .await?;
-        serde_json::from_value(data).map_err(Error::from)
+        let zone: ZoneInfo = serde_json::from_value(data).map_err(Error::from)?;
+        if &zone.domain != domain {
+            return Err(Error::zone_mismatch(
+                "nameserver.info",
+                "domain",
+                domain.as_str(),
+                zone.domain.as_str(),
+            ));
+        }
+        Ok(zone)
     }
 
     /// Lists the account's zones (`nameserver.list`), first page.
@@ -696,10 +722,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn zone_info_tolerates_missing_metadata() {
+    fn zone_info_tolerates_missing_optional_metadata() {
         let zone: ZoneInfo = serde_json::from_str(r#"{"domain":"x.de"}"#).unwrap();
         assert!(!zone.is_master());
         assert_eq!(zone.records.len(), 0);
+    }
+
+    #[test]
+    fn zone_info_requires_a_valid_domain() {
+        assert!(serde_json::from_str::<ZoneInfo>("{}").is_err());
+        assert!(serde_json::from_str::<ZoneInfo>(r#"{"domain":""}"#).is_err());
+        assert!(serde_json::from_str::<ZoneInfo>(r#"{"domain":"bad name"}"#).is_err());
+    }
+
+    #[test]
+    fn zone_info_validates_master_ip() {
+        let zone: ZoneInfo =
+            serde_json::from_str(r#"{"domain":"x.de","masterIp":"198.51.100.7"}"#).unwrap();
+        assert_eq!(zone.master_ip, Some("198.51.100.7".parse().unwrap()));
+
+        let zone: ZoneInfo =
+            serde_json::from_str(r#"{"domain":"x.de","masterIp":"2001:db8::1"}"#).unwrap();
+        assert_eq!(zone.master_ip, Some("2001:db8::1".parse().unwrap()));
+
+        assert!(serde_json::from_str::<ZoneInfo>(
+            r#"{"domain":"x.de","masterIp":"198.51.100.7/32"}"#
+        )
+        .is_err());
     }
 
     #[test]

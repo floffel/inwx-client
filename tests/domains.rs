@@ -789,6 +789,31 @@ async fn zone_info_parses_records_and_metadata() {
 }
 
 #[tokio::test]
+async fn zone_info_refuses_an_answer_for_another_zone() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "roId": 7,
+        "domain": "example.net",
+        "type": "MASTER",
+        "record": []
+    }));
+
+    let client = client(transport);
+    let error = client.zone_info(&domain("example.com")).await.unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::ZoneMismatch {
+            method: "nameserver.info",
+            field: "domain",
+            ref expected,
+            ref actual,
+        } if expected == "example.com" && actual == "example.net"
+    ));
+    assert!(!error.is_retryable());
+}
+
+#[tokio::test]
 async fn listing_zones_uses_the_documented_default_page_size() {
     let transport = MockTransport::new();
     transport.ok(json!({"count": 1, "domains": [{"domain": "a.de", "type": "MASTER"}]}));
