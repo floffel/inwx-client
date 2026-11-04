@@ -382,7 +382,15 @@ proptest! {
     }
 
     #[test]
-    fn accepted_emails_round_trip(local in "[A-Za-z0-9._%+-]{3,20}", label in "[a-z0-9]([a-z0-9-]{0,20}[a-z0-9])?") {
+    fn accepted_emails_round_trip(
+        local in "[A-Za-z0-9._%+-]{3,20}",
+        label in "[a-z0-9]([a-z0-9-]{0,20}[a-z0-9])?",
+    ) {
+        // `xn--` marks an A-label, and a label carrying the prefix is only a
+        // domain when the punycode behind it decodes — which UTS-46 rightly
+        // rejects for a random one. Such a label is outside this property: the
+        // point is that an address the parser accepts survives the round trip.
+        prop_assume!(!label.starts_with("xn--"));
         let address = format!("{local}@{label}.example.com");
         let email = Email::parse(&address).unwrap();
         prop_assert_eq!(email.as_str(), address.as_str());
