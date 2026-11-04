@@ -211,7 +211,7 @@ fn every_record_update_setter() {
     assert_eq!(params["prio"], 3);
     assert_eq!(params["id"], json!(["1", "2"]));
 
-    // A name-only change is enough; content is not re-validated without a type.
+    // A name-only change is enough.
     let rename = RecordUpdate::new([RecordId::from_number(1)]).name("api");
     assert!(rename.params().is_ok());
 
