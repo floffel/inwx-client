@@ -1749,8 +1749,8 @@ pub(crate) mod de {
     ) -> std::result::Result<Option<crate::record::RecordId>, D::Error> {
         let value = Value::deserialize(deserializer)?;
         Ok(match value {
-            Value::String(text) if !text.is_empty() => Some(crate::record::RecordId::from(text)),
-            Value::Number(number) => Some(crate::record::RecordId::from(number.to_string())),
+            Value::String(text) if !text.is_empty() => crate::record::RecordId::parse(text).ok(),
+            Value::Number(number) => crate::record::RecordId::parse(number.to_string()).ok(),
             _ => None,
         })
     }

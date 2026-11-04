@@ -159,17 +159,20 @@ fn record_type_traits_and_helpers() {
 
 #[test]
 fn record_id_traits() {
-    assert_eq!(RecordId::from("7").to_string(), "7");
-    assert_eq!(RecordId::from(String::from("8")).as_str(), "8");
-    assert_eq!(format!("{:?}", RecordId::from("9")), "RecordId(\"9\")");
+    assert_eq!(RecordId::try_from("7").unwrap().to_string(), "7");
+    assert_eq!(RecordId::try_from(String::from("8")).unwrap().as_str(), "8");
     assert_eq!(
-        serde_json::to_string(&RecordId::from("10")).unwrap(),
+        format!("{:?}", RecordId::parse("9").unwrap()),
+        "RecordId(\"9\")"
+    );
+    assert_eq!(
+        serde_json::to_string(&RecordId::parse("10").unwrap()).unwrap(),
         "\"10\""
     );
     let from_number: RecordId = serde_json::from_str("11").unwrap();
     assert_eq!(from_number.as_str(), "11");
     // Ordering is by the underlying string, which is fine for ids.
-    assert!(RecordId::from("2") < RecordId::from("20"));
+    assert!(RecordId::parse("2").unwrap() < RecordId::parse("20").unwrap());
 }
 
 #[test]
@@ -192,7 +195,7 @@ fn every_record_spec_constructor_and_accessor() {
 
 #[test]
 fn every_record_update_setter() {
-    let update = RecordUpdate::new([RecordId::from(1), RecordId::from(2)])
+    let update = RecordUpdate::new([RecordId::from_number(1), RecordId::from_number(2)])
         .name("www")
         .record_type(RecordType::Aaaa)
         .content("2001:db8::2")
@@ -208,11 +211,11 @@ fn every_record_update_setter() {
     assert_eq!(params["id"], json!(["1", "2"]));
 
     // A name-only change is enough; content is not re-validated without a type.
-    let rename = RecordUpdate::new([RecordId::from(1)]).name("api");
+    let rename = RecordUpdate::new([RecordId::from_number(1)]).name("api");
     assert!(rename.params().is_ok());
 
     // A name that is too long is refused.
-    let long = RecordUpdate::new([RecordId::from(1)]).name("a".repeat(254));
+    let long = RecordUpdate::new([RecordId::from_number(1)]).name("a".repeat(254));
     assert!(long.params().is_err());
 }
 
@@ -718,7 +721,7 @@ fn response_payload_types_are_constructible_and_comparable() {
     assert!(info.registrant_handle().is_none());
 
     let record = DnsRecord {
-        id: RecordId::from(1),
+        id: RecordId::from_number(1),
         name: None,
         record_type: RecordType::Txt,
         content: "x".into(),

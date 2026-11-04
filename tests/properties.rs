@@ -270,7 +270,7 @@ proptest! {
     /// and survives a serde round trip.
     #[test]
     fn record_ids_round_trip(id in 0i64..i64::MAX) {
-        let record_id = RecordId::from(id);
+        let record_id = RecordId::from_number(id);
         prop_assert_eq!(record_id.as_str(), id.to_string());
         let encoded = serde_json::to_string(&record_id).unwrap();
         let decoded: RecordId = serde_json::from_str(&encoded).unwrap();

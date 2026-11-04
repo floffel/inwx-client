@@ -229,22 +229,29 @@ fn txt_content_is_limited_to_the_documented_length() {
 
 #[test]
 fn record_ids_accept_strings_numbers_and_reject_nonsense() {
-    assert_eq!(RecordId::from(1).as_str(), "1");
-    assert_eq!(RecordId::from("0011").as_str(), "0011");
+    assert_eq!(RecordId::from_number(1).as_str(), "1");
+    assert_eq!(RecordId::parse("0011").unwrap().as_str(), "0011");
+    assert_eq!(RecordId::try_from("1").unwrap().as_str(), "1");
+    assert_eq!(
+        RecordId::try_from(String::from("0011")).unwrap().as_str(),
+        "0011"
+    );
     assert!(RecordId::parse("").is_err());
     assert!(RecordId::parse("a\nb").is_err());
     assert!(RecordId::parse("x".repeat(65)).is_err());
     assert!(RecordId::parse("x".repeat(64)).is_ok());
+    assert!(RecordId::try_from("").is_err());
+    assert!(RecordId::try_from(String::from("a\nb")).is_err());
 }
 
 #[test]
 fn a_record_update_needs_an_id_and_a_change() {
     assert!(RecordUpdate::new([]).name("x").params().is_err());
-    let no_change = RecordUpdate::new([RecordId::from(1)]);
+    let no_change = RecordUpdate::new([RecordId::from_number(1)]);
     assert!(no_change.params().is_err());
-    let over_ttl = RecordUpdate::new([RecordId::from(1)]).with_ttl(MAX_TTL + 1);
+    let over_ttl = RecordUpdate::new([RecordId::from_number(1)]).with_ttl(MAX_TTL + 1);
     assert!(over_ttl.is_err());
-    let bad_name = RecordUpdate::new([RecordId::from(1)]).name("bad name");
+    let bad_name = RecordUpdate::new([RecordId::from_number(1)]).name("bad name");
     assert!(bad_name.params().is_err());
 }
 
