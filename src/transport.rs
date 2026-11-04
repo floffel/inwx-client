@@ -366,22 +366,35 @@ impl Response {
         (200..300).contains(&self.status)
     }
 
-    /// Parses the body as JSON; an empty body becomes `null`.
+    /// Parses the body as JSON.
+    ///
+    /// A literal `null` body is a successful JSON value. An empty or
+    /// whitespace-only body is not: this response came back after the request
+    /// was written, so the failure is [`Error::Uncertain`] rather than a null
+    /// answer.
     ///
     /// ```
     /// use inwx_client::transport::Response;
+    /// use inwx_client::Error;
     ///
     /// let response = Response::new(200, std::iter::empty(), br#"{"code":1000}"#.to_vec());
     /// assert_eq!(response.json().unwrap()["code"], 1000);
-    /// assert!(Response::new(200, std::iter::empty(), Vec::new()).json().unwrap().is_null());
+    /// assert!(Response::new(200, std::iter::empty(), b"null".to_vec()).json().unwrap().is_null());
+    ///
+    /// let empty = Response::new(200, std::iter::empty(), Vec::new());
+    /// assert!(matches!(empty.json(), Err(Error::Uncertain { .. })));
     /// ```
     ///
     /// # Errors
     ///
-    /// [`Error::Json`] when the body is not valid JSON.
+    /// [`Error::Uncertain`] when the body is empty or whitespace-only, and
+    /// [`Error::Json`] when a non-empty body is not valid JSON.
     pub fn json(&self) -> Result<Value> {
         if self.body.iter().all(u8::is_ascii_whitespace) {
-            return Ok(Value::Null);
+            return Err(Error::transport_at(
+                TransportStage::AfterSend,
+                "empty response body",
+            ));
         }
         serde_json::from_slice(&self.body).map_err(Error::from)
     }
@@ -1129,9 +1142,24 @@ mod tests {
     }
 
     #[test]
-    fn whitespace_only_body_is_null() {
-        let response = Response::new(200, std::iter::empty(), b"  \n\t".to_vec());
-        assert!(response.json().unwrap().is_null());
+    fn empty_and_whitespace_only_bodies_are_uncertain() {
+        // Valid: a literal JSON null is still a parsed value.
+        let literal_null = Response::new(200, std::iter::empty(), b"null".to_vec());
+        assert!(literal_null.json().unwrap().is_null());
+
+        // Just inside: padding around that value does not make it empty.
+        let padded_null = Response::new(200, std::iter::empty(), b" \n null \t".to_vec());
+        assert!(padded_null.json().unwrap().is_null());
+
+        // Just outside: no JSON value at all must not read as an answer.
+        for body in [Vec::new(), b"  \n\t".to_vec()] {
+            let response = Response::new(200, std::iter::empty(), body);
+            let error = response.json().unwrap_err();
+            assert!(matches!(error, Error::Uncertain { .. }), "{error:?}");
+            assert!(error.is_uncertain(), "{error:?}");
+            assert!(!error.is_retryable(), "{error:?}");
+            assert!(error.to_string().contains("empty response body"));
+        }
     }
 
     #[test]
