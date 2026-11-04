@@ -129,6 +129,7 @@
 //! | DNSSEC | `dnssec.*` (7 methods) |
 //! | Tags | `tag.*` (5 methods) |
 //! | Nameserver sets | `nameserverset.*` (5 methods) |
+//! | Push requests | `request.list`, `request.info`, `request.accept`, `request.deny`, `request.cancel` |
 //! | DynDNS | `dyndns.*` (8 methods) |
 //! | DynDNS subscriptions | `dyndnssubscription.create`, `dyndnssubscription.cancel`, `dyndnssubscription.list`, `dyndnssubscription.listProducts` |
 //! | Accounting | `accounting.*` (11 methods) |
@@ -328,6 +329,7 @@ pub mod pagination;
 pub mod pdf;
 pub mod price;
 pub mod record;
+pub mod request;
 pub mod rpc;
 mod session;
 pub mod tag;
@@ -412,6 +414,7 @@ pub use price::{DomainPriceQuote, ExtraDataRule, PriceChange, PriceList, PromoCo
 pub use record::{
     DnsRecord, RecordId, RecordSet, RecordSpec, RecordType, RecordUpdate, DEFAULT_TTL, MAX_TTL,
 };
+pub use request::{RequestEntry, RequestListPage, RequestListing, RequestState};
 pub use rpc::{Detail, RpcRequest, RpcResponse};
 pub use tag::{Tag, TagUpdate, TagUsage, TaggedDomains};
 pub use transfer::{
