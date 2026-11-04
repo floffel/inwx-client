@@ -435,7 +435,7 @@ impl NicHandleQuery {
     ///
     /// # Errors
     ///
-    /// [`crate::Error::Validation`] when the page size is zero.
+    /// [`crate::Error::Validation`] when the page size is zero or above [`crate::MAX_PAGE_SIZE`].
     ///
     /// ```
     /// use inwx_client::NicHandleQuery;

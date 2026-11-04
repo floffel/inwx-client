@@ -20,7 +20,7 @@ use idna::uts46::{AsciiDenyList, DnsLength, Hyphens, Uts46};
 use celes::Country;
 use garde::rules::email::parse_email;
 
-use crate::{Error, Result};
+use crate::{pagination::MAX_PAGE_SIZE, Error, Result};
 
 /// Largest value the API's `int` parameters accept.
 const MAX_API_INT: i64 = i32::MAX as i64;
@@ -1576,10 +1576,17 @@ fn validate_int_id(field: &'static str, id: i64, description: &str) -> Result<i6
     Ok(id)
 }
 
-/// A page size: the API pages from one and rejects a limit of zero.
+/// A page size: the API pages from one, and the crate caps the request at its
+/// documented [`MAX_PAGE_SIZE`] ceiling.
 pub(crate) fn validate_page_limit(limit: u32) -> Result<u32> {
     if limit == 0 {
         return Err(Error::validation("pagelimit", "must be at least 1"));
+    }
+    if limit > MAX_PAGE_SIZE {
+        return Err(Error::validation(
+            "pagelimit",
+            format!("must be at most {MAX_PAGE_SIZE}, got {limit}"),
+        ));
     }
     Ok(limit)
 }
