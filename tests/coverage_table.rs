@@ -570,14 +570,15 @@ fn dropping_a_namespace_row_is_reported() {
 
 #[test]
 fn an_implicit_claim_must_still_appear_in_the_sources() {
-    let lib = lib_source();
-    assert_eq!(table_problems(&lib).join("\n"), String::new());
-    let bogus = replace_once(
-        &lib,
-        "`account.check` (implicit)",
-        "`account.checkmate` (implicit)",
+    // An implicit command is documented without its own wrapper, but it still
+    // has to appear as a literal somewhere in `src/`. There are no implicit
+    // claims in the real table, so this adds one that is never referenced.
+    let lib = replace_once(
+        &lib_source(),
+        "| Session | `account.login`, `account.logout`, `account.check`",
+        "| Session | `account.checkmate` (implicit), `account.login`, `account.logout`, `account.check`",
     );
-    let problems = table_problems(&bogus);
+    let problems = table_problems(&lib);
     assert_eq!(problems.len(), 1, "{problems:?}");
     assert!(problems[0].contains("account.checkmate"), "{problems:?}");
 }

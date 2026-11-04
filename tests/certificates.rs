@@ -435,6 +435,58 @@ async fn accounting_reads_send_their_parameters() {
 }
 
 #[tokio::test]
+async fn accounting_list_invoices_accepts_an_empty_array() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "invoice": [] }));
+
+    let invoices = client(transport.clone()).list_invoices().await.unwrap();
+    assert_eq!(invoices, Vec::new());
+    assert_eq!(transport.only_call().method, "accounting.listInvoices");
+}
+
+#[tokio::test]
+async fn accounting_list_invoices_requires_an_array() {
+    for answer in [
+        json!({}),
+        json!({ "invoice": null }),
+        json!({ "invoice": {} }),
+    ] {
+        let transport = MockTransport::new();
+        transport.ok(answer);
+
+        let error = client(transport.clone()).list_invoices().await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::UnexpectedAnswer { method, field, .. }
+                if method == "accounting.listInvoices" && field == "invoice"
+        ));
+        assert!(!error.is_retryable());
+        assert_eq!(transport.call_count(), 1);
+    }
+}
+
+#[tokio::test]
+async fn accounting_list_invoices_reports_malformed_entries() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "invoice": [
+            { "invoiceId": "2026-0042", "date": "2026-10-01", "afterTax": 119.0 },
+            null
+        ]
+    }));
+
+    let error = client(transport.clone()).list_invoices().await.unwrap_err();
+
+    let Error::UnexpectedAnswer { detail, .. } = &error else {
+        panic!("unexpected error: {error}");
+    };
+    assert!(detail.contains("entry 1"));
+    assert!(!error.is_retryable());
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
 async fn preview_receipt_and_postal_commands() {
     let transport = MockTransport::new();
     transport.ok(json!({ "pdf": "JVBERi0xLjQK" }));

@@ -117,7 +117,9 @@
 //!
 //! | Area | Methods |
 //! | --- | --- |
-//! | Session | `account.login`, `account.logout`, `account.check` (implicit), `account.info`, `account.unlock`, `account.changepassword` |
+//! | Session | `account.login`, `account.logout`, `account.check`, `account.info`, `account.unlock`, `account.changepassword` |
+//! | Account | `account.update` |
+//! | Sub-accounts | `account.list`, `account.create`, `account.delete` |
 //! | Domains | `domain.check`, `domain.create`, `domain.info`, `domain.list`, `domain.update`, `domain.renew`, `domain.delete`, `domain.whois`, `domain.setClientHold`, `domain.removeClientHold`, `domain.setAuthInfo`, `domain.setDomainTransferCode`, `domain.block`, `domain.unblock` |
 //! | Ownership | `domain.transfer`, `domain.trade`, `domain.push`, `domain.restore`, `domain.transfercancel`, `domain.transferOut` |
 //! | DNS records | `nameserver.info` (read), `nameserver.createRecord`, `nameserver.updateRecord`, `nameserver.deleteRecord` |
@@ -150,10 +152,9 @@
 //! Every name in the table is a command the crate really sends; a count such as
 //! `certificate.* (13 methods)` covers exactly the commands implemented in
 //! `src/certificate.rs`, and `tests/coverage_table.rs` fails the build when the
-//! two drift apart. `account.check` is implicit: the client treats it as a
-//! session-free method but does not wrap it, so it goes through
-//! [`InwxClient::call`]. Unknown methods stay reachable the same way; what is
-//! not modelled yet is tracked as an issue, not hidden as "out of scope".
+//! two drift apart. Unknown methods stay reachable through [`InwxClient::call`];
+//! what is not modelled yet is tracked as an issue, not hidden as
+//! "out of scope".
 //!
 //! # Design
 //!
@@ -335,7 +336,11 @@ pub mod transport;
 pub mod types;
 pub mod zone;
 
-pub use account::{AccountRole, AccountRoleEntry};
+pub use account::{
+    AccountCheck, AccountPasswordChange, AccountRole, AccountRoleEntry, AccountRoleId,
+    AccountUnlockRequest, AccountUpdate, SubAccount, SubAccountCreate, SubAccountCreated,
+    SubAccountList, SubAccountsDeleted,
+};
 pub use accounting::{
     AccountBalance, CreditLog, Document, Invoice, LockedFund, LockedFunds, PostalDelivery,
     RefundRequest, SslFund, StatementQuery, Transaction, TransactionLog, TransactionLogQuery,
@@ -351,9 +356,8 @@ pub use certificate::{
     CertificateTerm, CertificateUpdate, CertificateValidationMethod, MAX_CSR_LEN,
 };
 pub use client::{
-    is_read_only_method, AccountInfo, AccountUnlock, Credentials, InwxClient, Language,
-    RetryPolicy, UnlockAccount, DEFAULT_ATTEMPTS, DEFAULT_BASE_DELAY, DEFAULT_BASE_URL,
-    DEFAULT_MAX_DELAY, MAX_SUBACCOUNT_USERNAME_LEN, SANDBOX_BASE_URL,
+    is_read_only_method, AccountInfo, Credentials, InwxClient, Language, RetryPolicy,
+    DEFAULT_ATTEMPTS, DEFAULT_BASE_DELAY, DEFAULT_BASE_URL, DEFAULT_MAX_DELAY, SANDBOX_BASE_URL,
 };
 pub use contact::{
     Contact, ContactListPage, ContactListing, ContactQuery, ContactRequest, ContactUpdate,
