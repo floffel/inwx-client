@@ -628,6 +628,64 @@ async fn contact_info_also_accepts_an_unwrapped_answer() {
 }
 
 #[tokio::test]
+async fn contact_info_refuses_an_answer_without_a_handle() {
+    // The documented success shape for a plain answer is `resData: {}`, and a
+    // `Contact` with no id is no handle: that answer must not read as success.
+    let transport = MockTransport::new();
+    transport.ok(json!({}));
+
+    let client = client(transport);
+    let error = client.contact_info(991).await.unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::MissingField {
+            method: "contact.info",
+            field: "resData.contact",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn contact_info_refuses_a_handle_that_names_no_id() {
+    for answer in [
+        json!({"contact": {}}),
+        json!({"contact": {"name": "Erika", "email": "erika@example.com"}}),
+        json!({"contact": null}),
+    ] {
+        let transport = MockTransport::new();
+        transport.ok(answer.clone());
+
+        let client = client(transport);
+        let error = client.contact_info(991).await.unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                Error::MissingField {
+                    method: "contact.info",
+                    ..
+                }
+            ),
+            "{answer} should not read as a handle"
+        );
+    }
+}
+
+#[tokio::test]
+async fn contact_info_keeps_a_handle_whose_id_is_a_numeric_string() {
+    // The boundary's other side: the answer names an id, so it is a handle.
+    let transport = MockTransport::new();
+    transport.ok(json!({"contact": {"roId": "991", "name": "Erika"}}));
+
+    let client = client(transport);
+    let contact = client.contact_info(991).await.unwrap();
+    assert_eq!(contact.handle(), Some(991));
+    assert_eq!(contact.name.as_deref(), Some("Erika"));
+}
+
+#[tokio::test]
 async fn listing_contacts_pages_and_searches() {
     let transport = MockTransport::new();
     transport.ok(json!({"count": 1, "contact": [{"roId": 991}]}));
