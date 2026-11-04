@@ -1187,9 +1187,11 @@ impl Drop for Password {
 /// (`2004-05-23T14:25:10`, ISO-8601).
 ///
 /// Scheduled executions (`scDate`), accounting ranges and `dnssec.listkeys`
-/// filters take these. The original spelling is kept for the wire; the parsed
-/// value is what makes range validation (`dateFrom <= dateTo`) possible.
-/// Parsing uses the `time` crate rather than a hand-rolled parser.
+/// filters take these. The documented `YYYY-MM-DDTHH:MM:SS` form is stored and
+/// sent unchanged. A `Z` or `±HH:MM` suffix is accepted and rewritten to the
+/// equivalent naive UTC form, so equality and ordering compare exactly the
+/// value that reaches the wire. Parsing uses the `time` crate rather than a
+/// hand-rolled parser.
 ///
 /// ```
 /// use inwx_client::Timestamp;
@@ -1198,10 +1200,18 @@ impl Drop for Password {
 /// assert_eq!(at.as_str(), "2026-11-01T03:00:00");
 /// assert!(at > Timestamp::parse("2026-10-31T23:59:59")?);
 ///
-/// // An offset is normalised for comparison but kept for the wire.
+/// // An offset is normalised for comparison and rewritten for the wire.
 /// let zoned = Timestamp::parse("2026-11-01T04:00:00+01:00")?;
 /// assert_eq!(zoned, at);
-/// for bad in ["", "2026-13-01T00:00:00", "tomorrow", "2026-11-01"] {
+/// assert_eq!(zoned.as_str(), "2026-11-01T03:00:00");
+/// for bad in [
+///     "",
+///     "2026-13-01T00:00:00",
+///     "tomorrow",
+///     "2026-11-01",
+///     "2026-11-01T03:00:00.5",
+///     "2026-11-01T03:00:00+0100",
+/// ] {
 ///     assert!(Timestamp::parse(bad).is_err(), "{bad:?}");
 /// }
 /// # Ok::<(), inwx_client::Error>(())
@@ -1215,25 +1225,26 @@ pub struct Timestamp {
 impl Timestamp {
     /// Parses an ISO-8601 timestamp, with or without an offset.
     ///
+    /// The documented naive form is stored unchanged. `Z` and `±HH:MM`
+    /// inputs are converted to the equivalent UTC naive form, which is what
+    /// [`Timestamp::as_str`] and serialization expose.
+    ///
     /// # Errors
     ///
     /// [`Error::Validation`] when the value is not `YYYY-MM-DDTHH:MM:SS`,
-    /// optionally followed by a fraction, `Z` or a `±HH:MM` offset.
+    /// optionally followed by `Z` or a `±HH:MM` offset.
     pub fn parse(input: &str) -> Result<Self> {
         let raw = input.trim();
         if raw.is_empty() {
             return Err(Error::validation("timestamp", "must not be empty"));
         }
-        let at = parse_timestamp(raw).ok_or_else(|| {
+        let (raw, at) = parse_timestamp(raw).ok_or_else(|| {
             Error::validation(
                 "timestamp",
                 format!("{raw:?} is not an ISO-8601 timestamp (2026-11-01T03:00:00)"),
             )
         })?;
-        Ok(Self {
-            raw: raw.to_owned(),
-            at,
-        })
+        Ok(Self { raw, at })
     }
 
     /// The timestamp as it will be sent.
@@ -1249,25 +1260,36 @@ impl Timestamp {
     }
 }
 
-/// Parses the two timestamp shapes the API documentation shows.
+/// Parses the timestamp shapes accepted for the wire.
 ///
-/// A `+HH:MM` value is converted to UTC so two spellings of the same instant
-/// compare equal; a naive value is taken as UTC, which is the only assumption
-/// that keeps ordering total.
-fn parse_timestamp(raw: &str) -> Option<time::PrimitiveDateTime> {
-    use time::format_description::well_known::Rfc3339;
+/// The returned string is the exact text this crate will serialize. A `Z` or
+/// `±HH:MM` value is converted to UTC so two spellings of the same instant
+/// compare and serialize consistently; a naive value is taken as UTC, which is
+/// the only assumption that keeps ordering total.
+fn parse_timestamp(raw: &str) -> Option<(String, time::PrimitiveDateTime)> {
     use time::macros::format_description;
 
-    if let Ok(offset) = time::OffsetDateTime::parse(raw, &Rfc3339) {
-        let utc = offset.to_offset(time::UtcOffset::UTC);
-        return Some(time::PrimitiveDateTime::new(utc.date(), utc.time()));
-    }
     let naive = format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]");
-    time::PrimitiveDateTime::parse(raw, &naive).ok()
+    let utc = format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
+    let offset = format_description!(
+        "[year]-[month]-[day]T[hour]:[minute]:[second][offset_hour sign:mandatory]:[offset_minute]"
+    );
+
+    if let Ok(at) = time::PrimitiveDateTime::parse(raw, &utc) {
+        return Some((at.format(&naive).ok()?, at));
+    }
+    if let Ok(offset) = time::OffsetDateTime::parse(raw, &offset) {
+        let utc = offset.to_offset(time::UtcOffset::UTC);
+        let at = time::PrimitiveDateTime::new(utc.date(), utc.time());
+        return Some((at.format(&naive).ok()?, at));
+    }
+    let at = time::PrimitiveDateTime::parse(raw, &naive).ok()?;
+    Some((raw.to_owned(), at))
 }
 
-/// Timestamps are equal when they name the same instant, whatever offset was
-/// written: `2026-11-01T04:00:00+01:00` equals `2026-11-01T03:00:00`.
+/// Timestamps are equal when they name the same instant. Offset input is
+/// canonicalized on parse, so `2026-11-01T04:00:00+01:00` equals, displays and
+/// serializes as `2026-11-01T03:00:00`.
 impl PartialEq for Timestamp {
     fn eq(&self, other: &Self) -> bool {
         self.at == other.at

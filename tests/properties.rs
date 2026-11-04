@@ -527,6 +527,31 @@ proptest! {
         prop_assert_eq!(Timestamp::parse(at.as_str()).unwrap(), at);
     }
 
+    /// Offset input names the same instant before and after canonicalization,
+    /// and the text sent on the wire is the normalized UTC spelling.
+    #[test]
+    fn accepted_offset_timestamps_are_normalised_for_the_wire(
+        year in 2000u16..2100,
+        month in 1u8..13,
+        day in 1u8..=28,
+        hour in 0u8..24,
+        minute in 0u8..60,
+        second in 0u8..60,
+        offset_hour in 0u8..24,
+        offset_minute in 0u8..60,
+        positive in any::<bool>(),
+    ) {
+        let text = format!(
+            "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}{}{offset_hour:02}:{offset_minute:02}",
+            if positive { '+' } else { '-' }
+        );
+        let zoned = inwx_client::Timestamp::parse(&text).unwrap();
+        let canonical = inwx_client::Timestamp::parse(zoned.as_str()).unwrap();
+        prop_assert_eq!(&canonical, &zoned);
+        prop_assert_eq!(canonical.as_str().len(), 19);
+        prop_assert_eq!(serde_json::to_string(&zoned).unwrap(), format!("\"{}\"", zoned.as_str()));
+    }
+
     #[test]
     fn handles_survive_serde(id in 1i64..=i64::from(i32::MAX)) {
         let handle = Handle::new(id).unwrap();

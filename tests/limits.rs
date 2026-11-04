@@ -492,10 +492,19 @@ fn timestamp_boundaries() {
         Timestamp::parse(" 2026-11-01T03:00:00 ").unwrap().as_str(),
         "2026-11-01T03:00:00"
     );
-    // Offsets are normalised for comparison, kept for the wire.
+    // Offsets are normalised for comparison and rewritten for the wire.
     let zoned = Timestamp::parse("2026-11-01T04:00:00+01:00").unwrap();
     assert_eq!(zoned, at);
-    assert_eq!(zoned.as_str(), "2026-11-01T04:00:00+01:00");
+    assert_eq!(zoned.as_str(), "2026-11-01T03:00:00");
+    assert_eq!(zoned.to_string(), "2026-11-01T03:00:00");
+    assert_eq!(
+        serde_json::to_string(&zoned).unwrap(),
+        "\"2026-11-01T03:00:00\""
+    );
+    assert_eq!(
+        Timestamp::parse("2026-11-01T03:00:00Z").unwrap().as_str(),
+        "2026-11-01T03:00:00"
+    );
     assert!(Timestamp::parse("2026-11-01T05:00:00+01:00").unwrap() > at);
 
     for bad in [
@@ -506,6 +515,8 @@ fn timestamp_boundaries() {
         "2026-11-01T24:00:00",       // hour 24
         "01.11.2026 03:00:00",       // German format
         "2026-11-01T03:00:00+99:00", // offset out of range
+        "2026-11-01T03:00:00.5",     // fractional seconds are undocumented
+        "2026-11-01T03:00:00+0100",  // offset must carry the colon
     ] {
         assert!(Timestamp::parse(bad).is_err(), "{bad:?}");
     }
