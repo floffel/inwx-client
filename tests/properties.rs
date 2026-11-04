@@ -1700,3 +1700,86 @@ mod contact_fields {
         }
     }
 }
+
+// ------------------------------------------------------ retry jitter (#108)
+
+mod retry_jitter {
+    use inwx_client::RetryPolicy;
+    use proptest::prelude::*;
+    use std::time::Duration;
+
+    // A policy, an attempt and a sample: the jittered wait must stay inside the
+    // deterministic ceiling for every combination, including a sample that is
+    // `NaN` or infinite.
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn a_jittered_wait_never_exceeds_the_ceiling(
+            attempt in 0u32..12,
+            base_ms in 0u64..2_000,
+            max_ms in 0u64..8_000,
+            unit in proptest::num::f64::ANY,
+        ) {
+            let policy = RetryPolicy::new(6)
+                .with_base_delay(Duration::from_millis(base_ms))
+                .with_max_delay(Duration::from_millis(max_ms));
+
+            let jittered = policy.delay_with_jitter(attempt, unit);
+            let ceiling = policy.delay(attempt);
+            prop_assert_eq!(jittered.is_some(), ceiling.is_some());
+
+            if let (Some(waited), Some(ceiling)) = (jittered, ceiling) {
+                prop_assert!(
+                    waited <= ceiling,
+                    "unit {unit}: {waited:?} is above {ceiling:?}"
+                );
+            }
+        }
+
+        /// Both ends of the interval are exact whatever the policy: a zero
+        /// sample waits not at all, a full sample waits the whole ceiling.
+        #[test]
+        fn the_ends_of_the_jitter_interval_are_exact(
+            attempt in 1u32..6,
+            base_ms in 0u64..1_000,
+        ) {
+            let policy = RetryPolicy::new(6)
+                .with_base_delay(Duration::from_millis(base_ms))
+                .with_max_delay(Duration::from_secs(30));
+
+            prop_assert_eq!(policy.delay_with_jitter(attempt, 0.0), Some(Duration::ZERO));
+            prop_assert_eq!(
+                policy.delay_with_jitter(attempt, 1.0),
+                policy.delay(attempt)
+            );
+        }
+
+        /// A larger sample never waits less, so a generator that trends high
+        /// cannot silently shorten the backoff.
+        #[test]
+        fn a_larger_sample_never_waits_less(
+            attempt in 1u32..6,
+            first in 0u32..1000,
+            second in 0u32..1000,
+            base_ms in 0u64..1_000,
+        ) {
+            let policy = RetryPolicy::new(6)
+                .with_base_delay(Duration::from_millis(base_ms))
+                .with_max_delay(Duration::from_secs(30));
+
+            let (low, high) = if first <= second {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            let low_wait = policy
+                .delay_with_jitter(attempt, f64::from(low) / 1000.0)
+                .expect("the attempt is inside the budget");
+            let high_wait = policy
+                .delay_with_jitter(attempt, f64::from(high) / 1000.0)
+                .expect("the attempt is inside the budget");
+            prop_assert!(low_wait <= high_wait, "{low} -> {low_wait:?}, {high} -> {high_wait:?}");
+        }
+    }
+}
