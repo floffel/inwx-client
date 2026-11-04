@@ -4,10 +4,11 @@
 mod common;
 
 use inwx_client::{
-    retry_after_from_header, ContactListing, ContactQuery, Credentials, DomainListQuery,
-    DomainListing, DomainName, Hostname, HttpBody, Listing, Pagination, Period, RecordId,
-    RecordSpec, RecordType, RemoveClientHold, RpcResponse, SetClientHold, ZoneListPage,
-    ZoneListing, MAX_HTTP_BODY_CHARS, MAX_ITEMS, MAX_PAGES, MAX_PAGE_SIZE, MAX_TTL,
+    retry_after_from_header, ContactListing, ContactQuery, ContactRequest, ContactType,
+    ContactUpdate, Credentials, DomainListQuery, DomainListing, DomainName, Hostname, HttpBody,
+    Listing, Pagination, Period, RecordId, RecordSpec, RecordType, RemoveClientHold, RpcResponse,
+    SetClientHold, ZoneListPage, ZoneListing, MAX_HTTP_BODY_CHARS, MAX_ITEMS, MAX_PAGES,
+    MAX_PAGE_SIZE, MAX_TTL,
 };
 use proptest::prelude::*;
 use serde_json::Value;
@@ -21,6 +22,54 @@ fn type_token() -> impl Strategy<Value = String> {
 /// Arbitrary free text, including control characters.
 fn any_text() -> impl Strategy<Value = String> {
     "\\PC{0,40}"
+}
+
+/// The string fields `contact.create` and `contact.update` share.
+const CONTACT_TEXT_FIELDS: [&str; 9] = [
+    "name", "org", "street", "city", "pc", "sp", "voice", "fax", "remarks",
+];
+
+fn create_accepts(param: &str, value: &str) -> bool {
+    let name = if param == "name" { value } else { "Erika" };
+    let Ok(base) = ContactRequest::new(ContactType::Person, name, "a@b.test") else {
+        return false;
+    };
+    let base = base
+        .with_street("Weg 2")
+        .with_city("Berlin")
+        .with_postcode("10115")
+        .with_country("DE")
+        .with_voice("+49.891");
+    let request = match param {
+        "name" => base,
+        "org" => base.with_org(value),
+        "street" => base.with_street(value),
+        "city" => base.with_city(value),
+        "pc" => base.with_postcode(value),
+        "sp" => base.with_state(value),
+        "voice" => base.with_voice(value),
+        "fax" => base.with_fax(value),
+        "remarks" => base.with_remarks(value),
+        other => unreachable!("{other} is not a contact text field"),
+    };
+    request.validate().is_ok()
+}
+
+fn update_accepts(param: &str, value: &str) -> bool {
+    let update = ContactUpdate::new(991).expect("991 is a positive handle id");
+    let update = match param {
+        "name" => update.with_name(value),
+        "org" => update.with_org(value),
+        "street" => update.with_street(value),
+        "city" => update.with_city(value),
+        "pc" => update.with_postcode(value),
+        "sp" => update.with_state(value),
+        "voice" => update.with_voice(value),
+        "fax" => update.with_fax(value),
+        "remarks" => update.with_remarks(value),
+        other => unreachable!("{other} is not a contact text field"),
+    };
+    update.params().is_ok()
 }
 
 proptest! {
@@ -44,6 +93,26 @@ proptest! {
         let record_type = RecordType::ALL[index].clone();
         prop_assert_eq!(RecordType::parse(&record_type.to_string()).unwrap(), record_type.clone());
         prop_assert_eq!(record_type.to_string(), record_type.as_str());
+    }
+
+    /// `contact.create` and `contact.update` write the same fields, so they must
+    /// judge a value the same way: whatever an update lets through, a create
+    /// lets through too, and vice versa. #110 was a counter-example — the update
+    /// path checked neither the length nor the control characters.
+    #[test]
+    fn contact_fields_are_judged_alike_on_create_and_update(
+        chars in proptest::collection::vec(any::<char>(), 0..300),
+    ) {
+        let value: String = chars.into_iter().collect();
+        for param in CONTACT_TEXT_FIELDS {
+            prop_assert_eq!(
+                create_accepts(param, &value),
+                update_accepts(param, &value),
+                "{} disagreed for {:?}",
+                param,
+                value
+            );
+        }
     }
 
     /// Any token parses, and unknown ones are carried upper-cased.

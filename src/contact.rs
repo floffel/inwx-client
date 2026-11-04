@@ -6,6 +6,10 @@
 //! `email`, two-letter country) so a rejected handle is a local error: the
 //! country is looked up in the `celes` ISO 3166-1 table and the address is
 //! checked against `garde`'s RFC 5321 shape, never against a local guess.
+//!
+//! `contact.create` and `contact.update` write the same fields, so both check
+//! the lengths against the one table in `TEXT_FIELDS`: a limit that holds on
+//! the way in but not on the way of a change is not a limit.
 
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -70,16 +74,8 @@ impl ContactRequest {
     ) -> Result<Self> {
         let name = name.into();
         let email = email.into();
-        if name.trim().is_empty() {
-            return Err(Error::validation("contact.name", "must not be empty"));
-        }
-        if name.chars().count() > 255 {
-            return Err(Error::validation(
-                "contact.name",
-                "must be at most 255 characters",
-            ));
-        }
-        reject_control_chars("contact.name", &name)?;
+        check_name_not_blank(&name)?;
+        check_len("contact.name", &name, 255)?;
         let email = validate_email_field("contact.email", &email)?;
         Ok(Self {
             contact_type,
@@ -285,6 +281,9 @@ impl ContactRequest {
 
     /// Checks the fields `contact.create` requires and the documented lengths.
     ///
+    /// The lengths are the ones `contact.update` enforces too: both paths walk
+    /// the same table.
+    ///
     /// ```
     /// use inwx_client::{ContactRequest, ContactType};
     ///
@@ -305,51 +304,59 @@ impl ContactRequest {
     ///
     /// [`Error::Validation`] naming the first missing or malformed field.
     pub fn validate(&self) -> Result<()> {
-        let street = self
-            .street
-            .as_deref()
-            .ok_or_else(|| Error::validation("contact.street", "is required"))?;
-        let city = self
-            .city
-            .as_deref()
-            .ok_or_else(|| Error::validation("contact.city", "is required"))?;
-        let postcode = self
-            .postcode
-            .as_deref()
-            .ok_or_else(|| Error::validation("contact.pc", "is required"))?;
+        // The fields the API requires, in the documented order: the first one
+        // missing is the error.
+        for (param, field) in [
+            ("street", "contact.street"),
+            ("city", "contact.city"),
+            ("pc", "contact.pc"),
+            ("cc", "contact.cc"),
+            ("voice", "contact.voice"),
+        ] {
+            if self.field(param).is_none() {
+                return Err(Error::validation(field, "is required"));
+            }
+        }
         let country = self
-            .country
-            .as_deref()
+            .field("cc")
             .ok_or_else(|| Error::validation("contact.cc", "is required"))?;
-        let voice = self
-            .voice
-            .as_deref()
-            .ok_or_else(|| Error::validation("contact.voice", "is required"))?;
-
         validate_country_code("contact.cc", country)?;
-        check_len("contact.street", street, 64)?;
-        check_len("contact.city", city, 64)?;
-        check_len("contact.pc", postcode, 10)?;
-        check_len("contact.voice", voice, 64)?;
-        if let Some(org) = &self.org {
-            check_len("contact.org", org, 255)?;
-        }
-        if let Some(state) = &self.state {
-            check_len("contact.sp", state, 64)?;
-        }
-        if let Some(fax) = &self.fax {
-            check_len("contact.fax", fax, 64)?;
-        }
-        if let Some(remarks) = &self.remarks {
-            check_len("contact.remarks", remarks, 255)?;
+        // Every string the request carries goes through the table the update
+        // path uses, so the two paths cannot drift apart.
+        for (param, field, max) in TEXT_FIELDS {
+            if let Some(value) = self.field(param) {
+                check_len(field, value, max)?;
+            }
         }
         Ok(())
+    }
+
+    /// One of the request's string fields, by the API parameter that carries
+    /// it — the lookup that makes `TEXT_FIELDS` apply to `contact.create`.
+    fn field(&self, param: &str) -> Option<&str> {
+        match param {
+            "name" => Some(self.name.as_str()),
+            "org" => self.org.as_deref(),
+            "street" => self.street.as_deref(),
+            "city" => self.city.as_deref(),
+            "pc" => self.postcode.as_deref(),
+            "sp" => self.state.as_deref(),
+            "cc" => self.country.as_deref(),
+            "voice" => self.voice.as_deref(),
+            "fax" => self.fax.as_deref(),
+            "remarks" => self.remarks.as_deref(),
+            _ => None,
+        }
     }
 }
 
 /// A change to an existing handle (`contact.update`).
 ///
 /// The contact type is not updatable, and unset fields stay as they are.
+///
+/// The values are checked the way `contact.create` checks them: the same
+/// length table, the same control-character guard, the same non-blank name. A
+/// change cannot put a value on the wire that a create would have refused.
 ///
 /// ```
 /// use inwx_client::ContactUpdate;
@@ -538,10 +545,26 @@ impl ContactUpdate {
     /// The address and the country code are sent in the exact form they were
     /// validated in, trimmed and upper-cased respectively.
     ///
+    /// ```
+    /// use inwx_client::ContactUpdate;
+    ///
+    /// let params = ContactUpdate::new(991)?.with_country("de").params()?;
+    /// assert_eq!(params["cc"], "DE");
+    ///
+    /// // The limits are the create path's limits: a `text64` street takes 64
+    /// // characters and not 65, and a newline never goes on the wire.
+    /// assert!(ContactUpdate::new(991)?.with_street("x".repeat(64)).params().is_ok());
+    /// assert!(ContactUpdate::new(991)?.with_street("x".repeat(65)).params().is_err());
+    /// assert!(ContactUpdate::new(991)?.with_name("a\r\nb").params().is_err());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when nothing was changed, or when a changed email
-    /// or country code is invalid.
+    /// [`Error::Validation`] when nothing was changed, when a changed field is
+    /// longer than its documented type allows (`text64` street, `text10`
+    /// postcode, 255 characters for the rest), carries a control character, or
+    /// when a changed name is blank, email or country code is invalid.
     pub fn params(&self) -> Result<Value> {
         if self.changes.is_empty() {
             return Err(Error::validation(
@@ -549,7 +572,17 @@ impl ContactUpdate {
                 "an update needs at least one changed field",
             ));
         }
+        if let Some(Value::String(name)) = self.changes.get("name") {
+            check_name_not_blank(name)?;
+        }
         let mut params = self.changes.clone();
+        // The same table `contact.create` validates with: `contact.update`
+        // writes the same fields, so it holds the same limits.
+        for (param, field, max) in TEXT_FIELDS {
+            if let Some(Value::String(value)) = self.changes.get(param) {
+                check_len(field, value, max)?;
+            }
+        }
         if let Some(Value::String(email)) = self.changes.get("email") {
             let email = validate_email_field("contact.email", email)?;
             params.insert("email".to_owned(), json!(email));
@@ -857,6 +890,25 @@ where
         .map_err(serde::de::Error::custom)
 }
 
+/// The documented limits of the string fields `contact.create` and
+/// `contact.update` share, as `(API parameter, error field, characters)`.
+///
+/// One table for both directions: `contact.create` writes these fields and
+/// `contact.update` changes them, and a `text64` that is refused on the way in
+/// must not pass on the way of a change. `name` is `text255` plus the
+/// non-blank rule [`check_name_not_blank`] enforces.
+const TEXT_FIELDS: [(&str, &str, usize); 9] = [
+    ("name", "contact.name", 255),
+    ("org", "contact.org", 255),
+    ("street", "contact.street", 64),
+    ("city", "contact.city", 64),
+    ("pc", "contact.pc", 10),
+    ("sp", "contact.sp", 64),
+    ("voice", "contact.voice", 64),
+    ("fax", "contact.fax", 64),
+    ("remarks", "contact.remarks", 255),
+];
+
 /// Enforces a documented maximum length.
 fn check_len(field: &'static str, value: &str, max: usize) -> Result<()> {
     if value.chars().count() > max {
@@ -866,6 +918,15 @@ fn check_len(field: &'static str, value: &str, max: usize) -> Result<()> {
         ));
     }
     reject_control_chars(field, value)
+}
+
+/// Rejects a blank name: the API requires one on create and an update that
+/// blanked it would leave a handle the registrar refuses.
+fn check_name_not_blank(name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        return Err(Error::validation("contact.name", "must not be empty"));
+    }
+    Ok(())
 }
 
 impl<T: Transport> InwxClient<T> {
@@ -1212,5 +1273,114 @@ mod tests {
         assert!(params.get("fax").is_none());
         assert!(params.get("remarks").is_none());
         assert_eq!(params["cc"], "DE");
+    }
+
+    /// A request with every string field set, so the completeness checks below
+    /// see the whole surface `contact.create` can send.
+    fn all_fields() -> ContactRequest {
+        complete()
+            .with_org("ACME GmbH")
+            .with_state("BY")
+            .with_fax("+49.892")
+            .with_remarks("night only")
+    }
+
+    /// An update that sets exactly one field, named by its API parameter.
+    fn update_with(param: &str, value: &str) -> Result<Value> {
+        let update = ContactUpdate::new(1).unwrap();
+        let update = match param {
+            "name" => update.with_name(value),
+            "org" => update.with_org(value),
+            "street" => update.with_street(value),
+            "city" => update.with_city(value),
+            "pc" => update.with_postcode(value),
+            "sp" => update.with_state(value),
+            "voice" => update.with_voice(value),
+            "fax" => update.with_fax(value),
+            "remarks" => update.with_remarks(value),
+            other => panic!("{other} is not a limited field"),
+        };
+        update.params()
+    }
+
+    #[test]
+    fn update_enforces_every_documented_length() {
+        // #110: `contact.update` sent these fields without the create path's
+        // limits, so a 100_000-character street went out unchanged.
+        for (param, field, max) in TEXT_FIELDS {
+            assert!(
+                update_with(param, &"x".repeat(max)).is_ok(),
+                "{param} at its limit of {max}"
+            );
+            match update_with(param, &"x".repeat(max + 1)) {
+                Err(Error::Validation { field: named, .. }) => assert_eq!(named, field),
+                other => panic!("{param} one past its limit of {max}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn update_counts_characters_not_bytes() {
+        // Like the create path: `ü` is two bytes and one character.
+        for (param, _, max) in TEXT_FIELDS {
+            assert!(update_with(param, &"ü".repeat(max)).is_ok(), "{param}");
+            assert!(update_with(param, &"ü".repeat(max + 1)).is_err(), "{param}");
+        }
+    }
+
+    #[test]
+    fn update_rejects_control_characters_in_every_field() {
+        for (param, field, _) in TEXT_FIELDS {
+            for value in ["a\r\nb", "a\nb", "a\u{0}b", "a\u{7f}b"] {
+                match update_with(param, value) {
+                    Err(Error::Validation { field: named, .. }) => {
+                        assert_eq!(named, field, "{param} took {value:?}");
+                    }
+                    other => panic!("{param} accepted {value:?}: {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn update_rejects_a_blank_name_like_create_does() {
+        assert!(ContactRequest::new(ContactType::Person, "  ", "a@b.test").is_err());
+        assert!(update_with("name", " ").is_err());
+        assert!(update_with("name", "Erika").is_ok());
+    }
+
+    #[test]
+    fn the_limit_table_covers_exactly_the_string_fields_both_paths_send() {
+        let params = all_fields().params();
+        let object = params.as_object().unwrap();
+
+        // Every row of the table names a field the create path really sends, and
+        // the error field it reports is derived from the parameter.
+        for (param, field, _) in TEXT_FIELDS {
+            assert!(
+                object.contains_key(param),
+                "{param} is limited but never sent"
+            );
+            assert_eq!(
+                field,
+                format!("contact.{param}").as_str(),
+                "error field for {param}"
+            );
+            // ... and one the update path can change.
+            assert!(update_with(param, "x").is_ok(), "{param} is not updatable");
+        }
+
+        // And the other direction: no string field goes out unchecked. `type`,
+        // `email` and `cc` are the three with their own validators.
+        for (param, value) in object {
+            if matches!(value, Value::String(_))
+                && !matches!(param.as_str(), "type" | "email" | "cc")
+            {
+                assert!(
+                    TEXT_FIELDS.iter().any(|(key, ..)| key == param),
+                    "{param} is sent without a documented limit"
+                );
+            }
+        }
     }
 }
