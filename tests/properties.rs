@@ -249,11 +249,22 @@ proptest! {
         match RpcResponse::parse(&bytes) {
             Ok(response) => {
                 // Parsed responses classify their own code consistently.
-                prop_assert_eq!(response.is_success(), inwx_client::rpc::is_success_code(response.code));
+                prop_assert_eq!(
+                    response.is_success(),
+                    response
+                        .code
+                        .is_some_and(inwx_client::rpc::is_success_code)
+                );
                 let code = response.code;
                 let result = response.into_result();
-                if inwx_client::rpc::is_success_code(code) {
+                if code.is_some_and(inwx_client::rpc::is_success_code) {
                     prop_assert!(result.is_ok());
+                } else if code.is_none() {
+                    let is_uncertain_error = matches!(
+                        &result,
+                        Err(error) if error.is_uncertain()
+                    );
+                    prop_assert!(is_uncertain_error);
                 } else {
                     let is_api_error = matches!(result, Err(inwx_client::Error::Api { .. }));
                     prop_assert!(is_api_error);

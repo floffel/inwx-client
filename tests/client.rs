@@ -1192,9 +1192,9 @@ async fn a_transport_that_always_fails_is_tried_exactly_three_times() {
     assert!(matches!(error, Error::Transport { .. }));
 }
 
-/// A reply that is a success envelope with a bogus code must not be accepted.
+/// A reply without a usable code is uncertain, not a definite API rejection.
 #[tokio::test]
-async fn code_zero_is_not_success() {
+async fn missing_code_is_uncertain() {
     let transport = MockTransport::new();
     transport.push(Reply::Body(r#"{"msg":"no code"}"#.to_owned()));
 
@@ -1204,7 +1204,9 @@ async fn code_zero_is_not_success() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.code(), Some(0));
+    assert!(error.is_uncertain());
+    assert!(!error.is_retryable());
+    assert_eq!(error.code(), None);
 }
 
 /// `account.unlock` is a mutating command on the current account, so it must

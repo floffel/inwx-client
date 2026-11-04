@@ -1378,8 +1378,8 @@ fn status_replay_allowed(status: u16, method: &str) -> bool {
 /// For a mutating method the code is the answer — the command already reached
 /// the object — and repeating it once the transfer settled would register,
 /// charge or delete a second time, so it is handed back as-is.
-fn code_replay_allowed(code: i32, method: &str) -> bool {
-    code == 2300 && is_read_only_method(method)
+fn code_replay_allowed(code: Option<i32>, method: &str) -> bool {
+    code == Some(2300) && is_read_only_method(method)
 }
 
 /// Whether a status leaves the outcome of `method` unknown: the request was

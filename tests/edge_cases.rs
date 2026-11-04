@@ -394,7 +394,7 @@ fn rpc_parsing_survives_arbitrary_bodies() {
     ));
 
     let scalar = RpcResponse::parse(br#"{"code":"2200","msg":"nope"}"#).unwrap();
-    assert_eq!(scalar.code, 2200);
+    assert_eq!(scalar.code, Some(2200));
     assert!(scalar.is_authentication());
 }
 

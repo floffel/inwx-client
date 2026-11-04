@@ -459,7 +459,7 @@ fn rpc_response_accessors() {
         br#"{"code":1000,"msg":"ok","resData":{"id":1},"svTRID":"abc","runtime":0.5,"details":[]}"#,
     )
     .unwrap();
-    assert_eq!(response.code, 1000);
+    assert_eq!(response.code, Some(1000));
     assert_eq!(response.msg, "ok");
     assert_eq!(response.sv_trid.as_deref(), Some("abc"));
     assert_eq!(response.runtime, Some(0.5));
@@ -471,7 +471,7 @@ fn rpc_response_accessors() {
     assert!(!response.is_authentication());
 
     let cloned = response.clone();
-    assert_eq!(cloned.code, 1000);
+    assert_eq!(cloned.code, Some(1000));
     let encoded = serde_json::to_string(&response).unwrap();
     assert!(encoded.contains("svTRID"));
 }
