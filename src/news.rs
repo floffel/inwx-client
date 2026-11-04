@@ -134,7 +134,7 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
-    /// for item in client.list_news(1, 20).await? {
+    /// for item in client.list_news(1, 20).await?.items {
     ///     println!("{:?} {:?}", item.date, item.title);
     /// }
     /// # Ok(())
@@ -143,16 +143,83 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// [`crate::Error::Validation`] when the page size is zero,
+    /// [`crate::Error::Validation`] when the page size is zero or above
+    /// [`crate::MAX_PAGE_SIZE`],
     /// [`crate::Error::UnexpectedAnswer`] when the answer carries no `news` list or a
     /// row cannot be decoded, plus the usual transport and API errors.
-    pub async fn list_news(&self, page: u32, limit: u32) -> Result<Vec<NewsItem>> {
+    pub async fn list_news(&self, page: u32, limit: u32) -> Result<NewsPage> {
         let limit = validate_page_limit(limit)?;
         let page = page.max(1);
         let data = self
             .call("news.list", json!({ "page": page, "pagelimit": limit }))
             .await?;
-        parse_news_page(&data, page)
+        let items = parse_news_page(&data, page)?;
+        Ok(NewsPage { items, page, limit })
+    }
+}
+
+/// One page of account news (`news.list`).
+///
+/// The API may clamp `pagelimit` to its own maximum, so
+/// [`NewsPage::has_more`] compares the returned row count with the page size
+/// this crate requested. A full page means the caller should request the next
+/// one before treating the result as complete.
+///
+/// ```
+/// use inwx_client::NewsPage;
+/// assert!(!NewsPage::default().has_more());
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewsPage {
+    /// The items on this page.
+    pub items: Vec<NewsItem>,
+    /// The 1-based page number that was requested.
+    pub page: u32,
+    /// The page size that was requested after validation.
+    pub limit: u32,
+}
+
+impl NewsPage {
+    /// Number of news items on this page.
+    ///
+    /// ```
+    /// use inwx_client::NewsPage;
+    ///
+    /// assert_eq!(NewsPage::default().len(), 0);
+    /// ```
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Whether this page carries no news items.
+    ///
+    /// ```
+    /// use inwx_client::NewsPage;
+    ///
+    /// assert!(NewsPage::default().is_empty());
+    /// ```
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// Whether the listing may continue past this page.
+    ///
+    /// This is `true` when the returned row count equals the requested page
+    /// size; a shorter page means the listing ended or was cut by a server-side
+    /// clamp.
+    ///
+    /// ```
+    /// use inwx_client::{NewsItem, NewsPage};
+    ///
+    /// let item = NewsItem::default();
+    /// let page = NewsPage { items: vec![item], page: 1, limit: 1 };
+    /// assert!(page.has_more());
+    /// ```
+    #[must_use]
+    pub fn has_more(&self) -> bool {
+        self.limit != 0 && self.items.len() == usize::try_from(self.limit).unwrap_or(usize::MAX)
     }
 }
 
@@ -198,8 +265,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_page_limit_of_one_is_accepted_and_zero_is_not() {
+    fn an_empty_or_short_page_is_complete_and_a_full_page_may_continue() {
+        let empty = NewsPage {
+            items: Vec::new(),
+            page: 1,
+            limit: 2,
+        };
+        assert!(empty.is_empty());
+        assert!(!empty.has_more());
+
+        let short = NewsPage {
+            items: vec![NewsItem::default()],
+            page: 1,
+            limit: 2,
+        };
+        assert_eq!(short.len(), 1);
+        assert!(!short.has_more());
+
+        let full = NewsPage {
+            items: vec![NewsItem::default(), NewsItem::default()],
+            page: 1,
+            limit: 2,
+        };
+        assert_eq!(full.len(), 2);
+        assert!(full.has_more());
+    }
+
+    #[test]
+    fn page_limits_are_bounded_before_the_wire() {
         assert_eq!(validate_page_limit(1).unwrap(), 1);
+        assert_eq!(
+            validate_page_limit(crate::MAX_PAGE_SIZE).unwrap(),
+            crate::MAX_PAGE_SIZE
+        );
+        assert!(validate_page_limit(crate::MAX_PAGE_SIZE + 1).is_err());
         assert!(validate_page_limit(0).is_err());
     }
 
