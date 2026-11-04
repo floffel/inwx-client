@@ -272,6 +272,35 @@ fn certificate_product_wildcard_is_a_plain_builder_step() {
 }
 
 #[tokio::test]
+async fn certificate_update_dry_run_alone_is_not_a_change() {
+    // Regression for #101: `testing` was inserted before the empty-update
+    // guard counted the fields, so `.dry_run()` on an otherwise empty update
+    // passed the guard and sent a no-op request.
+    let dry_only = CertificateUpdate::new(certificate_id()).unwrap().dry_run();
+    assert!(!dry_only.has_changes());
+    assert!(dry_only.params().is_err());
+
+    // The refusal happens before the transport: no request goes out.
+    let transport = MockTransport::new();
+    let client = client(transport.clone());
+    assert!(client.update_certificate_order(&dry_only).await.is_err());
+    assert!(client.renew_certificate(&dry_only).await.is_err());
+    assert_eq!(transport.call_count(), 0);
+
+    // One field — here `false`, the value closest to "unset" — is a change,
+    // and the dry-run flag then travels with it.
+    let real = CertificateUpdate::new(certificate_id())
+        .unwrap()
+        .with_hosting(false)
+        .dry_run();
+    assert!(real.has_changes());
+    let params = real.params().unwrap();
+    assert_eq!(params["certificateId"], 9);
+    assert_eq!(params["hosting"], false);
+    assert_eq!(params["testing"], true);
+}
+
+#[tokio::test]
 async fn certificate_validation_short_circuits() {
     let transport = MockTransport::new();
     let client = client_without_retries(transport.clone());

@@ -1273,20 +1273,80 @@ impl CertificateUpdate {
         self
     }
 
+    /// Whether a real field has been set.
+    ///
+    /// `dry_run` does not count: `testing` only asks the API to simulate the
+    /// command, so an update that carries nothing but that flag is still an
+    /// empty update and [`params`](Self::params) refuses to send it.
+    ///
+    /// ```rust
+    /// use inwx_client::{CertificateId, CertificateUpdate};
+    ///
+    /// // Nothing set at all: not a change.
+    /// assert!(!CertificateUpdate::new(CertificateId::new(9)?)?.has_changes());
+    /// // The dry-run flag alone is not a change either ...
+    /// assert!(!CertificateUpdate::new(CertificateId::new(9)?)?
+    ///     .dry_run()
+    ///     .has_changes());
+    /// // ... while one field is, with or without that flag.
+    /// assert!(CertificateUpdate::new(CertificateId::new(9)?)?
+    ///     .with_hosting(false)
+    ///     .has_changes());
+    /// assert!(CertificateUpdate::new(CertificateId::new(9)?)?
+    ///     .with_hosting(false)
+    ///     .dry_run()
+    ///     .has_changes());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn has_changes(&self) -> bool {
+        self.csr.is_some()
+            || self.common_name.is_some()
+            || !self.sans.is_empty()
+            || self.validation_method.is_some()
+            || self.validation_email.is_some()
+            || self.owner.is_some()
+            || self.admin.is_some()
+            || self.tech.is_some()
+            || self.hosting.is_some()
+            || self.autorenew.is_some()
+    }
+
     /// The `certificate.updateOrder` / `certificate.renew` parameters.
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when nothing was set.
+    /// [`Error::Validation`] when nothing was set. `dry_run` alone does not
+    /// count as a change — it asks for a simulation of a request that carries
+    /// no change, which the API rejects.
     ///
     /// ```
     /// use inwx_client::{CertificateId, CertificateUpdate};
     ///
     /// let update = CertificateUpdate::new(CertificateId::new(9)?)?;
     /// assert!(update.params().is_err());
+    /// // Just inside: the dry-run flag alone still carries no change.
+    /// assert!(CertificateUpdate::new(CertificateId::new(9)?)?
+    ///     .dry_run()
+    ///     .params()
+    ///     .is_err());
+    /// // Just outside: one field — even a `false` — is a change.
+    /// let update = CertificateUpdate::new(CertificateId::new(9)?)?
+    ///     .with_hosting(false)
+    ///     .dry_run();
+    /// let params = update.params()?;
+    /// assert_eq!(params["hosting"], false);
+    /// assert_eq!(params["testing"], true);
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     pub fn params(&self) -> Result<Value> {
+        if !self.has_changes() {
+            return Err(Error::validation(
+                "certificate.update",
+                "sets no field; add a change or skip the call \
+                 (`dry_run`/`testing` alone is not a change)",
+            ));
+        }
         let mut params = Map::new();
         params.insert("certificateId".to_owned(), json!(self.certificate_id.get()));
         if let Some(csr) = &self.csr {
@@ -1313,12 +1373,6 @@ impl CertificateUpdate {
         }
         if self.testing {
             params.insert("testing".to_owned(), json!(true));
-        }
-        if params.len() == 1 {
-            return Err(Error::validation(
-                "certificate.update",
-                "sets no field; add a change or skip the call",
-            ));
         }
         Ok(Value::Object(params))
     }
