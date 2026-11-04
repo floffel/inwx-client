@@ -105,21 +105,23 @@ impl PdfRender {
     /// # Errors
     ///
     /// [`Error::Validation`] when the format is not documented for PDF
-    /// rendering — [`DocumentFormat::Csv`] belongs to the zone exports.
+    /// rendering. [`DocumentFormat::Raw`] and [`DocumentFormat::Csv`] belong
+    /// to text exports, not PDF rendering.
     ///
     /// ```
     /// use inwx_client::{DocumentFormat, PdfRender};
     ///
-    /// let render = PdfRender::new("invoice", 1)?.with_format(DocumentFormat::Raw)?;
-    /// assert_eq!(render.params()?["format"], "RAW");
+    /// let render = PdfRender::new("invoice", 1)?.with_format(DocumentFormat::Pdf)?;
+    /// assert_eq!(render.params()?["format"], "PDF");
+    /// assert!(PdfRender::new("invoice", 1)?.with_format(DocumentFormat::Raw).is_err());
     /// assert!(PdfRender::new("invoice", 1)?.with_format(DocumentFormat::Csv).is_err());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     pub fn with_format(mut self, format: DocumentFormat) -> Result<Self> {
-        if format == DocumentFormat::Csv {
+        if format != DocumentFormat::Pdf {
             return Err(Error::validation(
                 "pdf.format",
-                "CSV is a zone export format, not a document format (RAW, PDF)",
+                "only PDF is a document format; RAW and CSV are text export formats",
             ));
         }
         self.format = Some(format);
@@ -281,9 +283,6 @@ pub struct PdfFile {
         deserialize_with = "de::opt_string"
     )]
     pub mime_type: Option<String>,
-    /// Raw text, when the request asked for `RAW`.
-    #[serde(default, deserialize_with = "de::opt_string")]
-    pub raw: Option<String>,
 }
 
 impl PdfFile {
@@ -424,10 +423,14 @@ mod tests {
     }
 
     #[test]
-    fn csv_is_not_a_document_format() {
+    fn only_pdf_is_a_document_format() {
         assert!(PdfRender::new("invoice", 1)
             .unwrap()
             .with_format(DocumentFormat::Csv)
+            .is_err());
+        assert!(PdfRender::new("invoice", 1)
+            .unwrap()
+            .with_format(DocumentFormat::Raw)
             .is_err());
         assert!(PdfRender::new("invoice", 1)
             .unwrap()

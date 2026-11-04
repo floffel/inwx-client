@@ -1085,14 +1085,14 @@ fn reseller_documents_and_pdfs_fill_their_parameters() {
         .unwrap()
         .with_customer_number(123_456)
         .unwrap()
-        .with_format(DocumentFormat::Raw)
+        .with_format(DocumentFormat::Pdf)
         .unwrap()
         .with_from(Timestamp::parse("2026-01-01T00:00:00").unwrap())
         .with_to(Timestamp::parse("2026-02-01T00:00:00").unwrap())
         .with_testing(true);
     let params = render.params().unwrap();
     assert_eq!(params["customerNumber"], 123_456);
-    assert_eq!(params["format"], "RAW");
+    assert_eq!(params["format"], "PDF");
     assert_eq!(params["testing"], true);
 
     let handles = NicHandleQuery::new()
