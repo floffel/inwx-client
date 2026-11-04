@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use subtle::ConstantTimeEq;
-use zeroize::Zeroize;
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 use crate::error::{retry_after_at, Error, HttpBody, Result};
 use crate::rpc::{not_an_object, RpcRequest, RpcResponse};
@@ -38,37 +38,6 @@ pub const DEFAULT_BASE_DELAY: Duration = Duration::from_millis(500);
 
 /// Default ceiling for the backoff.
 pub const DEFAULT_MAX_DELAY: Duration = Duration::from_secs(8);
-
-/// Largest length of a sub-account login name (`text64` on the wire).
-///
-/// A sub-account is unlocked by its login name, and the API stores that name as
-/// a `text64`. Anything longer is refused here instead of being truncated by the
-/// API, so the caller learns about the problem before a request is written.
-///
-/// ```
-/// use inwx_client::{Credentials, UnlockAccount, MAX_SUBACCOUNT_USERNAME_LEN};
-///
-/// assert_eq!(MAX_SUBACCOUNT_USERNAME_LEN, 64);
-///
-/// // Exactly at the limit is still valid.
-/// let at_limit = "a".repeat(MAX_SUBACCOUNT_USERNAME_LEN);
-/// assert_eq!(
-///     UnlockAccount::new(&at_limit)?.username().len(),
-///     MAX_SUBACCOUNT_USERNAME_LEN
-/// );
-///
-/// // One character too many is not.
-/// assert!(UnlockAccount::new(format!("{at_limit}x")).is_err());
-///
-/// // Blank names never identify anybody.
-/// assert!(UnlockAccount::new("").is_err());
-/// assert!(UnlockAccount::new("   ").is_err());
-///
-/// // The same limit is what a login name has to satisfy in the first place.
-/// assert_eq!(Credentials::new(at_limit, "pass")?.username().len(), 64);
-/// # Ok::<(), inwx_client::Error>(())
-/// ```
-pub const MAX_SUBACCOUNT_USERNAME_LEN: usize = 64;
 
 /// Language the API uses for `msg` and `reason`.
 ///
@@ -219,11 +188,11 @@ impl PartialEq for Credentials {
 impl Eq for Credentials {}
 
 /// Password storage that cannot be cloned and erases its contents on drop.
-struct Password(String);
+struct Password(Zeroizing<String>);
 
 impl Password {
     fn new(password: String) -> Self {
-        Self(password)
+        Self(Zeroizing::new(password))
     }
 
     fn expose(&self) -> &str {
@@ -239,11 +208,7 @@ impl PartialEq for Password {
 
 impl Eq for Password {}
 
-impl Drop for Password {
-    fn drop(&mut self) {
-        self.0.zeroize();
-    }
-}
+impl ZeroizeOnDrop for Password {}
 
 /// Checks borrowed credentials before either value is converted into a `String`.
 fn validate_credentials(username: &str, password: &str) -> Result<()> {
@@ -520,117 +485,6 @@ pub struct AccountInfo {
     /// Two-factor method, `"0"` when disabled.
     #[serde(rename = "tfa", default, deserialize_with = "de::opt_string")]
     pub two_factor: Option<String>,
-}
-
-/// Request for `account.unlock`, which clears the lock of a sub-account.
-///
-/// The API locks a sub-account after too many failed logins; this request names
-/// the sub-account whose lock should be removed. Only the login name travels,
-/// and it is validated against [`MAX_SUBACCOUNT_USERNAME_LEN`] before the
-/// request is built.
-///
-/// ```
-/// use inwx_client::UnlockAccount;
-///
-/// let request = UnlockAccount::new("sub-account")?;
-/// assert_eq!(request.username(), "sub-account");
-/// assert_eq!(request.params()["user"], "sub-account");
-/// # Ok::<(), inwx_client::Error>(())
-/// ```
-///
-/// A login name is not a secret — the password is what the API never sees here —
-/// so `Debug` prints it in the clear.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnlockAccount {
-    username: String,
-}
-
-impl UnlockAccount {
-    /// Validates and stores the login name of the sub-account to unlock.
-    ///
-    /// ```
-    /// use inwx_client::UnlockAccount;
-    ///
-    /// assert!(UnlockAccount::new("sub-account").is_ok());
-    /// assert!(UnlockAccount::new("  ").is_err());
-    /// assert!(UnlockAccount::new(&"a".repeat(65)).is_err());
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Validation`] when the name is blank, longer than
-    /// [`MAX_SUBACCOUNT_USERNAME_LEN`] characters, or contains a control
-    /// character.
-    pub fn new(username: impl Into<String>) -> Result<Self> {
-        let username = username.into();
-        crate::types::validate_text("unlock.user", &username, MAX_SUBACCOUNT_USERNAME_LEN)?;
-        // Newlines are fine in a free-text field but never in a login name; the
-        // API would answer such a request with `400` after the round trip.
-        if username.chars().any(char::is_control) {
-            return Err(Error::validation(
-                "unlock.user",
-                "must not contain control characters",
-            ));
-        }
-        Ok(Self { username })
-    }
-
-    /// The login name of the sub-account.
-    ///
-    /// ```
-    /// use inwx_client::UnlockAccount;
-    ///
-    /// assert_eq!(UnlockAccount::new("sub-account")?.username(), "sub-account");
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn username(&self) -> &str {
-        &self.username
-    }
-
-    /// The `account.unlock` parameters.
-    ///
-    /// ```
-    /// use inwx_client::UnlockAccount;
-    ///
-    /// let params = UnlockAccount::new("sub-account")?.params();
-    /// assert_eq!(params["user"], "sub-account");
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn params(&self) -> Value {
-        json!({ "user": self.username })
-    }
-}
-
-/// Answer of `account.unlock`.
-///
-/// Every field is optional and unknown keys are ignored, because the shape of
-/// this answer is derived from the neighbouring account methods rather than read
-/// from a published table (see `docs/contracts.md`). A field the derivation got
-/// wrong therefore costs a `None`, never a failed parse.
-///
-/// ```
-/// use inwx_client::AccountUnlock;
-///
-/// let answer: AccountUnlock = serde_json::from_value(serde_json::json!({
-///     "username": "sub-account",
-///     "state": "OPEN",
-///     "someFutureField": 1,
-/// }))?;
-/// assert_eq!(answer.username.as_deref(), Some("sub-account"));
-/// assert_eq!(answer.state.as_deref(), Some("OPEN"));
-/// # Ok::<(), serde_json::Error>(())
-/// ```
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-pub struct AccountUnlock {
-    /// Login name of the sub-account.
-    #[serde(default, deserialize_with = "de::opt_string")]
-    pub username: Option<String>,
-    /// State of the sub-account afterwards, e.g. `"OPEN"`.
-    #[serde(default, deserialize_with = "de::opt_string")]
-    pub state: Option<String>,
 }
 
 /// A JSON-RPC client for the INWX `DomRobot` API.
@@ -1147,110 +1001,6 @@ impl<T: Transport> InwxClient<T> {
         serde_json::from_value(data).map_err(Error::from)
     }
 
-    /// Changes the account password (`account.changepassword`).
-    ///
-    /// `current` is the password the account uses today; `new` is a
-    /// [`Password`](crate::types::Password), so it is validated on the way in, redacted in every
-    /// `Debug`/`Display` rendering and wiped from memory when the caller drops
-    /// it. Both secrets travel in the request body only, never in a URL or a
-    /// header.
-    ///
-    /// Two things happen to the session afterwards, and both are deliberate:
-    ///
-    /// * the locally cached cookie is dropped ([`is_authenticated`] returns
-    ///   `false`), because it was established with a password that no longer
-    ///   works — keeping it would leave a session the client cannot
-    ///   re-establish after an expiry;
-    /// * the credentials held by this client are now stale, so the next call
-    ///   would log in with a password the API rejects. Hand the new password to
-    ///   [`with_credentials`] to build a client that can keep working.
-    ///
-    /// A transport failure after the request was left unconfirmed is
-    /// [`Error::Uncertain`] and is never replayed here: once the old password
-    /// stops working, a retry is not a harmless repeat of a read.
-    ///
-    /// ```no_run
-    /// # #[cfg(feature = "http")]
-    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
-    /// use inwx_client::{InwxClient, Password, ReqwestTransport};
-    ///
-    /// let old = std::env::var("INWX_PASSWORD")?;
-    /// let new = Password::new(std::env::var("INWX_NEW_PASSWORD")?)?;
-    ///
-    /// let client = InwxClient::new(ReqwestTransport::new())
-    ///     .with_credentials("user", old.clone())?;
-    /// client.change_account_password(&old, &new).await?;
-    ///
-    /// // The old password is gone: keep using the client by rebuilding it
-    /// // with the new one.
-    /// assert!(!client.is_authenticated());
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Validation`] when `current` is blank, longer than
-    /// [`MAX_PASSWORD_LEN`](crate::MAX_PASSWORD_LEN) characters or contains a
-    /// control character; the usual transport and API errors otherwise.
-    ///
-    /// [`is_authenticated`]: Self::is_authenticated
-    /// [`with_credentials`]: Self::with_credentials
-    pub async fn change_account_password(
-        &self,
-        current: &str,
-        new: &crate::types::Password,
-    ) -> Result<()> {
-        // `crate::types::Password` (validated, zeroizing) is the public secret
-        // wrapper; `client::Password` stays the internal storage of `Credentials`.
-        let current = crate::types::Password::new(current)?;
-        self.call(
-            "account.changepassword",
-            json!({
-                "password": current.as_str(),
-                "newPassword": new.as_str(),
-            }),
-        )
-        .await?;
-        self.clear_session();
-        Ok(())
-    }
-
-    /// Removes the lock of a sub-account (`account.unlock`).
-    ///
-    /// INWX locks an account after repeated failed logins. This call clears that
-    /// lock for the sub-account named in `request` and needs the session of the
-    /// main account, so it logs in lazily like every other method here.
-    ///
-    /// ```no_run
-    /// # #[cfg(feature = "http")]
-    /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
-    /// use inwx_client::{InwxClient, ReqwestTransport, UnlockAccount};
-    ///
-    /// let client = InwxClient::new(ReqwestTransport::new())
-    ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
-    /// let answer = client.unlock_account(&UnlockAccount::new("sub-account")?).await?;
-    /// println!("state {:?}", answer.state);
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// The usual transport and API errors. The request mutates server state, so
-    /// an [`Error::Uncertain`] after a timeout or an [`Error::HttpUncertain`]
-    /// after a 5xx is terminal and is never replayed — the unlock may already
-    /// have happened.
-    pub async fn unlock_account(&self, request: &UnlockAccount) -> Result<AccountUnlock> {
-        let data = self.call("account.unlock", request.params()).await?;
-        if data.is_null() {
-            // INWX answers a plain success without `resData`; every field of the
-            // derived answer is optional, so that is the empty answer.
-            return Ok(AccountUnlock::default());
-        }
-        serde_json::from_value(data).map_err(Error::from)
-    }
-
     /// Calls any method and returns its `resData`.
     ///
     /// This is the escape hatch for the parts of the API this crate does not
@@ -1486,6 +1236,7 @@ const READ_ONLY_METHODS: &[&str] = &[
     "account.check",
     "account.getroles",
     "account.info",
+    "account.list",
     "accounting.accountbalance",
     "accounting.creditlogbyid",
     "accounting.getinvoice",
@@ -2015,6 +1766,14 @@ mod tests {
         assert!(!is_read_only_method("account.addrole"));
         assert!(!is_read_only_method("account.removerole"));
 
+        // The account namespace: reads may be replayed, every mutation may
+        // not. `account.check` and `account.list` only observe state.
+        assert!(is_read_only_method("account.check"));
+        assert!(is_read_only_method("account.list"));
+        assert!(!is_read_only_method("account.update"));
+        assert!(!is_read_only_method("account.create"));
+        assert!(!is_read_only_method("account.delete"));
+
         // The price endpoints added for issue #63 sit exactly on the line:
         // neighbour spellings that the API does not have stay mutating.
         for method in [
@@ -2112,65 +1871,6 @@ mod tests {
         assert!(!login_replay_allowed(&Error::Undecodable { source: cut }));
         // The gate is login-specific because the method is not read-only.
         assert!(!is_read_only_method("account.login"));
-    }
-
-    #[test]
-    fn unlock_name_limit_is_proven_from_both_sides() {
-        // Valid, exactly at the limit, one character past it.
-        assert!(UnlockAccount::new("sub-account").is_ok());
-        assert!(UnlockAccount::new("a".repeat(MAX_SUBACCOUNT_USERNAME_LEN)).is_ok());
-        let too_long = "a".repeat(MAX_SUBACCOUNT_USERNAME_LEN + 1);
-        let error = UnlockAccount::new(too_long).unwrap_err();
-        assert!(
-            error.to_string().contains("64 characters"),
-            "unexpected message: {error}"
-        );
-
-        // Blank never identifies a sub-account.
-        assert!(UnlockAccount::new("").is_err());
-        assert!(UnlockAccount::new("   ").is_err());
-        // A newline is legal in free text but not in a login name.
-        assert!(UnlockAccount::new("us\ner").is_err());
-        assert!(UnlockAccount::new("nul\u{0}byte").is_err());
-    }
-
-    #[test]
-    fn unlock_request_names_the_sub_account() {
-        let request = UnlockAccount::new("sub-account").unwrap();
-        assert_eq!(request.username(), "sub-account");
-        assert_eq!(request.params(), json!({ "user": "sub-account" }));
-        assert_eq!(request.clone(), request);
-        assert_eq!(request, UnlockAccount::new("sub-account").unwrap());
-        assert_ne!(request, UnlockAccount::new("other").unwrap());
-        // A login name is not a secret, so Debug may show it.
-        assert!(format!("{request:?}").contains("sub-account"));
-    }
-
-    #[test]
-    fn unlock_answer_decodes_permissively() {
-        // Unknown keys are ignored, numbers are accepted as strings.
-        let answer: AccountUnlock = serde_json::from_value(json!({
-            "username": "sub-account",
-            "state": 1,
-            "someFutureField": {"nested": true},
-        }))
-        .unwrap();
-        assert_eq!(answer.username.as_deref(), Some("sub-account"));
-        assert_eq!(answer.state.as_deref(), Some("1"));
-
-        // Missing fields are `None`, never an error; `Default` matches.
-        let empty: AccountUnlock = serde_json::from_value(json!({})).unwrap();
-        assert_eq!(empty, AccountUnlock::default());
-        assert_eq!(empty.username, None);
-        assert_eq!(empty.state, None);
-
-        // Single-word keys are spelled the same in snake_case and camelCase, so
-        // both source styles land in the same field.
-        let a: AccountUnlock =
-            serde_json::from_value(json!({"username": "x", "state": "OPEN"})).unwrap();
-        let b: AccountUnlock =
-            serde_json::from_value(json!({"username": "x", "state": "OPEN"})).unwrap();
-        assert_eq!(a, b);
     }
 
     #[test]

@@ -134,6 +134,10 @@ impl AuthInfo2Order {
 /// documented `float`s and arrive as numbers or as numeric strings; both spell-
 /// ings of each key (`net_price` and `netPrice`) are accepted.
 ///
+/// The struct is `#[non_exhaustive]`: new fields can be modelled later without
+/// breaking downstream code, and callers build values with [`Default`] or
+/// deserialization.
+///
 /// ```
 /// use inwx_client::AuthInfo2OrderResult;
 ///
@@ -148,6 +152,7 @@ impl AuthInfo2Order {
 /// # Ok::<(), serde_json::Error>(())
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[non_exhaustive]
 pub struct AuthInfo2OrderResult {
     /// The `AuthInfo2` product that was ordered.
     #[serde(default, deserialize_with = "de::opt_string")]
@@ -168,6 +173,10 @@ pub struct AuthInfo2OrderResult {
 
 /// The answer of `authinfo2.getprice`: what an `AuthInfo2` order costs.
 ///
+/// The struct is `#[non_exhaustive]`: new fields can be modelled later without
+/// breaking downstream code, and callers build values with [`Default`] or
+/// deserialization.
+///
 /// ```
 /// use inwx_client::AuthInfo2PriceQuote;
 ///
@@ -180,6 +189,7 @@ pub struct AuthInfo2OrderResult {
 /// # Ok::<(), serde_json::Error>(())
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[non_exhaustive]
 pub struct AuthInfo2PriceQuote {
     /// The product the quote is for.
     #[serde(default, deserialize_with = "de::opt_string")]

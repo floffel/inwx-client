@@ -7,7 +7,8 @@ mod common;
 use common::{anonymous_client, client, client_without_retries, no_wait, MockTransport, Reply};
 use inwx_client::{
     transport::{Request, Response, Transport},
-    DomainListQuery, DomainName, Error, InwxClient, Password, RetryPolicy, UnlockAccount,
+    AccountPasswordChange, AccountUnlockRequest, DomainListQuery, DomainName, Error, InwxClient,
+    Password, RetryPolicy,
 };
 use serde_json::json;
 
@@ -404,19 +405,23 @@ async fn change_password_sends_both_secrets_in_the_body_only() {
     transport.ok_empty();
 
     let client = client(transport.clone());
-    client
-        .change_account_password("old secret", &Password::new("brand new secret").unwrap())
-        .await
-        .unwrap();
+    let request = AccountPasswordChange::new(
+        "user",
+        Password::new("old secret").unwrap(),
+        Password::new("brand new secret").unwrap(),
+    )
+    .unwrap();
+    client.change_account_password(&request).await.unwrap();
 
     let call = transport.only_call();
     assert_eq!(call.method, "account.changepassword");
-    assert_eq!(call.params["password"], "old secret");
-    assert_eq!(call.params["newPassword"], "brand new secret");
+    assert_eq!(call.params["username"], "user");
+    assert_eq!(call.params["currentpassword"], "old secret");
+    assert_eq!(call.params["password"], "brand new secret");
     assert!(call
         .params
         .as_object()
-        .is_some_and(|params| params.len() == 2));
+        .is_some_and(|params| params.len() == 3));
     assert!(
         !call.url.contains("secret"),
         "url leaked a secret: {}",
@@ -436,10 +441,13 @@ async fn change_password_drops_the_session_after_success() {
 
     let client = client(transport.clone());
     assert!(client.is_authenticated());
-    client
-        .change_account_password("old", &Password::new("brand new").unwrap())
-        .await
-        .unwrap();
+    let request = AccountPasswordChange::new(
+        "user",
+        Password::new("old").unwrap(),
+        Password::new("brand new").unwrap(),
+    )
+    .unwrap();
+    client.change_account_password(&request).await.unwrap();
 
     assert!(!client.is_authenticated());
     assert_eq!(transport.call_count(), 1);
@@ -454,10 +462,13 @@ async fn change_password_logs_in_first_when_there_is_no_session() {
     transport.ok_empty();
 
     let client = anonymous_client(transport.clone());
-    client
-        .change_account_password("test-pass", &Password::new("brand new").unwrap())
-        .await
-        .unwrap();
+    let request = AccountPasswordChange::new(
+        "test-user",
+        Password::new("test-pass").unwrap(),
+        Password::new("brand new").unwrap(),
+    )
+    .unwrap();
+    client.change_account_password(&request).await.unwrap();
 
     let calls = transport.calls();
     assert_eq!(calls.len(), 2);
@@ -474,10 +485,13 @@ async fn a_rejected_change_keeps_the_session() {
     transport.api_error(2005, "Parameter value syntax error");
 
     let client = client(transport.clone());
-    let error = client
-        .change_account_password("old", &Password::new("brand new").unwrap())
-        .await
-        .unwrap_err();
+    let request = AccountPasswordChange::new(
+        "user",
+        Password::new("old").unwrap(),
+        Password::new("brand new").unwrap(),
+    )
+    .unwrap();
+    let error = client.change_account_password(&request).await.unwrap_err();
 
     assert_eq!(error.code(), Some(2005));
     assert!(client.is_authenticated());
@@ -493,10 +507,13 @@ async fn an_uncertain_change_password_is_not_retried() {
     transport.ok_empty();
 
     let client = client(transport.clone());
-    let error = client
-        .change_account_password("old", &Password::new("brand new").unwrap())
-        .await
-        .unwrap_err();
+    let request = AccountPasswordChange::new(
+        "user",
+        Password::new("old").unwrap(),
+        Password::new("brand new").unwrap(),
+    )
+    .unwrap();
+    let error = client.change_account_password(&request).await.unwrap_err();
 
     assert!(error.is_uncertain());
     assert!(!error.is_retryable());
@@ -512,10 +529,7 @@ async fn a_blank_current_password_is_refused_before_the_call() {
     transport.ok_empty();
 
     let client = client(transport.clone());
-    let error = client
-        .change_account_password("   ", &Password::new("brand new").unwrap())
-        .await
-        .unwrap_err();
+    let error = Password::new("   ").unwrap_err();
 
     assert!(matches!(error, Error::Validation { .. }));
     assert_eq!(transport.call_count(), 0);
@@ -676,7 +690,7 @@ async fn a_transient_status_on_a_write_carries_no_retry_after() {
 
     let client = client_without_retries(transport);
     let error = client
-        .unlock_account(&UnlockAccount::new("sub-account").unwrap())
+        .unlock_account(&AccountUnlockRequest::new().unwrap())
         .await
         .unwrap_err();
 
@@ -1173,26 +1187,40 @@ async fn code_zero_is_not_success() {
     assert_eq!(error.code(), Some(0));
 }
 
-/// `account.unlock` is a mutating command on the main account, so it must land
-/// on the wire with exactly the derived parameter name and nothing else.
+/// `account.unlock` is a mutating command on the current account, so it must
+/// land on the wire with exactly the documented parameters.
 #[tokio::test]
-async fn unlocking_sends_the_sub_account_name() {
+async fn unlocking_sends_only_the_documented_tan() {
     let transport = MockTransport::new();
-    transport.ok(json!({"username": "sub-account", "state": "OPEN"}));
+    transport.ok_empty();
 
     let client = client(transport.clone());
-    let answer = client
-        .unlock_account(&UnlockAccount::new("sub-account").unwrap())
-        .await
+    let request = AccountUnlockRequest::new()
+        .unwrap()
+        .with_tan("123456")
         .unwrap();
-
-    assert_eq!(answer.username.as_deref(), Some("sub-account"));
-    assert_eq!(answer.state.as_deref(), Some("OPEN"));
+    client.unlock_account(&request).await.unwrap();
 
     let call = transport.only_call();
     assert_eq!(call.method, "account.unlock");
-    assert_eq!(call.params, json!({"user": "sub-account"}));
+    assert_eq!(call.params, json!({ "tan": "123456" }));
     assert_eq!(call.url, "https://inwx.test/jsonrpc/");
+}
+
+#[tokio::test]
+async fn unlocking_without_a_tan_sends_an_empty_object() {
+    let transport = MockTransport::new();
+    transport.ok_empty();
+
+    let client = client(transport.clone());
+    client
+        .unlock_account(&AccountUnlockRequest::new().unwrap())
+        .await
+        .unwrap();
+
+    let call = transport.only_call();
+    assert_eq!(call.method, "account.unlock");
+    assert_eq!(call.params, json!({}));
 }
 
 /// The method is not one of the public ones, so a client without a session has
@@ -1201,15 +1229,19 @@ async fn unlocking_sends_the_sub_account_name() {
 async fn unlocking_logs_in_lazily() {
     let transport = MockTransport::new();
     transport.login("domrobot=abc123");
-    transport.ok(json!({"username": "sub-account", "state": "OPEN"}));
+    transport.ok_empty();
 
     let client = anonymous_client(transport.clone());
-    let answer = client
-        .unlock_account(&UnlockAccount::new("sub-account").unwrap())
+    client
+        .unlock_account(
+            &AccountUnlockRequest::new()
+                .unwrap()
+                .with_tan("123456")
+                .unwrap(),
+        )
         .await
         .unwrap();
 
-    assert_eq!(answer.state.as_deref(), Some("OPEN"));
     let calls = transport.calls();
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[0].method, "account.login");
@@ -1217,53 +1249,15 @@ async fn unlocking_logs_in_lazily() {
     assert_eq!(calls[1].header("cookie"), Some("domrobot=abc123"));
 }
 
-/// The answer shape is derived, so a field the API adds later must not break a
-/// successful unlock.
+/// An unknown account is a plain API error, mapped with its code.
 #[tokio::test]
-async fn an_unlock_answer_with_unknown_fields_still_decodes() {
-    let transport = MockTransport::new();
-    transport.ok(json!({
-        "username": "sub-account",
-        "state": "OPEN",
-        "unknown": 1,
-        "type": {"nested": true},
-    }));
-
-    let client = client(transport);
-    let answer = client
-        .unlock_account(&UnlockAccount::new("sub-account").unwrap())
-        .await
-        .unwrap();
-
-    assert_eq!(answer.username.as_deref(), Some("sub-account"));
-    assert_eq!(answer.state.as_deref(), Some("OPEN"));
-}
-
-/// A success envelope without `resData` is still a completed unlock; nothing in
-/// the derived shape is required.
-#[tokio::test]
-async fn an_unlock_answer_may_be_empty() {
-    let transport = MockTransport::new();
-    transport.ok_empty();
-
-    let client = client(transport);
-    let answer = client
-        .unlock_account(&UnlockAccount::new("sub-account").unwrap())
-        .await
-        .unwrap();
-
-    assert_eq!(answer, inwx_client::AccountUnlock::default());
-}
-
-/// An unknown sub-account is a plain API error, mapped with its code.
-#[tokio::test]
-async fn unlocking_an_unknown_sub_account_is_an_api_error() {
+async fn unlocking_an_unknown_account_is_an_api_error() {
     let transport = MockTransport::new();
     transport.api_error(2303, "Object does not exist");
 
     let client = client(transport.clone());
     let error = client
-        .unlock_account(&UnlockAccount::new("nobody").unwrap())
+        .unlock_account(&AccountUnlockRequest::new().unwrap())
         .await
         .unwrap_err();
 
@@ -1272,50 +1266,17 @@ async fn unlocking_an_unknown_sub_account_is_an_api_error() {
     assert_eq!(transport.call_count(), 1);
 }
 
-/// The boundary of the answer shape, from both sides: an explicit `resData: null`
-/// and an empty object are both a completed unlock with nothing reported, while
-/// a `resData` that is not an object at all is a malformed answer and must be
-/// reported as [`Error::Json`] instead of being swallowed.
-#[tokio::test]
-async fn a_non_object_unlock_answer_is_a_json_error() {
-    for answer in [json!(null), json!({})] {
-        let transport = MockTransport::new();
-        transport.ok(answer);
-
-        let client = client(transport.clone());
-        let result = client
-            .unlock_account(&UnlockAccount::new("sub-account").unwrap())
-            .await;
-
-        assert_eq!(result.unwrap(), inwx_client::AccountUnlock::default());
-        assert_eq!(transport.call_count(), 1);
-    }
-
-    let transport = MockTransport::new();
-    transport.ok(json!(5));
-
-    let client = client(transport.clone());
-    let error = client
-        .unlock_account(&UnlockAccount::new("sub-account").unwrap())
-        .await
-        .unwrap_err();
-
-    assert!(matches!(error, Error::Json { .. }), "{error}");
-    assert!(!error.is_retryable());
-    assert_eq!(transport.call_count(), 1);
-}
-
-/// A timeout after `account.unlock` may already have unlocked the sub-account,
-/// so the client hands the ambiguity back instead of unlocking twice.
+/// A timeout after `account.unlock` may already have unlocked the account, so
+/// the client hands the ambiguity back instead of unlocking twice.
 #[tokio::test]
 async fn an_uncertain_unlock_is_not_replayed() {
     let transport = MockTransport::new();
     transport.uncertain_failure("timeout waiting for response");
-    transport.ok(json!({"state": "OPEN"}));
+    transport.ok_empty();
 
     let client = client(transport.clone());
     let error = client
-        .unlock_account(&UnlockAccount::new("sub-account").unwrap())
+        .unlock_account(&AccountUnlockRequest::new().unwrap())
         .await
         .unwrap_err();
 
@@ -1331,46 +1292,42 @@ async fn an_uncertain_unlock_is_not_replayed() {
 async fn an_unlock_that_never_left_is_retried() {
     let transport = MockTransport::new();
     transport.transport_failure("connection reset");
-    transport.ok(json!({"state": "OPEN"}));
+    transport.ok_empty();
 
     let client = client(transport.clone());
-    let answer = client
-        .unlock_account(&UnlockAccount::new("sub-account").unwrap())
+    client
+        .unlock_account(&AccountUnlockRequest::new().unwrap())
         .await
         .unwrap();
 
-    assert_eq!(answer.state.as_deref(), Some("OPEN"));
     assert_eq!(transport.call_count(), 2);
 }
 
-/// The 64-character limit is proven from both sides where it is enforced: on the
-/// way into the request. A name at the limit goes on the wire unchanged; one
-/// character more is refused before a client is ever consulted, so the transport
-/// sees nothing.
+/// The TAN limit is enforced on the way into the request. A value at the limit
+/// goes on the wire unchanged; one character more is refused before a client is
+/// ever consulted, so the transport sees nothing.
 #[tokio::test]
-async fn a_name_at_the_limit_goes_on_the_wire_and_one_more_does_not() {
-    let at_limit = "a".repeat(inwx_client::MAX_SUBACCOUNT_USERNAME_LEN);
+async fn a_tan_at_the_limit_goes_on_the_wire_and_one_more_does_not() {
+    let at_limit = "1".repeat(10);
     let transport = MockTransport::new();
-    transport.ok(json!({"username": at_limit.clone(), "state": "OPEN"}));
+    transport.ok_empty();
 
     let client = client(transport.clone());
-    let answer = client
-        .unlock_account(&UnlockAccount::new(at_limit.clone()).unwrap())
-        .await
+    let request = AccountUnlockRequest::new()
+        .unwrap()
+        .with_tan(at_limit.clone())
         .unwrap();
+    client.unlock_account(&request).await.unwrap();
 
-    assert_eq!(answer.username.as_deref(), Some(at_limit.as_str()));
     let call = transport.only_call();
-    assert_eq!(call.params["user"], at_limit);
+    assert_eq!(call.params["tan"], at_limit);
 
-    // One character past the limit: the request cannot even be built.
-    let error = UnlockAccount::new(format!("{at_limit}x")).unwrap_err();
+    let error = AccountUnlockRequest::new()
+        .unwrap()
+        .with_tan(format!("{at_limit}1"))
+        .unwrap_err();
     assert!(error.is_validation());
-    assert!(error.to_string().contains("unlock.user"), "{error}");
-
-    // Blank never identifies a sub-account either, and stays off the wire.
-    assert!(UnlockAccount::new("").is_err());
-    assert!(UnlockAccount::new("   ").is_err());
+    assert!(error.to_string().contains("account.unlock.tan"), "{error}");
     assert_eq!(transport.call_count(), 1);
 }
 
@@ -1380,7 +1337,7 @@ async fn unlocking_without_authentication_never_reaches_the_transport() {
     let transport = MockTransport::new();
     let client = InwxClient::new(transport.clone());
     let error = client
-        .unlock_account(&UnlockAccount::new("sub-account").unwrap())
+        .unlock_account(&AccountUnlockRequest::new().unwrap())
         .await
         .unwrap_err();
 

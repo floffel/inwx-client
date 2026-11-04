@@ -12,15 +12,16 @@ use inwx_client::{
     is_read_only_method,
     rpc::{self, Detail, RpcRequest, RpcResponse},
     transport::{Request, Response, TransportStage},
-    AccountInfo, AccountUnlock, AuthCode, AuthInfoUpdate, ClientHoldResult, Contact, ContactQuery,
-    ContactRequest, ContactType, ContactUpdate, Credentials, DnsRecord, DomainCheck,
-    DomainControlResult, DomainCreate, DomainInfo, DomainListPage, DomainListQuery, DomainLog,
-    DomainLogEntry, DomainLogQuery, DomainName, DomainPriceQuote, DomainRenew, DomainRule,
-    DomainStat, DomainStats, DomainUpdate, Error, ExtraDataRule, Hostname, InwxClient, Language,
-    NameserverCheck, Period, PriceChange, PriceList, PriceType, PromoCode, RecordId, RecordSpec,
-    RecordType, RecordUpdate, RemoveClientHold, RenewalMode, RetryPolicy, SetClientHold, TldGroup,
-    TldGroupList, TldPrice, TldRules, TransferCodeUpdate, UnlockAccount, ZoneInfo, ZoneListPage,
-    ZoneSummary, MAX_SUBACCOUNT_USERNAME_LEN,
+    AccountCheck, AccountInfo, AccountRoleId, AccountUnlockRequest, AuthCode, AuthInfoUpdate,
+    ClientHoldResult, Contact, ContactQuery, ContactRequest, ContactType, ContactUpdate,
+    Credentials, DnsRecord, DomainCheck, DomainControlResult, DomainCreate, DomainInfo,
+    DomainListPage, DomainListQuery, DomainLog, DomainLogEntry, DomainLogQuery, DomainName,
+    DomainPriceQuote, DomainRenew, DomainRule, DomainStat, DomainStats, DomainUpdate, Error,
+    ExtraDataRule, Hostname, InwxClient, Language, NameserverCheck, Period, PriceChange, PriceList,
+    PriceType, PromoCode, RecordId, RecordSpec, RecordType, RecordUpdate, RemoveClientHold,
+    RenewalMode, RetryPolicy, SetClientHold, SubAccount, SubAccountCreated, SubAccountList,
+    SubAccountsDeleted, TldGroup, TldGroupList, TldPrice, TldRules, TransferCodeUpdate, ZoneInfo,
+    ZoneListPage, ZoneSummary,
 };
 use serde_json::{json, Value};
 
@@ -761,38 +762,59 @@ fn response_payload_types_are_constructible_and_comparable() {
     let contact = Contact::default();
     assert!(contact.handle().is_none());
     assert!(AccountInfo::default().account_id.is_none());
+}
 
-    let unlock = AccountUnlock::default();
-    assert!(unlock.username.is_none());
-    assert!(unlock.state.is_none());
-
-    // Unknown keys are ignored and a number arrives as a string.
-    let answer: AccountUnlock = serde_json::from_value(json!({
-        "username": "sub-account",
-        "state": "OPEN",
+#[test]
+fn account_payload_types_are_constructible_and_comparable() {
+    let check: AccountCheck = serde_json::from_value(json!({
+        "user": "sub-account",
         "someFutureField": 1,
     }))
     .unwrap();
+    assert_eq!(check.user.as_deref(), Some("sub-account"));
+    assert_eq!(AccountCheck::default().user, None);
+
+    let account: SubAccount = serde_json::from_value(json!({
+        "id": "7",
+        "username": "sub",
+        "tfaEnabled": 1,
+        "someFutureField": true,
+    }))
+    .unwrap();
+    assert_eq!(account.id, Some(7));
+    assert_eq!(account.two_factor_enabled, Some(true));
+
+    let list: SubAccountList = serde_json::from_value(json!({
+        "adminId": "1",
+        "accounts": [{"id":"7","username":"sub","tfaEnabled":"1"}],
+    }))
+    .unwrap();
+    assert_eq!(list.admin_id, Some(1));
+    assert_eq!(list.accounts.len(), 1);
+    assert_eq!(SubAccountList::default().accounts, Vec::<SubAccount>::new());
+
+    let created: SubAccountCreated = serde_json::from_value(json!({"id": "4711"})).unwrap();
+    assert_eq!(created.id, Some(4711));
+    let deleted: SubAccountsDeleted = serde_json::from_value(json!({"countDeleted": "2"})).unwrap();
+    assert_eq!(deleted.count_deleted, Some(2));
+
+    assert_eq!(AccountRoleId::from_id(20_004), AccountRoleId::Dns);
+    assert_eq!(AccountRoleId::Dns.id(), 20_004);
+    assert_eq!(AccountRoleId::Dns.name(), Some("DNS"));
+    assert_eq!(AccountRoleId::Other(20_999).name(), None);
     assert_eq!(
-        answer,
-        AccountUnlock {
-            username: Some("sub-account".into()),
-            state: Some("OPEN".into()),
-        }
+        "20000".parse::<AccountRoleId>().unwrap(),
+        AccountRoleId::Standard
     );
-    assert_eq!(answer.clone(), answer);
+    assert!("0".parse::<AccountRoleId>().is_err());
 
-    assert_eq!(MAX_SUBACCOUNT_USERNAME_LEN, 64);
-    let at_limit = "a".repeat(MAX_SUBACCOUNT_USERNAME_LEN);
-    assert!(UnlockAccount::new(&at_limit).is_ok());
-    assert!(UnlockAccount::new(format!("{at_limit}x")).is_err());
-
-    let request = UnlockAccount::new("sub-account").unwrap();
-    assert_eq!(request.username(), "sub-account");
-    assert_eq!(request.params(), json!({ "user": "sub-account" }));
+    let request = AccountUnlockRequest::new()
+        .unwrap()
+        .with_tan("123456")
+        .unwrap();
+    assert_eq!(request.params().unwrap()["tan"], "123456");
     assert_eq!(request.clone(), request);
-    assert_eq!(request, UnlockAccount::new("sub-account").unwrap());
-    assert_ne!(request, UnlockAccount::new("other").unwrap());
+    assert_ne!(request, AccountUnlockRequest::new().unwrap());
 }
 
 #[test]
