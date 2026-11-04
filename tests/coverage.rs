@@ -603,12 +603,15 @@ fn accounting_query_branches() {
 }
 
 #[tokio::test]
-async fn accounting_answers_without_arrays_are_tolerated() {
+async fn accounting_answers_without_the_invoice_array_are_reported() {
     let transport = MockTransport::new();
     transport.ok(json!({}));
 
-    let invoices = client(transport).list_invoices().await.unwrap();
-    assert_eq!(invoices.len(), 0);
+    let error = client(transport).list_invoices().await.unwrap_err();
+    assert!(matches!(
+        error,
+        inwx_client::Error::UnexpectedAnswer { field, .. } if field == "invoice"
+    ));
 }
 
 #[tokio::test]

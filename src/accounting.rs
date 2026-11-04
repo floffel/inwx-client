@@ -225,6 +225,26 @@ pub struct Invoice {
     pub kind: Option<String>,
 }
 
+fn invoice_id_hint(entry: &Value) -> Option<String> {
+    entry.get("invoiceId").and_then(|value| match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        Value::Null | Value::Array(_) | Value::Object(_) => None,
+    })
+}
+
+fn value_shape(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
+}
+
 /// One locked-funds entry (`accounting.lockedFunds`).
 ///
 /// ```
@@ -1093,17 +1113,48 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// The usual transport and API errors.
+    /// [`Error::UnexpectedAnswer`] when the answer has no `invoice` array or
+    /// an invoice entry that does not parse, plus the usual transport and API
+    /// errors. An empty array is a successful empty list.
     pub async fn list_invoices(&self) -> Result<Vec<Invoice>> {
         let data = self.call("accounting.listInvoices", json!({})).await?;
         let entries = match data.get("invoice") {
-            Some(Value::Array(entries)) => entries.clone(),
-            _ => Vec::new(),
+            Some(Value::Array(entries)) => entries,
+            Some(other) => {
+                return Err(Error::unexpected_answer(
+                    "accounting.listInvoices",
+                    "invoice",
+                    format!(
+                        "expected an array of invoices, found {}",
+                        value_shape(other)
+                    ),
+                ))
+            }
+            None => {
+                return Err(Error::unexpected_answer(
+                    "accounting.listInvoices",
+                    "invoice",
+                    "expected an array of invoices",
+                ))
+            }
         };
-        Ok(entries
-            .into_iter()
-            .filter_map(|entry| serde_json::from_value(entry).ok())
-            .collect())
+        entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                serde_json::from_value(entry.clone()).map_err(|error| {
+                    let context = invoice_id_hint(entry).map_or_else(
+                        || format!("entry {index} without a usable invoiceId"),
+                        |invoice_id| format!("entry {index} with invoiceId `{invoice_id}`"),
+                    );
+                    Error::unexpected_answer(
+                        "accounting.listInvoices",
+                        "invoice",
+                        format!("{context} does not parse: {error}"),
+                    )
+                })
+            })
+            .collect()
     }
 
     /// Reads the locked-funds log (`accounting.lockedFunds`).
