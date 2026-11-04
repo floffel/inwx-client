@@ -17,7 +17,7 @@ use zeroize::Zeroize;
 use crate::error::{retry_after_at, Error, HttpBody, Result};
 use crate::rpc::{not_an_object, RpcRequest, RpcResponse};
 use crate::session::{SessionGate, Turn};
-use crate::transport::{Request, Response, Transport};
+use crate::transport::{Request, Response, Transport, TransportStage};
 use crate::types::de;
 
 /// Longest account username accepted by the `account.login` `text64` field.
@@ -1082,7 +1082,7 @@ impl<T: Transport> InwxClient<T> {
         let envelope = RpcResponse::parse_answer(response.body())?;
         envelope.into_result()?;
 
-        let cookie = collect_cookies(&response);
+        let cookie = collect_cookies(&response)?;
         if cookie.is_empty() {
             return Err(Error::Authentication {
                 message: "login succeeded but the response carried no session cookie".to_owned(),
@@ -1662,10 +1662,18 @@ fn retry_after_in(response: &Response) -> Option<Duration> {
 ///
 /// Attributes (`Path`, `Domain`, `HttpOnly`, …) are dropped: only the
 /// `name=value` pair belongs in the request header. Duplicate names keep the
-/// last value, which is what a browser cookie jar would do.
-fn collect_cookies(response: &Response) -> String {
+/// last value, which is what a browser cookie jar would do. A `Set-Cookie`
+/// value that is not valid UTF-8 is a typed transport error: the real value is
+/// not text, and silently dropping it would install no session.
+fn collect_cookies(response: &Response) -> Result<String> {
     let mut pairs: Vec<String> = Vec::new();
-    for header in response.header_all("set-cookie") {
+    for header in response.header_all_bytes("set-cookie") {
+        let header = std::str::from_utf8(header).map_err(|_| {
+            Error::transport_at(
+                TransportStage::AfterSend,
+                "login response carried a Set-Cookie header that is not valid UTF-8",
+            )
+        })?;
         let pair = header.split(';').next().unwrap_or("").trim();
         if pair.is_empty() || pair.contains('\n') || pair.contains('\r') {
             continue;
@@ -1680,7 +1688,7 @@ fn collect_cookies(response: &Response) -> String {
         pairs.retain(|existing: &String| !existing.starts_with(&format!("{name}=")));
         pairs.push(pair.to_owned());
     }
-    pairs.join("; ")
+    Ok(pairs.join("; "))
 }
 
 /// A uniform sample from `[0, 1)` that scales this retry's backoff.
@@ -1935,7 +1943,21 @@ mod tests {
             ],
             Vec::new(),
         );
-        assert_eq!(collect_cookies(&response), "other=x; domrobot=s2");
+        assert_eq!(collect_cookies(&response).unwrap(), "other=x; domrobot=s2");
+    }
+
+    #[test]
+    fn a_non_utf8_cookie_is_a_typed_uncertain_error() {
+        let response = Response::from_header_bytes(
+            200,
+            [("Set-Cookie".to_string(), vec![0xff, 0xfe])],
+            Vec::new(),
+        );
+        let error = collect_cookies(&response).unwrap_err();
+        assert!(matches!(error, Error::Uncertain { .. }), "{error:?}");
+        assert!(error.is_uncertain());
+        assert!(!error.is_retryable());
+        assert!(error.to_string().contains("Set-Cookie"), "{error}");
     }
 
     #[test]
