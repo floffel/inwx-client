@@ -538,6 +538,8 @@ proptest! {
 
     #[test]
     fn zone_params_round_trip_through_json(label in "[a-z0-9]([a-z0-9-]{0,20}[a-z0-9])?") {
+        // `xn--` begins an A-label; a random one is not valid punycode.
+        prop_assume!(!label.starts_with("xn--"));
         let domain = DomainName::parse(&format!("{label}.example.com")).unwrap();
         let zone = ZoneCreate::master(domain.clone()).unwrap();
         let params = zone.params().unwrap();
@@ -1665,6 +1667,8 @@ mod contact_fields {
             pad_left in " {0,3}",
             pad_right in " {0,3}",
         ) {
+            // `xn--` begins an A-label; a random one is not valid punycode.
+            prop_assume!(!label.starts_with("xn--"));
             let address = format!("{local}@{label}.example.com");
             let padded = format!("{pad_left}{address}{pad_right}");
             let request = handle(&padded, "DE");

@@ -857,18 +857,12 @@ fn reseller_value_types_run_their_trait_impls() {
         r#"{"product":"P","netPrice":1.2,"price":"1.43","currency":"EUR","message":"m","x":1}"#,
     )
     .unwrap();
+    assert_eq!(order_result.product.as_deref(), Some("P"));
+    assert_eq!(order_result.net_price, Some(1.2));
     assert_eq!(order_result.price, Some(1.43));
+    assert_eq!(order_result.currency.as_deref(), Some("EUR"));
+    assert_eq!(order_result.message.as_deref(), Some("m"));
     assert!(format!("{order_result:?}").contains("product: Some(\"P\")"));
-    assert_eq!(
-        order_result,
-        AuthInfo2OrderResult {
-            product: Some("P".to_owned()),
-            net_price: Some(1.2),
-            price: Some(1.43),
-            currency: Some("EUR".to_owned()),
-            message: Some("m".to_owned()),
-        }
-    );
     let quote: AuthInfo2PriceQuote = serde_json::from_str("{}").unwrap();
     assert_eq!(quote, AuthInfo2PriceQuote::default());
     assert_eq!(
