@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use subtle::ConstantTimeEq;
-use zeroize::Zeroize;
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 use crate::error::{retry_after_at, Error, HttpBody, Result};
 use crate::rpc::{not_an_object, RpcRequest, RpcResponse};
@@ -219,11 +219,11 @@ impl PartialEq for Credentials {
 impl Eq for Credentials {}
 
 /// Password storage that cannot be cloned and erases its contents on drop.
-struct Password(String);
+struct Password(Zeroizing<String>);
 
 impl Password {
     fn new(password: String) -> Self {
-        Self(password)
+        Self(Zeroizing::new(password))
     }
 
     fn expose(&self) -> &str {
@@ -239,11 +239,7 @@ impl PartialEq for Password {
 
 impl Eq for Password {}
 
-impl Drop for Password {
-    fn drop(&mut self) {
-        self.0.zeroize();
-    }
-}
+impl ZeroizeOnDrop for Password {}
 
 /// Checks borrowed credentials before either value is converted into a `String`.
 fn validate_credentials(username: &str, password: &str) -> Result<()> {
