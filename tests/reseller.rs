@@ -1230,10 +1230,7 @@ async fn list_all_nichandles_reads_a_single_short_page() {
         .unwrap();
 
     assert_eq!(
-        handles
-            .iter()
-            .filter_map(|handle| handle.id)
-            .collect::<Vec<_>>(),
+        handles.iter().map(|handle| handle.id).collect::<Vec<_>>(),
         [1, 2]
     );
     assert_eq!(transport.call_count(), 1);
@@ -1273,10 +1270,7 @@ async fn list_all_nichandles_fetches_until_the_reported_total() {
         .unwrap();
 
     assert_eq!(
-        handles
-            .iter()
-            .filter_map(|handle| handle.id)
-            .collect::<Vec<_>>(),
+        handles.iter().map(|handle| handle.id).collect::<Vec<_>>(),
         [1, 2, 3]
     );
     let calls = transport.calls();
@@ -1311,10 +1305,7 @@ async fn list_all_nichandles_stops_on_an_exactly_complete_page() {
         .unwrap();
 
     assert_eq!(
-        handles
-            .iter()
-            .filter_map(|handle| handle.id)
-            .collect::<Vec<_>>(),
+        handles.iter().map(|handle| handle.id).collect::<Vec<_>>(),
         [1, 2]
     );
     assert_eq!(transport.call_count(), 1);
@@ -1341,13 +1332,42 @@ async fn list_all_nichandles_does_not_treat_a_full_page_without_count_as_complet
         .unwrap();
 
     assert_eq!(
-        handles
-            .iter()
-            .filter_map(|handle| handle.id)
-            .collect::<Vec<_>>(),
+        handles.iter().map(|handle| handle.id).collect::<Vec<_>>(),
         [1, 2]
     );
     assert_eq!(transport.call_count(), 2);
+}
+
+#[tokio::test]
+async fn list_all_nichandles_counts_skipped_rows_as_part_of_the_page() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "count": 3,
+        "nichandle": [
+            { "nicId": 1, "handle": "ACME-1" },
+            { "nicId": "not-a-number", "handle": "BROKEN" },
+        ],
+    }));
+    transport.ok(json!({
+        "count": 3,
+        "nichandle": [
+            { "nicId": 2, "handle": "ACME-2" },
+        ],
+    }));
+
+    let pagination = Pagination::new().with_page_size(2).unwrap();
+    let handles = client(transport.clone())
+        .list_all_nichandles(&NicHandleQuery::new(), &pagination)
+        .collect_all()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        handles.iter().map(|handle| handle.id).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(transport.call_count(), 2);
+    assert_eq!(transport.calls()[1].params["page"], 2);
 }
 
 // ---------------------------------------------------------------------- pdf --
