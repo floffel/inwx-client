@@ -405,6 +405,26 @@ async fn export_sends_the_zonefile_flag() {
 }
 
 #[tokio::test]
+async fn export_without_the_payload_is_a_missing_field_error() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "count": 1 }));
+
+    let error = client(transport.clone())
+        .export_zone(&domain("example.com"), true)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::MissingField {
+            method: "nameserver.export",
+            field: "resData.export"
+        }
+    ));
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
 async fn export_list_and_records_send_their_formats() {
     let transport = MockTransport::new();
     transport.ok(json!({ "count": 1, "domains": [{ "domain": "a.de", "type": "MASTER" }] }));
@@ -433,6 +453,26 @@ async fn export_list_and_records_send_their_formats() {
     assert_eq!(calls[1].method, "nameserver.exportrecords");
     assert_eq!(calls[1].params["name"], "*.example.com");
     assert_eq!(calls[1].params["limit"], 100);
+}
+
+#[tokio::test]
+async fn export_records_without_the_payload_is_a_missing_field_error() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "count": 1 }));
+
+    let error = client(transport.clone())
+        .export_records(DocumentFormat::Csv, "*", 1, 100)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::MissingField {
+            method: "nameserver.exportrecords",
+            field: "resData.data"
+        }
+    ));
+    assert_eq!(transport.call_count(), 1);
 }
 
 #[tokio::test]
