@@ -171,8 +171,7 @@
 //! * **Parse permissively.** Unknown fields are ignored, unknown enum values are
 //!   carried ([`RecordType::Other`], [`RenewalMode::Other`],
 //!   [`ContactType::Other`], [`AccountRole::Other`]), and scalars are accepted as
-//!   numbers or strings —
-//!   INWX is inconsistent between methods.
+//!   numbers or strings — INWX is inconsistent between methods.
 //! * **Walk the whole list.** [`InwxClient::list_all_domains`],
 //!   [`InwxClient::list_all_contacts`], [`InwxClient::list_all_zones`],
 //!   [`InwxClient::list_all_nichandles`] and
@@ -424,8 +423,8 @@ pub use transport::{
     read_capped_body, ChunkSource, Response, Transport, TransportStage, DEFAULT_MAX_RESPONSE_BYTES,
 };
 pub use types::{
-    parse_ip, AuthCode, ContactType, DocumentFormat, DomainName, Email, Handle, Hostname, Password,
-    Period, PriceType, RenewalMode, Timestamp, MAX_AUTH_CODE_LEN, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
-    MAX_PASSWORD_LEN,
+    parse_ip, AuthCode, ContactType, ContactTypeUnknown, DocumentFormat, DomainName, Email, Handle,
+    Hostname, Password, Period, PriceType, RenewalMode, RenewalModeUnknown, Timestamp,
+    MAX_AUTH_CODE_LEN, MAX_DOMAIN_LEN, MAX_LABEL_LEN, MAX_PASSWORD_LEN,
 };
 pub use zone::{RecordExport, UrlRedirectType, ZoneCreate, ZoneExport, ZoneType, ZoneUpdate};

@@ -82,6 +82,112 @@ pub const MAX_LABEL_LEN: usize = 63;
 /// # Ok::<(), inwx_client::Error>(())
 /// ```
 pub const MAX_PASSWORD_LEN: usize = 255;
+
+/// A checked unknown renewal mode.
+///
+/// INWX occasionally adds enum values before this crate knows them. Types such
+/// as [`RenewalMode`] and [`ContactType`] keep those values instead of dropping
+/// them, but the wire value still has to be a safe token: non-empty after
+/// trimming, at most 255 characters, and made only of ASCII letters, digits,
+/// `_`, `.` and `-`. Values are normalised by [`RenewalMode`]'s parser, so
+/// equality, hashing and serialization all see the same canonical text.
+///
+/// ```
+/// use inwx_client::RenewalMode;
+///
+/// let mode: RenewalMode = "newMode".parse()?;
+/// assert_eq!(mode.to_string(), "NEWMODE");
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RenewalModeUnknown(String);
+
+impl RenewalModeUnknown {
+    fn parse_upper(field: &'static str, input: &str) -> Result<Self> {
+        Ok(Self(validate_upper_token(field, input, 255)?))
+    }
+
+    /// The canonical wire representation.
+    ///
+    /// ```
+    /// use inwx_client::RenewalMode;
+    ///
+    /// match "manual".parse::<RenewalMode>()? {
+    ///     RenewalMode::Other(token) => assert_eq!(token.as_str(), "MANUAL"),
+    ///     other => panic!("expected an unknown mode, got {other}"),
+    /// }
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for RenewalModeUnknown {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl From<RenewalModeUnknown> for String {
+    fn from(token: RenewalModeUnknown) -> Self {
+        token.0
+    }
+}
+
+/// A checked unknown contact type.
+///
+/// INWX occasionally adds enum values before this crate knows them. Types such
+/// as [`ContactType`] keep those values instead of dropping them, but the wire
+/// value still has to be a safe token: non-empty after trimming, at most 255
+/// characters, and made only of ASCII letters, digits, `_`, `.` and `-`. Values
+/// are normalised by [`ContactType`]'s parser, so equality, hashing and
+/// serialization all see the same canonical text.
+///
+/// ```
+/// use inwx_client::ContactType;
+///
+/// let kind: ContactType = "trustee".parse()?;
+/// assert_eq!(kind.to_string(), "TRUSTEE");
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContactTypeUnknown(String);
+
+impl ContactTypeUnknown {
+    fn parse_upper(field: &'static str, input: &str) -> Result<Self> {
+        Ok(Self(validate_upper_token(field, input, 255)?))
+    }
+
+    /// The canonical wire representation.
+    ///
+    /// ```
+    /// use inwx_client::ContactType;
+    ///
+    /// match "trustee".parse::<ContactType>()? {
+    ///     ContactType::Other(token) => assert_eq!(token.as_str(), "TRUSTEE"),
+    ///     other => panic!("expected an unknown contact type, got {other}"),
+    /// }
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ContactTypeUnknown {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl From<ContactTypeUnknown> for String {
+    fn from(token: ContactTypeUnknown) -> Self {
+        token.0
+    }
+}
 /// Longest legal authorisation code, in bytes.
 ///
 /// The API types the transfer code as `token255`, so 255 bytes are still
@@ -494,7 +600,8 @@ impl Serialize for Period {
     }
 }
 
-/// What happens when a domain expires. Unknown values are carried verbatim.
+/// What happens when a domain expires. Unknown values are carried as checked
+/// tokens.
 ///
 /// ```
 /// use inwx_client::RenewalMode;
@@ -515,8 +622,8 @@ pub enum RenewalMode {
     AutoDelete,
     /// Let the domain expire without deleting it.
     AutoExpire,
-    /// A mode this crate does not know; carried verbatim, upper-cased.
-    Other(String),
+    /// A mode this crate does not know; carried as a checked, upper-cased token.
+    Other(RenewalModeUnknown),
 }
 
 impl RenewalMode {
@@ -532,7 +639,7 @@ impl RenewalMode {
             Self::AutoRenew => "AUTORENEW",
             Self::AutoDelete => "AUTODELETE",
             Self::AutoExpire => "AUTOEXPIRE",
-            Self::Other(raw) => raw,
+            Self::Other(token) => token.as_str(),
         }
     }
 }
@@ -548,14 +655,11 @@ impl FromStr for RenewalMode {
 
     fn from_str(input: &str) -> Result<Self> {
         let upper = input.trim().to_ascii_uppercase();
-        if upper.is_empty() {
-            return Err(Error::validation("renewalMode", "must not be empty"));
-        }
         Ok(match upper.as_str() {
             "AUTORENEW" => Self::AutoRenew,
             "AUTODELETE" => Self::AutoDelete,
             "AUTOEXPIRE" => Self::AutoExpire,
-            _ => Self::Other(upper),
+            _ => Self::Other(RenewalModeUnknown::parse_upper("renewalMode", input)?),
         })
     }
 }
@@ -573,14 +677,15 @@ impl<'de> Deserialize<'de> for RenewalMode {
     }
 }
 
-/// Kind of contact handle. Unknown values are carried verbatim.
+/// Kind of contact handle. Unknown values are carried as checked tokens.
 ///
 /// ```
 /// use inwx_client::ContactType;
 ///
 /// assert_eq!(ContactType::parse("org").unwrap(), ContactType::Org);
-/// assert_eq!(ContactType::Other("TRUSTEE".into()).to_string(), "TRUSTEE");
+/// assert_eq!(ContactType::parse("trustee")?.to_string(), "TRUSTEE");
 /// assert!(ContactType::parse("").is_err());
+/// # Ok::<(), inwx_client::Error>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ContactType {
@@ -590,8 +695,8 @@ pub enum ContactType {
     Person,
     /// Role address such as `hostmaster`.
     Role,
-    /// A type this crate does not know; carried verbatim, upper-cased.
-    Other(String),
+    /// A type this crate does not know; carried as a checked, upper-cased token.
+    Other(ContactTypeUnknown),
 }
 
 impl ContactType {
@@ -603,14 +708,11 @@ impl ContactType {
     /// [`Error::Validation`] when the input is empty.
     pub fn parse(input: &str) -> Result<Self> {
         let upper = input.trim().to_ascii_uppercase();
-        if upper.is_empty() {
-            return Err(Error::validation("contact.type", "must not be empty"));
-        }
         Ok(match upper.as_str() {
             "ORG" => Self::Org,
             "PERSON" => Self::Person,
             "ROLE" => Self::Role,
-            _ => Self::Other(upper),
+            _ => Self::Other(ContactTypeUnknown::parse_upper("contact.type", input)?),
         })
     }
 
@@ -626,7 +728,7 @@ impl ContactType {
             Self::Org => "ORG",
             Self::Person => "PERSON",
             Self::Role => "ROLE",
-            Self::Other(raw) => raw,
+            Self::Other(token) => token.as_str(),
         }
     }
 }
@@ -1914,9 +2016,21 @@ mod tests {
     fn renewal_mode_unknown_is_carried_upper_cased() {
         assert_eq!(
             "newMode".parse::<RenewalMode>().unwrap(),
-            RenewalMode::Other("NEWMODE".into())
+            RenewalMode::Other(RenewalModeUnknown::parse_upper("renewalMode", "NEWMODE").unwrap())
         );
         assert!("  ".parse::<RenewalMode>().is_err());
+    }
+
+    #[test]
+    fn unknown_token_validation_is_exact() {
+        let at_limit = "A".repeat(255);
+        let over_limit = "A".repeat(256);
+        assert!(RenewalModeUnknown::parse_upper("renewalMode", &at_limit).is_ok());
+        assert!(RenewalModeUnknown::parse_upper("renewalMode", &over_limit).is_err());
+        assert!(RenewalModeUnknown::parse_upper("renewalMode", "  manual\t").is_ok());
+        assert!(RenewalModeUnknown::parse_upper("renewalMode", "").is_err());
+        assert!(RenewalModeUnknown::parse_upper("renewalMode", "AUTO\nRENEW").is_err());
+        assert!(RenewalModeUnknown::parse_upper("renewalMode", "AUTO RENEW").is_err());
     }
 
     #[test]

@@ -101,7 +101,7 @@ fn renewal_mode_traits() {
         assert_eq!(RenewalMode::from_str(text).unwrap(), expected);
         assert_eq!(expected.to_string(), expected.as_str());
     }
-    let custom = RenewalMode::Other("MANUAL".into());
+    let custom = "manual".parse::<RenewalMode>().unwrap();
     assert_eq!(custom.to_string(), "MANUAL");
     assert_eq!(serde_json::to_string(&custom).unwrap(), "\"MANUAL\"");
     let parsed: RenewalMode = serde_json::from_str("\"AUTODELETE\"").unwrap();
@@ -114,11 +114,14 @@ fn contact_type_traits() {
     assert_eq!(ContactType::Org.to_string(), "ORG");
     assert_eq!(ContactType::Role.to_string(), "ROLE");
     assert_eq!(ContactType::Person.to_string(), "PERSON");
-    assert_eq!(ContactType::Other("TRUSTEE".into()).to_string(), "TRUSTEE");
+    assert_eq!(
+        ContactType::parse("TRUSTEE").unwrap().to_string(),
+        "TRUSTEE"
+    );
     assert_eq!(ContactType::from_str("role").unwrap(), ContactType::Role);
     assert_eq!(serde_json::to_string(&ContactType::Org).unwrap(), "\"ORG\"");
     let parsed: ContactType = serde_json::from_str("\"trustee\"").unwrap();
-    assert_eq!(parsed, ContactType::Other("TRUSTEE".into()));
+    assert_eq!(parsed, ContactType::parse("TRUSTEE").unwrap());
     assert!(ContactType::parse("").is_err());
     assert!(serde_json::from_str::<ContactType>("\"\"").is_err());
 }
