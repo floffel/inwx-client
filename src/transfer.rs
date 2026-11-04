@@ -33,6 +33,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use bon::bon;
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{json, Map, Value};
 
@@ -1464,11 +1465,12 @@ impl TradeRequest {
 /// ```
 /// use inwx_client::{ActionKind, DomainName, Irreversible, PushRequest};
 ///
-/// let push = PushRequest::new(Irreversible::acknowledge(
+/// let push = PushRequest::builder(Irreversible::acknowledge(
 ///     ActionKind::Push,
 ///     &DomainName::parse("example.com")?,
-/// ))?
-/// .with_target("other-registrar")?;
+/// ))
+/// .with_target("other-registrar")?
+/// .build()?;
 ///
 /// assert_eq!(push.params()["target"], "other-registrar");
 /// # Ok::<(), inwx_client::Error>(())
@@ -1481,28 +1483,96 @@ pub struct PushRequest {
     testing: bool,
 }
 
+#[bon]
 impl PushRequest {
     /// Starts a push for the domain named in `intent`.
     ///
     /// # Errors
     ///
     /// [`Error::Validation`] unless `intent` acknowledges
-    /// [`ActionKind::Push`].
+    /// [`ActionKind::Push`]. The acknowledgement is checked by
+    /// [`build`](PushRequestBuilder::build).
     ///
     /// ```
     /// use inwx_client::{ActionKind, DomainName, Irreversible, PushRequest};
     ///
     /// let wrong = Irreversible::acknowledge(ActionKind::Restore, &DomainName::parse("a.de")?);
-    /// assert!(PushRequest::new(wrong).is_err());
+    /// assert!(PushRequest::builder(wrong).build().is_err());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
-    pub fn new(intent: Irreversible) -> Result<Self> {
+    #[builder]
+    pub fn new(
+        #[builder(start_fn)] intent: Irreversible,
+        /// Names the receiving registrar, where the TLD supports it (`target`).
+        ///
+        /// # Errors
+        ///
+        /// [`Error::Validation`] when the value is empty or longer than 64
+        /// characters.
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, DomainName, Irreversible, PushRequest};
+        ///
+        /// let push = PushRequest::builder(
+        ///     Irreversible::acknowledge(ActionKind::Push, &DomainName::parse("a.de")?),
+        /// )
+        /// .with_target("other-registrar")?
+        /// .build()?;
+        /// assert_eq!(push.params()["target"], "other-registrar");
+        /// assert!(PushRequest::builder(
+        ///     Irreversible::acknowledge(ActionKind::Push, &DomainName::parse("a.de")?),
+        /// )
+        /// .with_target("")
+        /// .is_err());
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(setters(name = with_target), with = |target: impl Into<String>| -> Result<_> {
+            let target = target.into();
+            let trimmed = target.trim();
+            if trimmed.is_empty() || trimmed.chars().count() > 64 {
+                return Err(Error::validation("target", "must be 1 to 64 characters"));
+            }
+            reject_control_chars("target", trimmed)?;
+            Ok(trimmed.to_owned())
+        })]
+        target: Option<String>,
+        /// Schedules the push for a later date (`scDate`).
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, DomainName, Irreversible, PushRequest, Timestamp};
+        ///
+        /// let push = PushRequest::builder(
+        ///     Irreversible::acknowledge(ActionKind::Push, &DomainName::parse("a.de")?),
+        /// )
+        /// .scheduled_at(Timestamp::parse("2026-12-01T00:00:00")?)
+        /// .build()?;
+        /// assert_eq!(push.params()["scDate"], "2026-12-01T00:00:00");
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(setters(name = scheduled_at))]
+        sc_date: Option<Timestamp>,
+        /// Runs the command in testing mode (`testing=true`).
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, DomainName, Irreversible, PushRequest};
+        ///
+        /// let push = PushRequest::builder(
+        ///     Irreversible::acknowledge(ActionKind::Push, &DomainName::parse("a.de")?),
+        /// )
+        /// .dry_run()
+        /// .build()?;
+        /// assert_eq!(push.params()["testing"], true);
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(default, setters(name = dry_run), with = || true)]
+        testing: bool,
+    ) -> Result<Self> {
         let domain = intent.into_domain(ActionKind::Push)?;
         Ok(Self {
             domain,
-            target: None,
-            sc_date: None,
-            testing: false,
+            target,
+            sc_date,
+            testing,
         })
     }
 
@@ -1511,9 +1581,10 @@ impl PushRequest {
     /// ```
     /// use inwx_client::{ActionKind, DomainName, Irreversible, PushRequest};
     ///
-    /// let push = PushRequest::new(
+    /// let push = PushRequest::builder(
     ///     Irreversible::acknowledge(ActionKind::Push, &DomainName::parse("a.de")?),
-    /// )?;
+    /// )
+    /// .build()?;
     /// assert_eq!(push.domain().as_str(), "a.de");
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
@@ -1522,79 +1593,15 @@ impl PushRequest {
         &self.domain
     }
 
-    /// Names the receiving registrar, where the TLD supports it (`target`).
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Validation`] when the value is empty or longer than 64
-    /// characters.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, PushRequest};
-    ///
-    /// let push = PushRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Push, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_target("other-registrar")?;
-    /// assert_eq!(push.params()["target"], "other-registrar");
-    /// assert!(push.with_target("").is_err());
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    pub fn with_target(mut self, target: impl Into<String>) -> Result<Self> {
-        let target = target.into();
-        let trimmed = target.trim();
-        if trimmed.is_empty() || trimmed.chars().count() > 64 {
-            return Err(Error::validation("target", "must be 1 to 64 characters"));
-        }
-        reject_control_chars("target", trimmed)?;
-        self.target = Some(trimmed.to_owned());
-        Ok(self)
-    }
-
-    /// Schedules the push for a later date (`scDate`).
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, PushRequest, Timestamp};
-    ///
-    /// let push = PushRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Push, &DomainName::parse("a.de")?),
-    /// )?
-    /// .scheduled_at(Timestamp::parse("2026-12-01T00:00:00")?);
-    /// assert_eq!(push.params()["scDate"], "2026-12-01T00:00:00");
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn scheduled_at(mut self, at: Timestamp) -> Self {
-        self.sc_date = Some(at);
-        self
-    }
-
-    /// Runs the command in testing mode (`testing=true`).
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, PushRequest};
-    ///
-    /// let push = PushRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Push, &DomainName::parse("a.de")?),
-    /// )?
-    /// .dry_run();
-    /// assert_eq!(push.params()["testing"], true);
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn dry_run(mut self) -> Self {
-        self.testing = true;
-        self
-    }
-
     /// The `domain.push` parameters.
     ///
     /// ```
     /// use inwx_client::{ActionKind, DomainName, Irreversible, PushRequest};
     ///
-    /// let params = PushRequest::new(
+    /// let params = PushRequest::builder(
     ///     Irreversible::acknowledge(ActionKind::Push, &DomainName::parse("a.de")?),
-    /// )?
+    /// )
+    /// .build()?
     /// .params();
     /// assert_eq!(params["domain"], "a.de");
     /// assert!(params.get("target").is_none());
@@ -2070,10 +2077,11 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
-    /// let push = PushRequest::new(Irreversible::acknowledge(
+    /// let push = PushRequest::builder(Irreversible::acknowledge(
     ///     ActionKind::Push,
     ///     &DomainName::parse("example.com")?,
-    /// ))?;
+    /// ))
+    /// .build()?;
     /// client.push_domain(&push).await?;
     /// # Ok(())
     /// # }
@@ -2275,9 +2283,11 @@ mod tests {
 
     #[test]
     fn dnssec_free_defaults_do_not_leak_into_requests() {
-        let params = PushRequest::new(Irreversible::acknowledge(ActionKind::Push, &domain("a.de")))
-            .unwrap()
-            .params();
+        let params =
+            PushRequest::builder(Irreversible::acknowledge(ActionKind::Push, &domain("a.de")))
+                .build()
+                .unwrap()
+                .params();
         assert_eq!(params.as_object().unwrap().len(), 2);
     }
 }
