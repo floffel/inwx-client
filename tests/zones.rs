@@ -143,6 +143,57 @@ async fn create_rejects_an_inconsistent_request_before_the_wire() {
 }
 
 #[tokio::test]
+async fn update_rejects_an_inconsistent_request_before_the_wire() {
+    let transport = MockTransport::new();
+    let client = client_without_retries(transport.clone());
+
+    // Just outside the boundary: a SLAVE without its master address, a MASTER
+    // carrying one, and an unknown type that would otherwise be sent verbatim.
+    let slave_without_master = ZoneUpdate::new(domain("a.de")).with_zone_type(ZoneType::Slave);
+    assert!(client.update_zone(&slave_without_master).await.is_err());
+
+    let master_with_master = ZoneUpdate::new(domain("a.de"))
+        .with_zone_type(ZoneType::Master)
+        .with_master_ip(parse_ip("198.51.100.7").unwrap());
+    assert!(client.update_zone(&master_with_master).await.is_err());
+
+    let unknown = ZoneUpdate::new(domain("a.de")).with_zone_type(ZoneType::Other("PRIMARY".into()));
+    assert!(client.update_zone(&unknown).await.is_err());
+
+    assert_eq!(transport.call_count(), 0, "nothing may reach the wire");
+}
+
+#[tokio::test]
+async fn update_accepts_valid_zone_type_and_master_pairings() {
+    let transport = MockTransport::new();
+    transport.ok_empty();
+    transport.ok_empty();
+    let client = client(transport.clone());
+
+    // Just inside the boundary: a MASTER without a master address.
+    let master = ZoneUpdate::new(domain("a.de")).with_zone_type(ZoneType::Master);
+    let params = master.params().unwrap();
+    assert_eq!(params["type"], "MASTER");
+    assert!(params.get("masterIp").is_none());
+    client.update_zone(&master).await.unwrap();
+
+    // And a SLAVE together with its master address.
+    let slave = ZoneUpdate::new(domain("b.de"))
+        .with_zone_type(ZoneType::Slave)
+        .with_master_ip(parse_ip("198.51.100.7").unwrap());
+    let params = slave.params().unwrap();
+    assert_eq!(params["type"], "SLAVE");
+    assert_eq!(params["masterIp"], "198.51.100.7");
+    client.update_zone(&slave).await.unwrap();
+
+    let calls = transport.calls();
+    assert_eq!(calls[0].params["type"], "MASTER");
+    assert!(calls[0].params.get("masterIp").is_none());
+    assert_eq!(calls[1].params["type"], "SLAVE");
+    assert_eq!(calls[1].params["masterIp"], "198.51.100.7");
+}
+
+#[tokio::test]
 async fn update_sends_only_the_fields_that_were_set() {
     let transport = MockTransport::new();
     transport.ok_empty();

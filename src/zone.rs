@@ -846,7 +846,9 @@ impl ZoneUpdate {
     /// ```
     /// use inwx_client::{DomainName, ZoneType, ZoneUpdate};
     ///
-    /// let update = ZoneUpdate::new(DomainName::parse("a.de")?).with_zone_type(ZoneType::Slave);
+    /// let update = ZoneUpdate::new(DomainName::parse("a.de")?)
+    ///     .with_zone_type(ZoneType::Slave)
+    ///     .with_master_ip(inwx_client::parse_ip("198.51.100.7")?);
     /// assert_eq!(update.params().unwrap()["type"], "SLAVE");
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
@@ -1085,6 +1087,7 @@ impl ZoneUpdate {
     /// use inwx_client::{DomainName, ZoneType, ZoneUpdate};
     /// let update = ZoneUpdate::new(DomainName::parse("a.de")?)
     ///     .with_zone_type(ZoneType::Slave)
+    ///     .with_master_ip(inwx_client::parse_ip("198.51.100.7")?)
     ///     .dry_run();
     /// assert_eq!(update.params().unwrap()["testing"], true);
     /// # Ok::<(), inwx_client::Error>(())
@@ -1198,7 +1201,9 @@ impl ZoneUpdate {
     ///
     /// [`Error::Validation`] when nothing was set (an empty update is a
     /// guaranteed `2003`; `dry_run` alone does not count as a change), or when
-    /// a frame field lacks its `FRAME` type.
+    /// the update is internally inconsistent — an unknown zone type, a `SLAVE`
+    /// zone without `masterIp`, a `MASTER` zone with one, or a frame field
+    /// without a frame redirect.
     pub fn params(&self) -> Result<Value> {
         let fields = self.set_fields();
         if fields.is_empty() {
@@ -1207,6 +1212,27 @@ impl ZoneUpdate {
                 "sets no field; add a change or skip the call \
                  (`dry_run`/`testing` alone is not a change)",
             ));
+        }
+        match (self.zone_type.as_ref(), self.master_ip) {
+            (Some(ZoneType::Other(raw)), _) => {
+                return Err(Error::validation(
+                    "zone.type",
+                    format!("{raw} is not a documented zone type (MASTER, SLAVE)"),
+                ));
+            }
+            (Some(ZoneType::Slave), None) => {
+                return Err(Error::validation(
+                    "zone.masterIp",
+                    "a SLAVE zone needs the master address",
+                ));
+            }
+            (Some(ZoneType::Master), Some(_)) => {
+                return Err(Error::validation(
+                    "zone.masterIp",
+                    "a MASTER zone has no master address (use with_master_ip on a slave)",
+                ));
+            }
+            _ => {}
         }
         if fields
             .iter()
