@@ -182,11 +182,10 @@ impl MockTransport {
 
     /// Queues an HTTP status with `body`.
     pub fn status(&self, status: u16, body: &str) {
-        self.push(Reply::Response(Response::new(
-            status,
-            std::iter::empty(),
-            body.as_bytes().to_vec(),
-        )));
+        self.push(Reply::Response(
+            Response::new(status, std::iter::empty(), body.as_bytes().to_vec())
+                .expect("test status is valid"),
+        ));
     }
 
     /// Queues a retryable transport failure.
@@ -244,7 +243,16 @@ impl Transport for MockTransport {
                 .unwrap_or_default()
                 .to_owned(),
             params: body.get("params").cloned().unwrap_or(Value::Null),
-            headers: request.headers.clone(),
+            headers: request
+                .headers
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.as_str().to_owned(),
+                        value.to_str().unwrap_or_default().to_owned(),
+                    )
+                })
+                .collect(),
         };
 
         let reply = {
@@ -262,7 +270,8 @@ impl Transport for MockTransport {
                     format!("{cookie}; Path=/; HttpOnly; Secure"),
                 )],
                 br#"{"code":1000,"msg":"Login successful","resData":{"accountId":61140}}"#.to_vec(),
-            ),
+            )
+            .expect("test login headers are valid"),
             Some(Reply::Response(response)) => response,
             Some(Reply::Failure { message, stage }) => {
                 return Err(Error::transport_at(stage, message))
@@ -285,6 +294,7 @@ pub fn json_response(body: &str) -> Response {
         [("content-type".to_owned(), "application/json".to_owned())],
         body.as_bytes().to_vec(),
     )
+    .expect("test JSON headers are valid")
 }
 
 /// A client with a session cookie, so tests about commands need no login step.

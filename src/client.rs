@@ -506,7 +506,7 @@ pub struct AccountInfo {
 /// impl Transport for Scripted {
 ///     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
 ///         let body = self.0.lock().unwrap().remove(0);
-///         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+///         Response::new(200, std::iter::empty(), body.as_bytes().to_vec())
 ///     }
 /// }
 ///
@@ -1015,7 +1015,7 @@ impl<T: Transport> InwxClient<T> {
     /// # impl Transport for Scripted {
     /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
     /// #         let body = self.0.lock().unwrap().remove(0);
-    /// #         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    /// #         Response::new(200, std::iter::empty(), body.as_bytes().to_vec())
     /// #     }
     /// # }
     /// # async fn demo() -> Result<()> {
@@ -1203,14 +1203,14 @@ impl<T: Transport> InwxClient<T> {
 
         let cookie = self.session.cookie();
         let mut request = Request::post_json(&self.base_url, body)
-            .with_header("Content-Type", "application/json")
-            .with_header("Accept", "application/json")
+            .with_header("Content-Type", "application/json")?
+            .with_header("Accept", "application/json")?
             .with_header(
                 "User-Agent",
                 concat!("inwx-client/", env!("CARGO_PKG_VERSION")),
-            );
+            )?;
         if let Some(cookie) = &cookie {
-            request = request.with_header("Cookie", cookie.clone());
+            request = request.with_header("Cookie", cookie.clone())?;
         }
         request = request.with_timeout(self.timeout);
         self.transport.execute(request).await
@@ -1706,7 +1706,8 @@ mod tests {
                 ("Set-Cookie".to_string(), "garbage".to_string()),
             ],
             Vec::new(),
-        );
+        )
+        .unwrap();
         assert_eq!(collect_cookies(&response).unwrap(), "other=x; domrobot=s2");
     }
 
@@ -1716,7 +1717,8 @@ mod tests {
             200,
             [("Set-Cookie".to_string(), vec![0xff, 0xfe])],
             Vec::new(),
-        );
+        )
+        .unwrap();
         let error = collect_cookies(&response).unwrap_err();
         assert!(matches!(error, Error::Uncertain { .. }), "{error:?}");
         assert!(error.is_uncertain());
@@ -1932,6 +1934,7 @@ mod tests {
                     .map(|(name, value)| (name.to_owned(), value.to_owned())),
                 b"slow down".to_vec(),
             )
+            .unwrap()
         };
 
         assert_eq!(retry_after_in(&response(Vec::new())), None);
@@ -1979,13 +1982,14 @@ mod tests {
             429,
             [("Retry-After".to_owned(), "90".to_owned())],
             b"<html>slow down</html>".to_vec(),
-        );
+        )
+        .unwrap();
         let error = http_error(&throttled);
         assert_eq!(error.retry_after(), Some(Duration::from_secs(90)));
         assert!(error.is_retryable());
         assert_eq!(error.to_string(), "http 429: <html>slow down</html>");
 
-        let plain = Response::new(503, std::iter::empty(), b"unavailable".to_vec());
+        let plain = Response::new(503, std::iter::empty(), b"unavailable".to_vec()).unwrap();
         assert_eq!(http_error(&plain).retry_after(), None);
         assert!(http_error(&plain).is_retryable());
     }

@@ -380,7 +380,7 @@ impl Pagination {
 /// impl Transport for Scripted {
 ///     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
 ///         let body = self.0.lock().unwrap().remove(0);
-///         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+///         Response::new(200, std::iter::empty(), body.as_bytes().to_vec())
 ///     }
 /// }
 ///
@@ -476,7 +476,7 @@ impl<'a, T: Transport, L: Listing> Pages<'a, T, L> {
     /// impl Transport for Scripted {
     ///     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
     ///         let body = self.0.lock().unwrap().remove(0);
-    ///         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    ///         Response::new(200, std::iter::empty(), body.as_bytes().to_vec())
     ///     }
     /// }
     ///
@@ -561,7 +561,7 @@ impl<'a, T: Transport, L: Listing> Pages<'a, T, L> {
     /// impl Transport for Scripted {
     ///     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
     ///         let body = self.0.lock().unwrap().remove(0);
-    ///         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    ///         Response::new(200, std::iter::empty(), body.as_bytes().to_vec())
     ///     }
     /// }
     ///
@@ -617,7 +617,7 @@ impl<'a, T: Transport, L: Listing> Pages<'a, T, L> {
     /// impl Transport for Scripted {
     ///     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
     ///         let body = self.0.lock().unwrap().remove(0);
-    ///         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    ///         Response::new(200, std::iter::empty(), body.as_bytes().to_vec())
     ///     }
     /// }
     ///

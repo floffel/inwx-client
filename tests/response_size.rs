@@ -79,11 +79,14 @@ async fn a_declared_content_length_over_the_cap_refuses_before_the_body_arrives(
     // The body is small; the header claims 4096 bytes, and the header alone is
     // enough to refuse the answer.
     let transport = MockTransport::new().with_max_response_bytes(32);
-    transport.push(Reply::Response(Response::new(
-        200,
-        [("content-length".to_owned(), "4096".to_owned())],
-        success_body().into_bytes(),
-    )));
+    transport.push(Reply::Response(
+        Response::new(
+            200,
+            [("content-length".to_owned(), "4096".to_owned())],
+            success_body().into_bytes(),
+        )
+        .expect("test response headers are valid"),
+    ));
 
     let error = client(transport.clone())
         .call("account.info", json!({}))
@@ -97,11 +100,14 @@ async fn a_declared_content_length_over_the_cap_refuses_before_the_body_arrives(
 async fn a_declared_content_length_exactly_at_the_cap_is_accepted() {
     let body = success_body();
     let transport = MockTransport::new().with_max_response_bytes(body.len() as u64);
-    transport.push(Reply::Response(Response::new(
-        200,
-        [("content-length".to_owned(), body.len().to_string())],
-        body.into_bytes(),
-    )));
+    transport.push(Reply::Response(
+        Response::new(
+            200,
+            [("content-length".to_owned(), body.len().to_string())],
+            body.into_bytes(),
+        )
+        .expect("test response headers are valid"),
+    ));
 
     let data = client(transport)
         .call("account.info", json!({}))
@@ -117,11 +123,14 @@ async fn a_lying_content_length_is_caught_by_the_running_total() {
     let body = success_body();
     let len = body.len() as u64;
     let transport = MockTransport::new().with_max_response_bytes(64);
-    transport.push(Reply::Response(Response::new(
-        200,
-        [("content-length".to_owned(), "8".to_owned())],
-        body.into_bytes(),
-    )));
+    transport.push(Reply::Response(
+        Response::new(
+            200,
+            [("content-length".to_owned(), "8".to_owned())],
+            body.into_bytes(),
+        )
+        .expect("test response headers are valid"),
+    ));
 
     let error = client(transport)
         .call("account.info", json!({}))
@@ -136,11 +145,9 @@ async fn a_lying_content_length_is_caught_by_the_running_total() {
 #[tokio::test]
 async fn an_empty_body_fits_a_zero_cap_and_one_byte_does_not() {
     let empty = MockTransport::new().with_max_response_bytes(0);
-    empty.push(Reply::Response(Response::new(
-        200,
-        std::iter::empty(),
-        Vec::new(),
-    )));
+    empty.push(Reply::Response(
+        Response::new(200, std::iter::empty(), Vec::new()).expect("test status is valid"),
+    ));
     let error = client(empty)
         .call("account.info", json!({}))
         .await
@@ -152,11 +159,9 @@ async fn an_empty_body_fits_a_zero_cap_and_one_byte_does_not() {
     assert!(error.is_uncertain(), "{error}");
 
     let one_byte = MockTransport::new().with_max_response_bytes(0);
-    one_byte.push(Reply::Response(Response::new(
-        200,
-        std::iter::empty(),
-        b"{".to_vec(),
-    )));
+    one_byte.push(Reply::Response(
+        Response::new(200, std::iter::empty(), b"{".to_vec()).expect("test status is valid"),
+    ));
     let error = client(one_byte)
         .call("account.info", json!({}))
         .await

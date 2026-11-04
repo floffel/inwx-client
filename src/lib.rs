@@ -89,7 +89,7 @@
 //!             ),
 //!             _ => (Vec::new(), json!({ "code": 1000, "msg": "ok" })),
 //!         };
-//!         Ok(Response::new(200, headers, payload.to_string().into_bytes()))
+//!         Response::new(200, headers, payload.to_string().into_bytes())
 //!     }
 //! }
 //!

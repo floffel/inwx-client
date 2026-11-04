@@ -167,11 +167,14 @@ async fn login_without_a_cookie_is_an_authentication_error() {
 #[tokio::test]
 async fn login_with_a_non_utf8_cookie_is_an_uncertain_transport_error() {
     let transport = MockTransport::new();
-    transport.push(Reply::Response(Response::from_header_bytes(
-        200,
-        [("Set-Cookie".to_owned(), vec![0xff, 0xfe])],
-        br#"{"code":1000,"msg":"Login successful"}"#.to_vec(),
-    )));
+    transport.push(Reply::Response(
+        Response::from_header_bytes(
+            200,
+            [("Set-Cookie".to_owned(), vec![0xff, 0xfe])],
+            br#"{"code":1000,"msg":"Login successful"}"#.to_vec(),
+        )
+        .unwrap(),
+    ));
 
     let client = anonymous_client(transport.clone());
     let error = client.login().await.unwrap_err();
@@ -682,11 +685,14 @@ async fn an_envelope_on_a_non_2xx_status_is_a_verdict_not_an_http_error() {
 #[tokio::test]
 async fn a_retry_after_header_reaches_the_error_a_caller_sees() {
     let transport = MockTransport::new();
-    transport.push(Reply::Response(Response::new(
-        429,
-        [("Retry-After".to_owned(), "7".to_owned())],
-        b"<html>too many requests</html>".to_vec(),
-    )));
+    transport.push(Reply::Response(
+        Response::new(
+            429,
+            [("Retry-After".to_owned(), "7".to_owned())],
+            b"<html>too many requests</html>".to_vec(),
+        )
+        .unwrap(),
+    ));
 
     let client = client_without_retries(transport);
     let error = client
@@ -702,11 +708,14 @@ async fn a_retry_after_header_reaches_the_error_a_caller_sees() {
 async fn a_transient_status_on_a_write_carries_no_retry_after() {
     // The outcome is unknown, so there is nothing to pace a replay on.
     let transport = MockTransport::new();
-    transport.push(Reply::Response(Response::new(
-        429,
-        [("Retry-After".to_owned(), "7".to_owned())],
-        b"too many requests".to_vec(),
-    )));
+    transport.push(Reply::Response(
+        Response::new(
+            429,
+            [("Retry-After".to_owned(), "7".to_owned())],
+            b"too many requests".to_vec(),
+        )
+        .unwrap(),
+    ));
 
     let client = client_without_retries(transport);
     let error = client
@@ -1120,13 +1129,15 @@ fn request_debug_output_hides_header_values_and_body_bytes() {
     let body = br#"{"method":"account.login","params":{"pass":"hunter2"}}"#.to_vec();
     let request = Request::post_json("https://inwx.test/jsonrpc/", body)
         .with_header("Cookie", "domrobot=test-session")
-        .with_header("Content-Type", "application/json");
+        .unwrap()
+        .with_header("Content-Type", "application/json")
+        .unwrap();
 
     let rendered = format!("{request:?}");
 
     assert!(rendered.contains("POST"));
     assert!(rendered.contains("https://inwx.test/jsonrpc/"));
-    assert!(rendered.contains("Cookie"));
+    assert!(rendered.contains("cookie"));
     assert!(rendered.contains("body_len"));
     assert!(!rendered.contains("domrobot=test-session"));
     assert!(!rendered.contains("hunter2"));
@@ -1144,7 +1155,8 @@ fn response_debug_output_hides_header_values_and_body_bytes() {
             ("X-Trace".to_owned(), "trace-secret".to_owned()),
         ],
         br#"{"code":1000,"msg":"ok","resData":{"token":"body-secret"}}"#.to_vec(),
-    );
+    )
+    .unwrap();
 
     let rendered = format!("{response:?}");
 
