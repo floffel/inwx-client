@@ -190,12 +190,13 @@ async fn push_sends_the_target_and_schedule() {
     let transport = MockTransport::new();
     transport.ok_empty();
 
-    let request = PushRequest::new(ack(ActionKind::Push))
-        .unwrap()
+    let request = PushRequest::builder(ack(ActionKind::Push))
         .with_target("other-registrar")
         .unwrap()
         .scheduled_at(Timestamp::parse("2026-12-01T00:00:00").unwrap())
-        .dry_run();
+        .dry_run()
+        .build()
+        .unwrap();
 
     client(transport.clone())
         .push_domain(&request)
@@ -289,7 +290,9 @@ async fn a_mismatched_acknowledgement_never_reaches_the_wire() {
 fn a_builder_cannot_be_created_from_the_wrong_intent() {
     assert!(TransferRequest::new(ack(ActionKind::Push)).is_err());
     assert!(TradeRequest::new(ack(ActionKind::Transfer)).is_err());
-    assert!(PushRequest::new(ack(ActionKind::Restore)).is_err());
+    assert!(PushRequest::builder(ack(ActionKind::Restore))
+        .build()
+        .is_err());
     assert!(RestoreRequest::new(ack(ActionKind::Push)).is_err());
 }
 
