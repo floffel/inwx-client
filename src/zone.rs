@@ -1271,7 +1271,7 @@ impl ZoneUpdate {
 pub struct ZoneExport {
     /// The zone in the requested format (zone file by default, CSV when
     /// `zonefile=false`).
-    #[serde(default, rename = "export")]
+    #[serde(rename = "export")]
     pub text: String,
 }
 
@@ -1291,7 +1291,7 @@ pub struct RecordExport {
     #[serde(default, deserialize_with = "de::opt_i64")]
     pub count: Option<i64>,
     /// CSV data in clear text (the only format the API supports here).
-    #[serde(default)]
+    #[serde(rename = "data")]
     pub data: String,
 }
 
@@ -1461,6 +1461,12 @@ impl<T: Transport> InwxClient<T> {
                 json!({ "domain": domain.as_str(), "zonefile": zonefile }),
             )
             .await?;
+        if data.get("export").is_none() {
+            return Err(Error::MissingField {
+                method: "nameserver.export",
+                field: "resData.export",
+            });
+        }
         serde_json::from_value(data).map_err(Error::from)
     }
 
@@ -1558,6 +1564,12 @@ impl<T: Transport> InwxClient<T> {
                 }),
             )
             .await?;
+        if data.get("data").is_none() {
+            return Err(Error::MissingField {
+                method: "nameserver.exportrecords",
+                field: "resData.data",
+            });
+        }
         serde_json::from_value(data).map_err(Error::from)
     }
 
