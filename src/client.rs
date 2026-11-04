@@ -290,9 +290,10 @@ impl fmt::Debug for Credentials {
 ///
 /// Backoff is exponential from [`DEFAULT_BASE_DELAY`] and clamped to
 /// [`DEFAULT_MAX_DELAY`]. Only failures that happened before the request was
-/// written, HTTP 429/5xx and API code `2300` (object pending transfer) are
-/// retried; everything else is terminal — retrying a rejected command would
-/// just duplicate the rejection.
+/// written, HTTP 429/5xx and API code `2300` (object pending transfer) on a
+/// read-only method are retried; everything else is terminal — retrying a
+/// rejected command would just duplicate the rejection, and replaying a
+/// mutation after a transient status or `2300` would duplicate the work.
 ///
 /// The wait is the *ceiling*, not the value slept: [`InwxClient`] draws a
 /// uniform sample from `[0, delay]` for every retry ([`RetryPolicy::delay_with_jitter`]),
@@ -1295,6 +1296,12 @@ impl<T: Transport> InwxClient<T> {
     /// whether the command already ran, so the call answers
     /// [`Error::Uncertain`] after a single attempt instead of retrying.
     ///
+    /// API code `2300` (object pending transfer) is gated the same way: a read
+    /// is replayed once the object is out of the transfer, a mutation is
+    /// answered with that code at once. The command reached the object, and a
+    /// second `domain.transfer` after the pending transfer settled would be a
+    /// second order.
+    ///
     /// A non-`2xx` answer whose body is not an envelope is [`Error::Http`], and
     /// the reason it could not be read is kept as that error's `source`: a
     /// proxy page and a JSON document of the wrong shape produce the same
@@ -1341,8 +1348,11 @@ impl<T: Transport> InwxClient<T> {
                         continue;
                     }
                     // `2300` means the object is mid-transfer: the command did
-                    // not fail, it is simply too early.
-                    if envelope.code == 2300 {
+                    // not fail, it is simply too early. Only a read is replayed
+                    // — the code says the object was already reached, so a
+                    // second mutating attempt could order, charge or delete
+                    // once more.
+                    if code_replay_allowed(envelope.code, method) {
                         if let Some(delay) = self.policy.delay_with_jitter(attempt, jitter_unit()) {
                             sleep_for(delay).await;
                             attempt += 1;
@@ -1594,6 +1604,18 @@ fn is_retryable_status(status: u16) -> bool {
 /// about whether the order already happened.
 fn status_replay_allowed(status: u16, method: &str) -> bool {
     is_retryable_status(status) && is_read_only_method(method)
+}
+
+/// Whether API code `code` may be answered with another attempt of `method`.
+///
+/// `2300` (object pending transfer) is the only code worth a replay: the object
+/// exists and is mid-transfer, so the same command can work once the registry
+/// caught up. That is only true for a method that cannot have changed anything.
+/// For a mutating method the code is the answer — the command already reached
+/// the object — and repeating it once the transfer settled would register,
+/// charge or delete a second time, so it is handed back as-is.
+fn code_replay_allowed(code: i32, method: &str) -> bool {
+    code == 2300 && is_read_only_method(method)
 }
 
 /// Whether a status leaves the outcome of `method` unknown: the request was

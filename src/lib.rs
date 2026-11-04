@@ -235,11 +235,14 @@
 //! * A certificate CSR is refused if it contains a private key: the field takes a
 //!   signing request, and anything else would upload a secret to a third party.
 //! * Retries are bounded (three attempts, exponential backoff) and only apply to
-//!   failures that happened before the request was written, 429/5xx and `2300`
-//!   (pending transfer) — a rejected command is never repeated. A 429/5xx is
-//!   replayed only for a read-only method as well: for an order the status says
-//!   nothing about whether it already went through, so that outcome is
-//!   [`Error::Uncertain`] after a single attempt. `account.login` is the one
+//!   failures that happened before the request was written, plus 429/5xx and
+//!   `2300` (pending transfer) on a read-only method — a rejected command is
+//!   never repeated. A 429/5xx is replayed only for a read-only method as well:
+//!   for an order the status says nothing about whether it already went
+//!   through, so that outcome is [`Error::Uncertain`] after a single attempt.
+//!   `2300` follows the same gate and is returned as-is for a mutation, because
+//!   the object was already reached and a second `domain.transfer` after the
+//!   pending one settled is a second order. `account.login` is the one
 //!   exception: it opens a session and nothing else, so a repeat replaces that
 //!   session instead of duplicating a domain, an order or a charge, and a login
 //!   is retried after a 429/5xx like any read.

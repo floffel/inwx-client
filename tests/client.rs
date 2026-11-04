@@ -856,19 +856,80 @@ async fn an_api_error_is_terminal() {
     assert_eq!(transport.call_count(), 1);
 }
 
+/// `2300` is "object pending transfer": a read only has to wait for the object
+/// to leave the transfer, so the replay is free and worth taking.
 #[tokio::test]
-async fn pending_transfer_code_is_treated_as_retryable_but_success_is_not_retried() {
-    // 2300 is documented as "object pending transfer"; the policy retries it.
+async fn a_pending_transfer_code_is_replayed_for_a_read_only_command() {
     let transport = MockTransport::new();
     transport.api_error(2300, "Object pending transfer");
-    transport.ok_empty();
+    transport.ok(json!({"domain": []}));
 
     let client = client(transport.clone());
     client
-        .delete_domain(&DomainName::parse("a.de").unwrap())
+        .list_domains(&DomainListQuery::default())
         .await
         .unwrap();
     assert_eq!(transport.call_count(), 2);
+}
+
+/// The same code on a mutation means the command already reached the object.
+/// Replaying it once the transfer settled would order, charge or delete a
+/// second time, so the answer is handed back after one attempt.
+#[tokio::test]
+async fn a_pending_transfer_code_is_not_replayed_for_a_mutating_command() {
+    for method in ["domain.create", "domain.transfer", "delete_domain"] {
+        let transport = MockTransport::new();
+        transport.api_error(2300, "Object pending transfer");
+        transport.ok_empty();
+
+        let client = client(transport.clone());
+        let error = if method == "delete_domain" {
+            client
+                .delete_domain(&DomainName::parse("a.de").unwrap())
+                .await
+                .err()
+        } else {
+            client.call(method, json!({"domain": "a.de"})).await.err()
+        };
+        let error = error.expect("a mutating 2300 must not be replayed into a success");
+
+        assert_eq!(error.code(), Some(2300), "method `{method}`");
+        assert!(error.to_string().contains("pending transfer"));
+        assert_eq!(transport.call_count(), 1, "method `{method}`");
+    }
+}
+
+/// Just inside the read-only table is replayed; one character outside is not.
+#[tokio::test]
+async fn the_read_only_boundary_decides_the_pending_transfer_replay() {
+    for (method, attempts) in [("domain.info", 2usize), ("domain.inf", 1)] {
+        let transport = MockTransport::new();
+        transport.api_error(2300, "Object pending transfer");
+        transport.ok_empty();
+
+        let client = client(transport.clone());
+        let _ = client.call(method, json!({})).await;
+
+        assert_eq!(transport.call_count(), attempts, "method `{method}`");
+    }
+}
+
+/// One code past `2300` is not a pending transfer: it is a verdict, and a
+/// verdict is never repeated, not even for a read.
+#[tokio::test]
+async fn a_code_next_to_2300_is_terminal_even_for_a_read_only_command() {
+    let transport = MockTransport::new();
+    transport.api_error(2301, "Object is locked");
+    transport.ok(json!({"domain": []}));
+
+    let client = client(transport.clone());
+    let error = client
+        .list_domains(&DomainListQuery::default())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), Some(2301));
+    assert_eq!(transport.call_count(), 1);
 }
 
 #[tokio::test]

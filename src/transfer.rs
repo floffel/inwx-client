@@ -1836,8 +1836,11 @@ impl<T: Transport> InwxClient<T> {
     /// # Errors
     ///
     /// [`Error::Validation`] from [`TransferRequest::params`], plus the usual
-    /// transport and API errors — `2300` while the transfer is pending (which
-    /// the client retries), `2106` when the TLD does not allow transfers.
+    /// transport and API errors — `2106` when the TLD does not allow transfers,
+    /// and `2300` while the transfer is pending. The client answers that `2300`
+    /// as-is instead of retrying: the transfer was already ordered, so a second
+    /// `domain.transfer` would order it again. Poll `domain.info` for the
+    /// outcome.
     pub async fn transfer_domain(&self, request: &TransferRequest) -> Result<OwnershipResult> {
         let data = self.call("domain.transfer", request.params()?).await?;
         serde_json::from_value(data).map_err(Error::from)
