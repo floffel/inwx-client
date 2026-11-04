@@ -640,6 +640,57 @@ async fn listing_zones_uses_the_documented_default_page_size() {
 }
 
 #[tokio::test]
+async fn the_hundredth_zone_of_a_bigger_account_reports_more() {
+    // The 100-zone cap of `list_zones`: a full page of an account with a 101st
+    // zone used to be indistinguishable from a complete listing.
+    let zones: Vec<_> = (0..100)
+        .map(|n| json!({"domain": format!("z{n}.de")}))
+        .collect();
+    let transport = MockTransport::new();
+    transport.ok(json!({"count": 101, "domains": zones}));
+
+    let client = client(transport.clone());
+    let page = client.list_zones().await.unwrap();
+
+    assert_eq!(page.len(), 100);
+    assert!(page.has_more(), "a page short of count must say so");
+    assert_eq!(transport.only_call().params["pagelimit"], 100);
+}
+
+#[tokio::test]
+async fn a_zone_page_that_reaches_the_count_is_the_end() {
+    // Edge pair of the page above: exactly `count` zones is the whole listing.
+    let zones: Vec<_> = (0..100)
+        .map(|n| json!({"domain": format!("z{n}.de")}))
+        .collect();
+    let transport = MockTransport::new();
+    transport.ok(json!({"count": 100, "domains": zones}));
+
+    let client = client(transport.clone());
+    let page = client.list_zones().await.unwrap();
+
+    assert_eq!(page.len(), 100);
+    assert!(!page.has_more());
+    assert!(!page.is_empty());
+}
+
+#[tokio::test]
+async fn a_zone_page_without_a_count_cannot_claim_more() {
+    let transport = MockTransport::new();
+    transport.ok(json!({"domains": [{"domain": "a.de"}]}));
+
+    let client = client(transport.clone());
+    let page = client.list_zones().await.unwrap();
+
+    assert_eq!(page.len(), 1);
+    assert!(!page.has_more());
+
+    let empty = inwx_client::ZoneListPage::default();
+    assert!(empty.is_empty());
+    assert!(!empty.has_more());
+}
+
+#[tokio::test]
 async fn a_zero_page_size_is_rejected_locally() {
     let transport = MockTransport::new();
     let client = client(transport.clone());

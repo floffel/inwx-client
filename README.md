@@ -75,7 +75,10 @@ of them.
 ## Listing everything (pagination)
 
 Every list command is paged (`page` + `pagelimit`), and `list_domains`,
-`list_contacts` and `list_zones` answer one page each. To read the whole
+`list_contacts` and `list_zones` answer one page each. `list_zones` asks for
+exactly 100 zones, so `ZoneListPage::has_more()` is what distinguishes a
+truncated page from a complete listing (`DomainListPage` has the same guard).
+To read the whole
 listing, hand the cursor to the client:
 
 ```rust,no_run

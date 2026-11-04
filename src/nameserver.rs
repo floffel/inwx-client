@@ -132,6 +132,60 @@ pub struct ZoneListPage {
     pub zones: Vec<ZoneSummary>,
 }
 
+impl ZoneListPage {
+    /// Number of zones on this page.
+    ///
+    /// ```
+    /// use inwx_client::ZoneListPage;
+    /// let page: ZoneListPage = serde_json::from_str(r#"{"domains":[]}"#)?;
+    /// assert_eq!(page.len(), 0);
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.zones.len()
+    }
+
+    /// Whether this page carries no zones.
+    ///
+    /// ```
+    /// use inwx_client::ZoneListPage;
+    /// assert!(ZoneListPage::default().is_empty());
+    /// ```
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.zones.is_empty()
+    }
+
+    /// Whether the listing continues past this page, comparing the page length
+    /// to the reported `count`.
+    ///
+    /// This is the guard that makes the page cap visible:
+    /// [`InwxClient::list_zones`](crate::InwxClient::list_zones) and
+    /// [`InwxClient::find_zones`](crate::InwxClient::find_zones) ask for one
+    /// page of at most [`DEFAULT_PAGE_SIZE`](crate::DEFAULT_PAGE_SIZE) zones, so
+    /// a full page of a larger account looks exactly like a complete listing —
+    /// `has_more()` is what tells the two apart. It is `false` when the answer
+    /// carries no `count`: a missing total is not evidence of more zones,
+    /// [`InwxClient::list_all_zones`](crate::InwxClient::list_all_zones) is the
+    /// answer to that case.
+    ///
+    /// ```
+    /// use inwx_client::ZoneListPage;
+    ///
+    /// let page: ZoneListPage = serde_json::from_str(
+    ///     r#"{"count":101,"domains":[{"domain":"a.de"}]}"#,
+    /// )?;
+    /// assert!(page.has_more());
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
+    #[must_use]
+    pub fn has_more(&self) -> bool {
+        self.count
+            .is_some_and(|count| i64::try_from(self.zones.len()).unwrap_or(i64::MAX) < count)
+    }
+}
+
 /// The page rules [`Pages`] needs to walk `nameserver.list`.
 ///
 /// ```
@@ -327,18 +381,32 @@ impl<T: Transport> InwxClient<T> {
 
     /// Lists the account's zones (`nameserver.list`), first page.
     ///
-    /// For more than one page use
-    /// [`InwxClient::list_all_zones`], which walks them.
+    /// That page holds at most 100 zones — the API's default `pagelimit`, also
+    /// [`DEFAULT_PAGE_SIZE`](crate::DEFAULT_PAGE_SIZE). The vector is
+    /// truncated, not an error: an account with a 101st zone gets 100 of them
+    /// and no signal beyond the `count` in the answer, so check
+    /// [`ZoneListPage::has_more`] before treating the page as the whole
+    /// listing. [`InwxClient::list_all_zones`] walks every page instead.
     ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
     /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
-    /// use inwx_client::{InwxClient, ReqwestTransport};
+    /// use inwx_client::{InwxClient, Pagination, ReqwestTransport, ZoneListing};
     ///
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
-    /// for zone in client.list_zones().await?.zones {
-    ///     println!("{}", zone.domain);
+    /// let page = client.list_zones().await?;
+    /// if page.has_more() {
+    ///     // Past the 100-zone cap: walk, or the missing zones look deleted.
+    ///     let zones = client
+    ///         .list_all_zones(&ZoneListing::new(), &Pagination::new())
+    ///         .collect_all()
+    ///         .await?;
+    ///     println!("{} zones", zones.len());
+    /// } else {
+    ///     for zone in &page.zones {
+    ///         println!("{}", zone.domain);
+    ///     }
     /// }
     /// # Ok(())
     /// # }
@@ -354,7 +422,9 @@ impl<T: Transport> InwxClient<T> {
     /// Lists one page of zones (`nameserver.list`).
     ///
     /// [`InwxClient::list_all_zones`] does the same requests in order and
-    /// stops at a bound, so a caller does not have to count pages.
+    /// stops at a bound, so a caller does not have to count pages. On a single
+    /// page, [`ZoneListPage::has_more`] tells whether `limit` cut the listing
+    /// short.
     ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
