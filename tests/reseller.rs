@@ -12,9 +12,9 @@ use common::{client, MockTransport};
 use inwx_client::{
     ApplicationCheck, ApplicationCreate, ApplicationQuery, ApplicationType, ApplicationUpdate,
     AuthInfo2Order, ContactVerificationSettingsUpdate, CustomerDownloadQuery, CustomerUpdate,
-    DocumentKind, DocumentQuery, DocumentUpload, DocumentUploadOutcome, DomainName, Error,
-    HostCheck, HostCreate, HostQuery, HostUpdate, Hostname, MessageAck, NicHandleQuery, Pagination,
-    PdfRender,
+    DocumentFormat, DocumentKind, DocumentQuery, DocumentUpload, DocumentUploadOutcome, DomainName,
+    Error, HostCheck, HostCreate, HostQuery, HostUpdate, Hostname, MessageAck, NicHandleQuery,
+    Pagination, PdfRender,
 };
 use serde_json::json;
 
@@ -1238,7 +1238,12 @@ async fn render_pdf_sends_the_document_request() {
     transport.ok(json!({ "pdfId": "99", "filename": "invoice-4711.pdf" }));
 
     let handle = client(transport.clone())
-        .render_pdf(&PdfRender::new("invoice", 4711).unwrap())
+        .render_pdf(
+            &PdfRender::new("invoice", 4711)
+                .unwrap()
+                .with_format(DocumentFormat::Pdf)
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -1248,6 +1253,7 @@ async fn render_pdf_sends_the_document_request() {
     assert_eq!(call.method, "pdf.document");
     assert_eq!(call.params["type"], "INVOICE");
     assert_eq!(call.params["id"], 4711);
+    assert_eq!(call.params["format"], "PDF");
 }
 
 #[tokio::test]
@@ -1270,6 +1276,11 @@ async fn a_bad_pdf_request_is_refused_before_the_wire() {
     let client = client(transport.clone());
 
     assert!(client.fetch_pdf(0).await.is_err());
+    let raw = PdfRender::new("invoice", 1)
+        .unwrap()
+        .with_format(DocumentFormat::Raw)
+        .unwrap_err();
+    assert!(raw.is_validation());
     let render = PdfRender::new("invoice", 1)
         .unwrap()
         .with_customer_number(0)
