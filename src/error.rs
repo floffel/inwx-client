@@ -32,6 +32,7 @@ use thiserror::Error;
 
 use crate::rpc::Detail;
 use crate::transport::TransportStage;
+use crate::types::DomainName;
 
 /// A boxed cause carried by one of the transport-shaped [`enum@Error`]
 /// variants, so `err.source()` walks down to the failure that really happened:
@@ -98,6 +99,33 @@ pub enum Error {
         reason: Option<String>,
         /// Per-parameter detail entries, when the API sent any.
         details: Vec<Detail>,
+    },
+
+    /// A domain transfer is already pending, so it cannot be submitted again.
+    ///
+    /// `domain.transfer` maps API code `2300` (`Object pending transfer`) to
+    /// this variant instead of the generic [`Error::Api`]. The transfer path is
+    /// not replayed: a second `domain.transfer` can spend money twice. The
+    /// caller can poll `domain.info` or list requests to follow the pending
+    /// transfer before deciding what to do next.
+    ///
+    /// ```
+    /// use inwx_client::{DomainName, Error};
+    ///
+    /// let err = Error::transfer_pending(
+    ///     DomainName::parse("example.com")?,
+    ///     "Object pending transfer",
+    /// );
+    /// assert!(matches!(err, Error::TransferPending { .. }));
+    /// assert!(!err.is_retryable());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[error("transfer for `{domain}` is pending: {message}")]
+    TransferPending {
+        /// Domain whose transfer is already pending.
+        domain: DomainName,
+        /// API message explaining the pending-transfer answer.
+        message: String,
     },
 
     /// A body that arrived intact could not be decoded: it was not JSON, or a
@@ -571,6 +599,28 @@ pub enum Error {
 }
 
 impl Error {
+    /// Builds an [`Error::TransferPending`] for a `domain.transfer` that found
+    /// an object already in transfer.
+    ///
+    /// ```
+    /// use inwx_client::{DomainName, Error};
+    ///
+    /// let err = Error::transfer_pending(
+    ///     DomainName::parse("example.com")?,
+    ///     "Object pending transfer",
+    /// );
+    /// assert!(err.to_string().contains("example.com"));
+    /// assert!(!err.is_retryable());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn transfer_pending(domain: DomainName, message: impl Into<String>) -> Self {
+        Self::TransferPending {
+            domain,
+            message: message.into(),
+        }
+    }
+
     /// Builds a validation error. `field` is the dotted path, `message` the
     /// human readable detail.
     ///

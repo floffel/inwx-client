@@ -29,7 +29,11 @@
 //! `domain.transfer`, `domain.trade` and `domain.restore` may charge the
 //! account; the answers carry `price` and `currency` whenever the API reports
 //! them. A transfer can also come back as `1001` (action pending), which this
-//! crate treats as success — see [`crate::rpc::is_success_code`].
+//! crate treats as success — see [`crate::rpc::is_success_code`]. If the registry
+//! instead reports `2300` (`Object pending transfer`) when a transfer is already
+//! in progress, [`InwxClient::transfer_domain`] returns
+//! [`Error::TransferPending`] after the single submission; it never resubmits
+//! the transfer. Poll `domain.info` or the request list for the outcome.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -2191,14 +2195,20 @@ impl<T: Transport> InwxClient<T> {
     /// # Errors
     ///
     /// [`Error::Validation`] from [`TransferRequest::params`], plus the usual
-    /// transport and API errors — `2106` when the TLD does not allow transfers,
-    /// and `2300` while the transfer is pending. The client answers that `2300`
-    /// as-is instead of retrying: the transfer was already ordered, so a second
-    /// `domain.transfer` would order it again. Poll `domain.info` for the
-    /// outcome.
+    /// transport and API errors. A transfer that is already pending (`2300`) is
+    /// [`Error::TransferPending`], carrying the domain; the transfer was already
+    /// ordered, so a second `domain.transfer` would order it again. Poll
+    /// `domain.info` for the outcome.
     pub async fn transfer_domain(&self, request: &TransferRequest) -> Result<OwnershipResult> {
-        let data = self.call("domain.transfer", request.params()?).await?;
-        serde_json::from_value(data).map_err(Error::from)
+        match self.call("domain.transfer", request.params()?).await {
+            Ok(data) => serde_json::from_value(data).map_err(Error::from),
+            Err(Error::Api {
+                code: 2300,
+                message,
+                ..
+            }) => Err(Error::transfer_pending(request.domain().clone(), message)),
+            Err(error) => Err(error),
+        }
     }
 
     /// Changes the owner of a domain (`domain.trade`).
