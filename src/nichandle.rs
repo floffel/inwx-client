@@ -502,9 +502,14 @@ impl Listing for NicHandleListing {
 impl<T: Transport> InwxClient<T> {
     /// Lists one page of NIC handles (`nichandle.list`).
     ///
-    /// The answer carries the handles on this page plus, usually, a `count` for
-    /// the whole query. For more than one page use
-    /// [`InwxClient::list_all_nichandles`], which walks them.
+    /// The query defaults to page 1 and a 50-row page cap when it does not
+    /// specify paging explicitly. The returned [`NicHandleListPage`] carries the
+    /// handles on this page plus, usually, a `count` for the whole query.
+    /// Compare `count` with the page length, or call
+    /// [`NicHandleListPage::has_more`], to tell whether the query has more rows
+    /// than this page returned. For more than one page use
+    /// [`InwxClient::list_all_nichandles`], which walks every page until the
+    /// reported total is read.
     ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
@@ -523,8 +528,9 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// [`crate::Error::Validation`] when the query carries a bad filter or page size,
-    /// plus the usual transport and API errors.
+    /// The usual transport and API errors. A malformed filter or page size is
+    /// refused when it is set on [`NicHandleQuery`], before this method can use
+    /// the query.
     pub async fn list_nichandles(&self, query: &NicHandleQuery) -> Result<NicHandleListPage> {
         let params = query.params()?;
         let data = self.call("nichandle.list", params).await?;
