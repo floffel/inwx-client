@@ -2,9 +2,10 @@
 //! demand — invoices, statements, contracts.
 //!
 //! `pdf.document` asks INWX to render a document and answers with a handle;
-//! `pdf.get` fetches the bytes for that handle. Both are read-only, so neither
-//! needs an acknowledgement — but the body is base64, and the crate decodes it
-//! rather than handing back a string the caller has to parse again.
+//! `pdf.get` fetches the bytes for that handle once it is [`PdfStatus::Ready`].
+//! Both are read-only, so neither needs an acknowledgement — but the body is
+//! base64, and the crate decodes it rather than handing back a string the caller
+//! has to parse again.
 //!
 //! ```
 //! use inwx_client::{DocumentFormat, PdfRender};
@@ -247,9 +248,184 @@ pub struct PdfHandle {
     /// File name the document will arrive under.
     #[serde(default, deserialize_with = "de::opt_string")]
     pub filename: Option<String>,
-    /// Rendering state, carried verbatim.
+    /// Rendering state, carried verbatim for forward compatibility. Prefer
+    /// [`PdfHandle::status`] and [`PdfHandle::ready_id`] when the state must be
+    /// interpreted.
     #[serde(default, deserialize_with = "de::opt_string")]
     pub status: Option<String>,
+}
+
+/// Rendering state of a [`PdfHandle`].
+///
+/// ```
+/// use inwx_client::PdfStatus;
+///
+/// assert_eq!(PdfStatus::parse("ready")?, PdfStatus::Ready);
+/// assert_eq!(PdfStatus::parse("error")?, PdfStatus::Failed);
+/// assert_eq!(
+///     PdfStatus::parse("SOMETHING_NEW")?,
+///     PdfStatus::Other("SOMETHING_NEW".into())
+/// );
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PdfStatus {
+    /// The document is rendered and ready for [`InwxClient::fetch_pdf`].
+    Ready,
+    /// The render is still in progress; wait before fetching.
+    Pending,
+    /// The render failed and no usable document should be fetched.
+    Failed,
+    /// A status this crate does not know; carried verbatim, upper-cased.
+    Other(String),
+}
+
+impl PdfStatus {
+    /// Parses a PDF render status, upper-casing it.
+    ///
+    /// `ERROR` is treated as the same failure state as `FAILED`, and an unknown
+    /// value is carried as [`PdfStatus::Other`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the input is empty.
+    ///
+    /// ```
+    /// use inwx_client::PdfStatus;
+    ///
+    /// assert_eq!(PdfStatus::parse("pending")?, PdfStatus::Pending);
+    /// assert_eq!(PdfStatus::parse("FAILED")?, PdfStatus::Failed);
+    /// assert!(PdfStatus::parse("   ").is_err());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    pub fn parse(input: &str) -> Result<Self> {
+        let upper = input.trim().to_ascii_uppercase();
+        if upper.is_empty() {
+            return Err(Error::validation("pdf.status", "must not be empty"));
+        }
+        Ok(match upper.as_str() {
+            "READY" => Self::Ready,
+            "PENDING" => Self::Pending,
+            "FAILED" | "ERROR" => Self::Failed,
+            _ => Self::Other(upper),
+        })
+    }
+
+    /// Wire representation.
+    ///
+    /// ```
+    /// use inwx_client::PdfStatus;
+    ///
+    /// assert_eq!(PdfStatus::Ready.as_str(), "READY");
+    /// assert_eq!(PdfStatus::Other("NEW".into()).as_str(), "NEW");
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Ready => "READY",
+            Self::Pending => "PENDING",
+            Self::Failed => "FAILED",
+            Self::Other(raw) => raw,
+        }
+    }
+}
+
+impl fmt::Display for PdfStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for PdfStatus {
+    type Err = Error;
+
+    fn from_str(input: &str) -> Result<Self> {
+        Self::parse(input)
+    }
+}
+
+impl PdfHandle {
+    /// The typed rendering status of the handle.
+    ///
+    /// The raw [`status`](Self::status) field is kept verbatim; this method
+    /// interprets the states this crate knows while leaving future states in
+    /// [`PdfStatus::Other`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnexpectedAnswer`] when the answer carried no render status, or
+    /// [`Error::Validation`] when the status was blank.
+    ///
+    /// ```
+    /// use inwx_client::{PdfHandle, PdfStatus};
+    ///
+    /// let handle: PdfHandle = serde_json::from_str(r#"{"status":"READY"}"#)?;
+    /// assert_eq!(handle.status()?, PdfStatus::Ready);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn status(&self) -> Result<PdfStatus> {
+        let raw = self.status.as_deref().ok_or_else(|| {
+            Error::unexpected_answer(
+                "pdf.document",
+                "status",
+                "the answer carries no render status; wait until the handle is READY",
+            )
+        })?;
+        PdfStatus::parse(raw)
+    }
+
+    /// The `pdfId` to pass to [`InwxClient::fetch_pdf`], but only when the
+    /// render has reached [`PdfStatus::Ready`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnexpectedAnswer`] when the handle has no positive numeric id,
+    /// no status, or a status other than `READY`; [`Error::Validation`] when
+    /// the raw status is blank. A pending render must be checked again before
+    /// fetching, and a failed render has no usable document.
+    ///
+    /// ```
+    /// use inwx_client::{Error, PdfHandle, PdfStatus};
+    ///
+    /// let ready: PdfHandle =
+    ///     serde_json::from_str(r#"{"pdfId":"99","status":"READY"}"#)?;
+    /// assert_eq!(ready.ready_id()?, 99);
+    ///
+    /// let pending: PdfHandle =
+    ///     serde_json::from_str(r#"{"pdfId":"99","status":"PENDING"}"#)?;
+    /// assert!(matches!(
+    ///     pending.ready_id(),
+    ///     Err(Error::UnexpectedAnswer { field: "status", .. })
+    /// ));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn ready_id(&self) -> Result<i64> {
+        let id = self.id.filter(|id| *id > 0).ok_or_else(|| {
+            Error::unexpected_answer(
+                "pdf.document",
+                "pdfId",
+                "the answer carries no usable pdfId; the render may still exist, so inspect it before rendering again",
+            )
+        })?;
+        match self.status()? {
+            PdfStatus::Ready => Ok(id),
+            PdfStatus::Pending => Err(Error::unexpected_answer(
+                "pdf.document",
+                "status",
+                "the render is still pending; wait until READY before calling fetch_pdf",
+            )),
+            PdfStatus::Failed => Err(Error::unexpected_answer(
+                "pdf.document",
+                "status",
+                "the render failed; do not call fetch_pdf for this handle",
+            )),
+            PdfStatus::Other(raw) => Err(Error::unexpected_answer(
+                "pdf.document",
+                "status",
+                format!("status {raw:?} is not READY; fetch only after a READY status"),
+            )),
+        }
+    }
 }
 
 /// The rendered document (`pdf.get`).
@@ -402,7 +578,7 @@ impl<T: Transport> InwxClient<T> {
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
     /// let handle = client.render_pdf(&PdfRender::new("invoice", 4711)?).await?;
-    /// println!("{:?} {:?}", handle.id, handle.filename);
+    /// println!("{:?} {:?} {:?}", handle.id, handle.filename, handle.status);
     /// # Ok(())
     /// # }
     /// ```
@@ -410,14 +586,28 @@ impl<T: Transport> InwxClient<T> {
     /// # Errors
     ///
     /// [`Error::Validation`] for an unusable class token, id or date range, plus
-    /// the usual transport and API errors.
+    /// the usual transport and API errors. A success whose answer carries no
+    /// positive numeric `pdfId` is [`Error::UnexpectedAnswer`], because the
+    /// render may exist but cannot be fetched; inspect the render state before
+    /// asking for another one.
     pub async fn render_pdf(&self, render: &PdfRender) -> Result<PdfHandle> {
         let params = render.params()?;
         let data = self.call("pdf.document", params).await?;
-        serde_json::from_value(data).map_err(Error::from)
+        let handle: PdfHandle = serde_json::from_value(data).map_err(Error::from)?;
+        if handle.id.is_none_or(|id| id <= 0) {
+            return Err(Error::unexpected_answer(
+                "pdf.document",
+                "pdfId",
+                "the answer carries no usable pdfId, so the rendered document cannot be fetched; inspect the render state before rendering again",
+            ));
+        }
+        Ok(handle)
     }
 
     /// Fetches a rendered document (`pdf.get`).
+    ///
+    /// The caller must wait until the handle reaches [`PdfStatus::Ready`] and
+    /// pass [`PdfHandle::ready_id`]; this method only performs the fetch.
     ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
@@ -554,5 +744,71 @@ mod tests {
     #[test]
     fn debug_of_an_empty_body_reports_zero_encoded_bytes() {
         assert!(format!("{:?}", PdfFile::default()).contains("0 encoded bytes"));
+    }
+
+    #[test]
+    fn pdf_statuses_parse_known_values_and_carry_unknown_ones() {
+        for (raw, expected) in [
+            ("ready", PdfStatus::Ready),
+            ("READY", PdfStatus::Ready),
+            (" pending ", PdfStatus::Pending),
+            ("FAILED", PdfStatus::Failed),
+            ("error", PdfStatus::Failed),
+            ("NEW_STATE", PdfStatus::Other("NEW_STATE".into())),
+        ] {
+            assert_eq!(PdfStatus::parse(raw).unwrap(), expected);
+        }
+        assert!(PdfStatus::parse("   ").is_err());
+    }
+
+    #[test]
+    fn a_ready_handle_has_a_fetchable_id() {
+        let ready: PdfHandle = serde_json::from_str(r#"{"pdfId":"99","status":"READY"}"#).unwrap();
+        assert_eq!(ready.status().unwrap(), PdfStatus::Ready);
+        assert_eq!(ready.ready_id().unwrap(), 99);
+
+        let one: PdfHandle = serde_json::from_str(r#"{"pdfId":"1","status":"ready"}"#).unwrap();
+        assert_eq!(one.ready_id().unwrap(), 1);
+
+        let zero: PdfHandle = serde_json::from_str(r#"{"pdfId":"0","status":"READY"}"#).unwrap();
+        assert!(matches!(
+            zero.ready_id(),
+            Err(Error::UnexpectedAnswer { field: "pdfId", .. })
+        ));
+    }
+
+    #[test]
+    fn a_handle_is_not_fetchable_until_ready() {
+        for (raw, message) in [
+            ("PENDING", "still pending"),
+            ("FAILED", "render failed"),
+            ("ERROR", "render failed"),
+            ("FUTURE", "not READY"),
+        ] {
+            let handle: PdfHandle =
+                serde_json::from_str(&format!(r#"{{"pdfId":99,"status":"{raw}"}}"#)).unwrap();
+            let error = handle.ready_id().unwrap_err();
+            assert!(matches!(
+                error,
+                Error::UnexpectedAnswer {
+                    field: "status",
+                    ..
+                }
+            ));
+            assert!(error.to_string().contains(message), "{raw}: {error}");
+        }
+
+        let missing = PdfHandle::default();
+        assert!(matches!(
+            missing.status(),
+            Err(Error::UnexpectedAnswer {
+                field: "status",
+                ..
+            })
+        ));
+        assert!(matches!(
+            missing.ready_id(),
+            Err(Error::UnexpectedAnswer { field: "pdfId", .. })
+        ));
     }
 }
