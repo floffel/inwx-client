@@ -674,8 +674,7 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the page size is zero, plus the usual transport
-    /// and API errors.
+    /// [`Error::Validation`] when the page size is zero or above [`MAX_PAGE_SIZE`](crate::MAX_PAGE_SIZE), plus the usual transport and API errors.
     pub async fn all_domain_prices(
         &self,
         tlds: &[&str],
@@ -818,8 +817,7 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the page size is zero or `tld` is `Some` but
-    /// blank, plus the usual transport and API errors.
+    /// [`Error::Validation`] when the page size is zero or above [`MAX_PAGE_SIZE`](crate::MAX_PAGE_SIZE), or `tld` is `Some` but blank, plus the usual transport and API errors.
     pub async fn promo_codes(
         &self,
         tld: Option<&str>,
@@ -861,8 +859,7 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the page size is zero or `tld` is `Some` but
-    /// blank, plus the usual transport and API errors.
+    /// [`Error::Validation`] when the page size is zero or above [`MAX_PAGE_SIZE`](crate::MAX_PAGE_SIZE), or `tld` is `Some` but blank, plus the usual transport and API errors.
     pub async fn price_changes(
         &self,
         tld: Option<&str>,
@@ -908,7 +905,11 @@ mod tests {
     #[test]
     fn a_page_size_of_one_is_the_last_valid_one() {
         assert_eq!(validate_page_limit(1).unwrap(), 1);
-        assert_eq!(validate_page_limit(u32::MAX).unwrap(), u32::MAX);
+        assert_eq!(
+            validate_page_limit(crate::MAX_PAGE_SIZE).unwrap(),
+            crate::MAX_PAGE_SIZE
+        );
+        assert!(validate_page_limit(crate::MAX_PAGE_SIZE + 1).is_err());
         assert!(validate_page_limit(0).is_err());
     }
 

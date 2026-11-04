@@ -538,7 +538,7 @@ impl HostQuery {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the page size is zero.
+    /// [`Error::Validation`] when the page size is zero or above [`MAX_PAGE_SIZE`](crate::MAX_PAGE_SIZE).
     ///
     /// ```
     /// use inwx_client::HostQuery;
