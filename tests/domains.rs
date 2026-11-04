@@ -503,19 +503,99 @@ async fn an_incomplete_contact_never_reaches_the_transport() {
 }
 
 #[tokio::test]
-async fn creating_a_contact_without_an_id_is_a_missing_field() {
+async fn creating_a_contact_without_an_id_is_ambiguous() {
+    // The registrar has already created the handle, so an unreadable id must
+    // not read as a local failure the caller may simply retry.
     let transport = MockTransport::new();
     transport.ok(json!({}));
 
-    let client = client(transport);
+    let client = client(transport.clone());
     let error = client.create_contact(&contact_request()).await.unwrap_err();
     assert!(matches!(
         error,
-        Error::MissingField {
+        Error::Ambiguous {
             method: "contact.create",
             ..
         }
     ));
+    assert_uncertain_after_one_attempt("contact.create without an id", &error, &transport);
+    assert!(error.to_string().contains("may have been executed"));
+}
+
+#[tokio::test]
+async fn an_unusable_contact_id_is_ambiguous_too() {
+    // Present but not an id: a fractional number, a word, and a nested object.
+    for answer in [
+        json!({"id": 991.5}),
+        json!({"id": "kein-id"}),
+        json!({"id": {"v": 991}}),
+    ] {
+        let transport = MockTransport::new();
+        transport.ok(answer.clone());
+
+        let client = client(transport.clone());
+        let error = client.create_contact(&contact_request()).await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::Ambiguous {
+                    method: "contact.create",
+                    ..
+                }
+            ),
+            "{answer} must be ambiguous"
+        );
+        assert_uncertain_after_one_attempt("contact.create with a bad id", &error, &transport);
+    }
+}
+
+#[tokio::test]
+async fn a_numeric_string_contact_id_is_read() {
+    // INWX sends ids as numbers in one method and as strings in another.
+    let transport = MockTransport::new();
+    transport.ok(json!({"id": "991"}));
+
+    let client = client(transport);
+    assert_eq!(
+        client.create_contact(&contact_request()).await.unwrap(),
+        991
+    );
+}
+
+#[tokio::test]
+async fn the_read_only_id_is_the_fallback_for_a_missing_id() {
+    let transport = MockTransport::new();
+    transport.ok(json!({"roId": 992}));
+
+    let client = client(transport);
+    assert_eq!(
+        client.create_contact(&contact_request()).await.unwrap(),
+        992
+    );
+}
+
+#[tokio::test]
+async fn a_null_id_hands_over_to_the_read_only_id() {
+    let transport = MockTransport::new();
+    transport.ok(json!({"id": null, "roId": 993}));
+
+    let client = client(transport);
+    assert_eq!(
+        client.create_contact(&contact_request()).await.unwrap(),
+        993
+    );
+}
+
+#[tokio::test]
+async fn a_usable_id_wins_over_the_read_only_id() {
+    let transport = MockTransport::new();
+    transport.ok(json!({"id": 991, "roId": 992}));
+
+    let client = client(transport);
+    assert_eq!(
+        client.create_contact(&contact_request()).await.unwrap(),
+        991
+    );
 }
 
 #[tokio::test]
