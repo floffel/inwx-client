@@ -22,7 +22,20 @@
 //! The acknowledgement names both the action and the domain. Passing a
 //! `Trade` acknowledgement to [`TransferRequest::new`], or an acknowledgement
 //! for `example.com` to a request that was meant for `example.net`, fails
-//! locally — the two mistakes that cost a domain.
+//! locally — the two mistakes that cost a domain. State the request's intended
+//! domain with `for_domain` (or `new_for_domain`) and it is checked against
+//! the acknowledgement at construction time:
+//!
+//! ```
+//! use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
+//!
+//! let intent = Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("example.com")?);
+//! let request = TransferRequest::builder(intent)
+//!     .for_domain(DomainName::parse("example.net")?)
+//!     .call();
+//! assert!(request.is_err());
+//! # Ok::<(), inwx_client::Error>(())
+//! ```
 //!
 //! # Money and state
 //!
@@ -189,19 +202,55 @@ impl Irreversible {
         &self.domain
     }
 
-    /// Consumes the acknowledgement after checking it names `expected`.
-    fn into_domain(self, expected: ActionKind) -> Result<DomainName> {
-        if self.action == expected {
-            Ok(self.domain)
-        } else {
-            Err(Error::validation(
+    /// Checks that this acknowledgement names `expected` and `domain`.
+    ///
+    /// ```
+    /// use inwx_client::{ActionKind, DomainName, Irreversible};
+    ///
+    /// let intent = Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?);
+    /// intent.verify(ActionKind::Transfer, &DomainName::parse("a.de")?)?;
+    /// assert!(intent.verify(ActionKind::Transfer, &DomainName::parse("b.de")?).is_err());
+    /// assert!(intent.verify(ActionKind::Trade, &DomainName::parse("a.de")?).is_err());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when the action or the domain differs.
+    pub fn verify(&self, expected: ActionKind, domain: &DomainName) -> Result<()> {
+        if self.action != expected {
+            return Err(Error::validation(
                 "intent",
                 format!(
-                    "this acknowledgement names {} but the request performs {}",
-                    self.action, expected
+                    "this acknowledgement names {} but the request performs {expected}",
+                    self.action
                 ),
-            ))
+            ));
         }
+        if &self.domain != domain {
+            return Err(Error::validation(
+                "intent",
+                format!(
+                    "this acknowledgement is for {} but the request is for {domain}",
+                    self.domain
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Consumes the acknowledgement after checking it names `expected` and
+    /// `domain`.
+    fn into_domain_for(self, expected: ActionKind, domain: DomainName) -> Result<DomainName> {
+        self.verify(expected, &domain)?;
+        Ok(domain)
+    }
+
+    /// Consumes the acknowledgement after checking it names `expected` on its
+    /// own domain.
+    fn into_domain(self, expected: ActionKind) -> Result<DomainName> {
+        let domain = self.domain.clone();
+        self.into_domain_for(expected, domain)
     }
 }
 
@@ -632,6 +681,34 @@ impl TransferRequest {
     #[allow(clippy::too_many_arguments)]
     fn create(
         #[builder(start_fn)] intent: Irreversible,
+        #[builder(setters(
+            name = for_domain,
+            option_fn(vis = ""),
+            doc {
+                /// Sets the domain this request is meant for and checks it
+                /// against the acknowledgement.
+                ///
+                /// # Errors
+                ///
+                /// [`Error::Validation`] when it differs from `intent`.
+                ///
+                /// ```
+                /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
+                ///
+                /// let intent = Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?);
+                /// assert!(TransferRequest::builder(intent.clone())
+                ///     .for_domain(DomainName::parse("b.de")?)
+                ///     .call()
+                ///     .is_err());
+                /// assert!(TransferRequest::builder(intent)
+                ///     .for_domain(DomainName::parse("a.de")?)
+                ///     .call()
+                ///     .is_ok());
+                /// # Ok::<(), inwx_client::Error>(())
+                /// ```
+            }
+        ))]
+        for_domain: Option<DomainName>,
         #[builder(setters(
             name = auth_code,
             option_fn(vis = ""),
@@ -1068,7 +1145,10 @@ impl TransferRequest {
         ))]
         testing: bool,
     ) -> Result<Self> {
-        let domain = intent.into_domain(ActionKind::Transfer)?;
+        let domain = match for_domain {
+            Some(domain) => intent.into_domain_for(ActionKind::Transfer, domain)?,
+            None => intent.into_domain(ActionKind::Transfer)?,
+        };
         Ok(Self {
             domain,
             auth_code,
@@ -1115,6 +1195,25 @@ impl TransferRequest {
     /// ```
     pub fn new(intent: Irreversible) -> Result<Self> {
         Self::builder(intent).call()
+    }
+
+    /// Starts a transfer for `domain`, checking it against `intent`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] unless `intent` acknowledges
+    /// [`ActionKind::Transfer`] for `domain`.
+    ///
+    /// ```
+    /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
+    ///
+    /// let intent = Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?);
+    /// assert!(TransferRequest::new_for_domain(intent.clone(), DomainName::parse("b.de")?).is_err());
+    /// assert!(TransferRequest::new_for_domain(intent, DomainName::parse("a.de")?).is_ok());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    pub fn new_for_domain(intent: Irreversible, domain: DomainName) -> Result<Self> {
+        Self::builder(intent).for_domain(domain).call()
     }
 
     /// The domain being transferred.
@@ -1290,6 +1389,36 @@ impl TradeRequest {
     }))]
     pub fn new(
         #[builder(start_fn)] intent: Irreversible,
+        #[builder(setters(
+            name = for_domain,
+            option_fn(vis = ""),
+            doc {
+                /// Sets the domain this request is meant for and checks it
+                /// against the acknowledgement.
+                ///
+                /// # Errors
+                ///
+                /// [`Error::Validation`] when it differs from `intent`.
+                ///
+                /// ```
+                /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TradeRequest};
+                ///
+                /// let intent = Irreversible::acknowledge(ActionKind::Trade, &DomainName::parse("a.de")?);
+                /// assert!(TradeRequest::builder(intent.clone())
+                ///     .for_domain(DomainName::parse("b.de")?)
+                ///     .with_registrant(Handle::new(1)?)
+                ///     .build()
+                ///     .is_err());
+                /// assert!(TradeRequest::builder(intent)
+                ///     .for_domain(DomainName::parse("a.de")?)
+                ///     .with_registrant(Handle::new(1)?)
+                ///     .build()
+                ///     .is_ok());
+                /// # Ok::<(), inwx_client::Error>(())
+                /// ```
+            }
+        ))]
+        for_domain: Option<DomainName>,
         /// The new owner (`registrant`); a required member of the builder.
         ///
         /// ```
@@ -1528,7 +1657,10 @@ impl TradeRequest {
         #[builder(setters(name = dry_run, option_fn(vis = "")), default, with = || true)]
         testing: bool,
     ) -> Result<Self> {
-        let domain = intent.into_domain(ActionKind::Trade)?;
+        let domain = match for_domain {
+            Some(domain) => intent.into_domain_for(ActionKind::Trade, domain)?,
+            None => intent.into_domain(ActionKind::Trade)?,
+        };
         Ok(Self {
             domain,
             registrant,
@@ -1666,6 +1798,34 @@ impl PushRequest {
     #[builder]
     pub fn new(
         #[builder(start_fn)] intent: Irreversible,
+        #[builder(setters(
+            name = for_domain,
+            option_fn(vis = ""),
+            doc {
+                /// Sets the domain this request is meant for and checks it
+                /// against the acknowledgement.
+                ///
+                /// # Errors
+                ///
+                /// [`Error::Validation`] when it differs from `intent`.
+                ///
+                /// ```
+                /// use inwx_client::{ActionKind, DomainName, Irreversible, PushRequest};
+                ///
+                /// let intent = Irreversible::acknowledge(ActionKind::Push, &DomainName::parse("a.de")?);
+                /// assert!(PushRequest::builder(intent.clone())
+                ///     .for_domain(DomainName::parse("b.de")?)
+                ///     .build()
+                ///     .is_err());
+                /// assert!(PushRequest::builder(intent)
+                ///     .for_domain(DomainName::parse("a.de")?)
+                ///     .build()
+                ///     .is_ok());
+                /// # Ok::<(), inwx_client::Error>(())
+                /// ```
+            }
+        ))]
+        for_domain: Option<DomainName>,
         /// Names the receiving registrar, where the TLD supports it (`target`).
         ///
         /// # Errors
@@ -1730,7 +1890,10 @@ impl PushRequest {
         #[builder(default, setters(name = dry_run), with = || true)]
         testing: bool,
     ) -> Result<Self> {
-        let domain = intent.into_domain(ActionKind::Push)?;
+        let domain = match for_domain {
+            Some(domain) => intent.into_domain_for(ActionKind::Push, domain)?,
+            None => intent.into_domain(ActionKind::Push)?,
+        };
         Ok(Self {
             domain,
             target,
@@ -1826,6 +1989,34 @@ impl RestoreRequest {
     #[builder]
     pub fn new(
         #[builder(start_fn)] intent: Irreversible,
+        #[builder(setters(
+            name = for_domain,
+            option_fn(vis = ""),
+            doc {
+                /// Sets the domain this request is meant for and checks it
+                /// against the acknowledgement.
+                ///
+                /// # Errors
+                ///
+                /// [`Error::Validation`] when it differs from `intent`.
+                ///
+                /// ```
+                /// use inwx_client::{ActionKind, DomainName, Irreversible, RestoreRequest};
+                ///
+                /// let intent = Irreversible::acknowledge(ActionKind::Restore, &DomainName::parse("a.de")?);
+                /// assert!(RestoreRequest::builder(intent.clone())
+                ///     .for_domain(DomainName::parse("b.de")?)
+                ///     .build()
+                ///     .is_err());
+                /// assert!(RestoreRequest::builder(intent)
+                ///     .for_domain(DomainName::parse("a.de")?)
+                ///     .build()
+                ///     .is_ok());
+                /// # Ok::<(), inwx_client::Error>(())
+                /// ```
+            }
+        ))]
+        for_domain: Option<DomainName>,
         /// What happens at expiry after the restore (`renewalMode`).
         ///
         /// ```
@@ -1857,7 +2048,10 @@ impl RestoreRequest {
         #[builder(default, setters(name = dry_run), with = || true)]
         testing: bool,
     ) -> Result<Self> {
-        let domain = intent.into_domain(ActionKind::Restore)?;
+        let domain = match for_domain {
+            Some(domain) => intent.into_domain_for(ActionKind::Restore, domain)?,
+            None => intent.into_domain(ActionKind::Restore)?,
+        };
         Ok(Self {
             domain,
             renewal_mode,
@@ -1942,6 +2136,29 @@ impl TransferCancelRequest {
     /// ```
     pub fn new(intent: Irreversible) -> Result<Self> {
         let domain = intent.into_domain(ActionKind::TransferCancel)?;
+        Ok(Self {
+            domain,
+            testing: false,
+        })
+    }
+
+    /// Starts a cancellation for `domain`, checking it against `intent`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] unless `intent` acknowledges
+    /// [`ActionKind::TransferCancel`] for `domain`.
+    ///
+    /// ```
+    /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferCancelRequest};
+    ///
+    /// let intent = Irreversible::acknowledge(ActionKind::TransferCancel, &DomainName::parse("a.de")?);
+    /// assert!(TransferCancelRequest::new_for_domain(intent.clone(), DomainName::parse("b.de")?).is_err());
+    /// assert!(TransferCancelRequest::new_for_domain(intent, DomainName::parse("a.de")?).is_ok());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    pub fn new_for_domain(intent: Irreversible, domain: DomainName) -> Result<Self> {
+        let domain = intent.into_domain_for(ActionKind::TransferCancel, domain)?;
         Ok(Self {
             domain,
             testing: false,
@@ -2037,6 +2254,38 @@ impl TransferOutRequest {
     /// ```
     pub fn new(intent: Irreversible, answer: TransferAnswer) -> Result<Self> {
         let domain = intent.into_domain(ActionKind::TransferOut)?;
+        Ok(Self {
+            domain,
+            answer,
+            testing: false,
+        })
+    }
+
+    /// Answers the outbound transfer for `domain`, checking it against `intent`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] unless `intent` acknowledges
+    /// [`ActionKind::TransferOut`] for `domain`.
+    ///
+    /// ```
+    /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferAnswer, TransferOutRequest};
+    ///
+    /// let intent = Irreversible::acknowledge(ActionKind::TransferOut, &DomainName::parse("a.de")?);
+    /// assert!(TransferOutRequest::new_for_domain(
+    ///     intent.clone(), DomainName::parse("b.de")?, TransferAnswer::Ack,
+    /// ).is_err());
+    /// assert!(TransferOutRequest::new_for_domain(
+    ///     intent, DomainName::parse("a.de")?, TransferAnswer::Ack,
+    /// ).is_ok());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    pub fn new_for_domain(
+        intent: Irreversible,
+        domain: DomainName,
+        answer: TransferAnswer,
+    ) -> Result<Self> {
+        let domain = intent.into_domain_for(ActionKind::TransferOut, domain)?;
         Ok(Self {
             domain,
             answer,
@@ -2374,6 +2623,26 @@ mod tests {
     fn an_acknowledgement_cannot_authorise_another_action() {
         let trade = Irreversible::acknowledge(ActionKind::Trade, &domain("a.de"));
         assert!(TransferRequest::new(trade).is_err());
+    }
+
+    #[test]
+    fn an_acknowledgement_cannot_authorise_another_domain() {
+        let intent = Irreversible::acknowledge(ActionKind::Transfer, &domain("a.de"));
+        // The builder records the domain it will actually send and rejects a
+        // mismatch instead of silently reusing the acknowledgement's domain.
+        assert!(TransferRequest::builder(intent.clone())
+            .for_domain(domain("b.de"))
+            .call()
+            .is_err());
+        assert!(TransferRequest::new_for_domain(intent, domain("b.de")).is_err());
+
+        // The same check is reachable directly and covers both halves.
+        let intent = Irreversible::acknowledge(ActionKind::Transfer, &domain("a.de"));
+        assert!(intent.verify(ActionKind::Transfer, &domain("a.de")).is_ok());
+        assert!(intent
+            .verify(ActionKind::Transfer, &domain("b.de"))
+            .is_err());
+        assert!(intent.verify(ActionKind::Trade, &domain("a.de")).is_err());
     }
 
     #[test]
