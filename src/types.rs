@@ -22,6 +22,9 @@ use garde::rules::email::parse_email;
 
 use crate::{Error, Result};
 
+/// Largest value the API's `int` parameters accept.
+const MAX_API_INT: i64 = i32::MAX as i64;
+
 /// Longest legal DNS name in presentation form, without the trailing root dot.
 ///
 /// The limit itself is enforced by `idna`'s UTS-46 DNS length check; the
@@ -787,9 +790,10 @@ pub(crate) fn validate_text(field: &'static str, value: &str, max: usize) -> Res
 /// A contact handle id — the `int` INWX uses for `registrant`, `admin`, `tech`,
 /// `billing` and the certificate contacts.
 ///
-/// Handles are positive; `0` and negatives are rejected before the request is
-/// built, because the API answers them with `2303 Object does not exist` only
-/// after the round trip.
+/// Handles are positive and fit the API's `int` range; values outside
+/// `1..=i32::MAX` are rejected before the request is built, because the API
+/// answers them with `2303 Object does not exist` or `2004 Parameter value range
+/// error` only after the round trip.
 ///
 /// ```
 /// use inwx_client::Handle;
@@ -797,8 +801,10 @@ pub(crate) fn validate_text(field: &'static str, value: &str, max: usize) -> Res
 /// let handle = Handle::new(991)?;
 /// assert_eq!(handle.get(), 991);
 /// assert_eq!(handle.to_string(), "991");
+/// assert_eq!(Handle::new(i64::from(i32::MAX))?.get(), i64::from(i32::MAX));
 /// assert!(Handle::new(0).is_err());
 /// assert!(Handle::new(-1).is_err());
+/// assert!(Handle::new(i64::from(i32::MAX) + 1).is_err());
 /// # Ok::<(), inwx_client::Error>(())
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -809,15 +815,13 @@ impl Handle {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the id is not positive.
+    /// [`Error::Validation`] when the id is not in `1..=i32::MAX`.
     pub fn new(id: i64) -> Result<Self> {
-        if id <= 0 {
-            return Err(Error::validation(
-                "handle",
-                format!("must be a positive contact handle, got {id}"),
-            ));
-        }
-        Ok(Self(id))
+        Ok(Self(validate_int_id(
+            "handle",
+            id,
+            "positive contact handle",
+        )?))
     }
 
     /// The id as sent on the wire.
@@ -1428,16 +1432,21 @@ pub fn parse_ip(text: &str) -> Result<std::net::IpAddr> {
         .map_err(|_| Error::validation("ip", format!("{text:?} is not an IP address")))
 }
 
-/// A positive object id.
+/// A positive object id in the API's `int` range.
 ///
 /// The reseller objects (`application`, `customer`, `document`, `host`,
-/// `message`, `pdf`) all take a numeric id; `0` and negatives only come back as
-/// `2303 Object does not exist` after the round trip, so they are refused here.
+/// `message`, `pdf`) all take a numeric id; values outside `1..=i32::MAX` only
+/// come back as `2303 Object does not exist` or `2004 Parameter value range
+/// error` after the round trip, so they are refused here.
 pub(crate) fn validate_id(field: &'static str, id: i64) -> Result<i64> {
-    if id <= 0 {
+    validate_int_id(field, id, "positive id")
+}
+
+fn validate_int_id(field: &'static str, id: i64, description: &str) -> Result<i64> {
+    if !(1..=MAX_API_INT).contains(&id) {
         return Err(Error::validation(
             field,
-            format!("must be a positive id, got {id}"),
+            format!("must be a {description} in 1..={MAX_API_INT}, got {id}"),
         ));
     }
     Ok(id)

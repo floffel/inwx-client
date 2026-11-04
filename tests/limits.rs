@@ -2,12 +2,14 @@
 //! just inside the limit and the one just outside it.
 
 use inwx_client::{
-    parse_ip, AddDnsKeyRequest, AuthCode, AuthInfoUpdate, CertificateId, CertificateOrder,
-    CertificateTerm, CertificateUpdate, Credentials, DnsKey, DnssecKeyQuery, DomainLogQuery,
-    DomainName, DsRecord, Email, Error, Handle, HostingPeriod, Hostname, NameserverSetCreate,
-    NameserverSetType, Password, PostalDelivery, RefundRequest, RemoveClientHold, SetClientHold,
-    StatementQuery, TagUpdate, Timestamp, TldGroup, TldRules, TransferCodeUpdate, ZoneCreate,
-    ZoneUpdate, MAX_AUTH_CODE_LEN, MAX_DOMAIN_LEN, MAX_LABEL_LEN, MAX_PAGE_LIMIT, MAX_PASSWORD_LEN,
+    parse_ip, AddDnsKeyRequest, ApplicationUpdate, AuthCode, AuthInfoUpdate, CertificateId,
+    CertificateOrder, CertificateTerm, CertificateUpdate, Credentials, CustomerDownloadQuery,
+    CustomerUpdate, DnsKey, DnssecKeyQuery, DomainLogQuery, DomainName, DsRecord, Email, Error,
+    Handle, HostUpdate, HostingPeriod, Hostname, MessageAck, NameserverSetCreate,
+    NameserverSetType, NicHandleQuery, Password, PdfRender, PostalDelivery, RefundRequest,
+    RemoveClientHold, SetClientHold, StatementQuery, TagUpdate, Timestamp, TldGroup, TldRules,
+    TransferCodeUpdate, ZoneCreate, ZoneUpdate, MAX_AUTH_CODE_LEN, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
+    MAX_PAGE_LIMIT, MAX_PASSWORD_LEN,
 };
 use zeroize::Zeroize as _;
 
@@ -437,10 +439,47 @@ fn password_boundaries() {
 #[test]
 fn handle_boundaries() {
     assert!(Handle::new(1).is_ok());
-    assert!(Handle::new(i64::MAX).is_ok());
+    assert!(Handle::new(i64::from(i32::MAX)).is_ok());
     assert!(Handle::new(0).is_err());
     assert!(Handle::new(-1).is_err());
+    assert!(Handle::new(i64::from(i32::MAX) + 1).is_err());
     assert!(Handle::try_from(i64::MIN).is_err());
+}
+
+#[test]
+fn validate_id_backed_types_share_the_documented_int_boundaries() {
+    for (valid, just_above) in [
+        (1_i64, i64::from(i32::MAX) + 1),
+        (i64::from(i32::MAX), i64::from(i32::MAX) + 1),
+    ] {
+        assert!(ApplicationUpdate::new(valid).is_ok());
+        assert!(CustomerUpdate::new(valid).is_ok());
+        assert!(CustomerDownloadQuery::new(valid).is_ok());
+        assert!(HostUpdate::new(valid).is_ok());
+        assert!(MessageAck::new(valid).is_ok());
+        assert!(PdfRender::new("invoice", valid).is_ok());
+        assert!(NicHandleQuery::new().with_customer_number(valid).is_ok());
+
+        assert!(ApplicationUpdate::new(just_above).is_err());
+        assert!(CustomerUpdate::new(just_above).is_err());
+        assert!(CustomerDownloadQuery::new(just_above).is_err());
+        assert!(HostUpdate::new(just_above).is_err());
+        assert!(MessageAck::new(just_above).is_err());
+        assert!(PdfRender::new("invoice", just_above).is_err());
+        assert!(NicHandleQuery::new()
+            .with_customer_number(just_above)
+            .is_err());
+    }
+
+    for invalid in [0, -1] {
+        assert!(ApplicationUpdate::new(invalid).is_err());
+        assert!(CustomerUpdate::new(invalid).is_err());
+        assert!(CustomerDownloadQuery::new(invalid).is_err());
+        assert!(HostUpdate::new(invalid).is_err());
+        assert!(MessageAck::new(invalid).is_err());
+        assert!(PdfRender::new("invoice", invalid).is_err());
+        assert!(NicHandleQuery::new().with_customer_number(invalid).is_err());
+    }
 }
 
 // --------------------------------------------------------------- timestamps --
