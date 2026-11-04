@@ -39,10 +39,14 @@ pub fn is_success_code(code: i32) -> bool {
 /// ```
 /// use inwx_client::rpc::Detail;
 ///
-/// let detail = Detail { code: "PARAM_MISSING".into(), msg: "id is missing".into() };
+/// let detail = Detail {
+///     code: "PARAM_MISSING".into(),
+///     msg: "id is missing".into(),
+///     ..Detail::default()
+/// };
 /// assert_eq!(detail.code, "PARAM_MISSING");
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Detail {
     /// Short machine readable code.
     #[serde(default)]
@@ -50,6 +54,12 @@ pub struct Detail {
     /// Human readable explanation.
     #[serde(default)]
     pub msg: String,
+    /// Additional fields returned by the API.
+    ///
+    /// Kept so a permissively parsed response survives a serialize/parse round
+    /// trip even when the API adds a new detail member.
+    #[serde(default, flatten)]
+    pub extra: Map<String, Value>,
 }
 
 /// A JSON-RPC request.
@@ -159,8 +169,9 @@ impl RpcRequest {
 ///
 /// Every field is optional on the wire: errors carry `reasonCode`/`reason`,
 /// successes carry `resData`, and a `nameserver.createRecord` answer has neither
-/// `svTRID` nor `runtime`. Unknown fields are ignored, so a new API field never
-/// breaks parsing.
+/// `svTRID` nor `runtime`. Unknown fields are kept in [`extra`](Self::extra), so
+/// a new API field never breaks parsing and does not disappear if the response
+/// is serialized again.
 ///
 /// ```
 /// use inwx_client::RpcResponse;
@@ -198,6 +209,12 @@ pub struct RpcResponse {
     /// Per-parameter error details.
     #[serde(default)]
     pub details: Vec<Detail>,
+    /// Additional fields returned by the API.
+    ///
+    /// Kept so a permissively parsed response survives a serialize/parse round
+    /// trip even when the API adds a new envelope member.
+    #[serde(default, flatten)]
+    pub extra: Map<String, Value>,
 }
 
 impl RpcResponse {
@@ -333,13 +350,32 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn unknown_fields_are_ignored() {
+    fn unknown_fields_are_kept() {
         let response = RpcResponse::parse(
             br#"{"code":1000,"msg":"ok","brandNewField":{"a":1},"resData":{"id":"7"}}"#,
         )
         .unwrap();
         assert!(response.is_success());
+        assert_eq!(response.extra["brandNewField"]["a"], 1);
         assert_eq!(response.into_result().unwrap()["id"], "7");
+    }
+
+    #[test]
+    fn unknown_fields_survive_a_round_trip() {
+        let body = br#"{"code":2003,"msg":"Required parameter missing","reason":"id","svTRID":"abc","vendorField":{"nested":[1,2,3]},"details":[{"code":"PARAM_MISSING","msg":"id","vendor":"detail extra","detailField":{"x":true}}]}"#;
+        let response = RpcResponse::parse(body).unwrap();
+        let original = serde_json::from_slice::<Value>(body).unwrap();
+
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["vendorField"], original["vendorField"]);
+        assert_eq!(
+            value["details"][0]["vendor"],
+            original["details"][0]["vendor"]
+        );
+        assert_eq!(
+            value["details"][0]["detailField"],
+            original["details"][0]["detailField"]
+        );
     }
 
     #[test]

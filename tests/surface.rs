@@ -436,6 +436,7 @@ fn rpc_request_and_detail_types() {
     let detail = Detail {
         code: "X".into(),
         msg: "why".into(),
+        ..Detail::default()
     };
     let encoded = serde_json::to_string(&detail).unwrap();
     let decoded: Detail = serde_json::from_str(&encoded).unwrap();
