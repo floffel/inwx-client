@@ -471,6 +471,15 @@ impl<'de> Deserialize<'de> for Hostname {
 /// legal); `DnsLength::Verify` enforces [`MAX_DOMAIN_LEN`] characters in total
 /// and [`MAX_LABEL_LEN`] per label, with no empty labels.
 ///
+/// `hostaddr` is deliberately not used for the DNS label/domain rule set. Its
+/// structural validator accepts `_`, accepts the root domain `.`, preserves a
+/// trailing dot instead of normalising it away, and uses
+/// `AsciiDenyList::URL`/`DnsLength::Ignore` on its UTS-46 path. INWX's values
+/// here intentionally keep the stricter STD3 character set, reject the root
+/// as a domain, strip one trailing root dot, and enforce DNS lengths, so taking
+/// `hostaddr::Domain` would change accepted input rather than reuse the same
+/// policy.
+///
 /// `idna::Errors` carries no detail, so a rejected name is run a second time
 /// without the length check to work out what failed — a cost paid on the error
 /// path only.
