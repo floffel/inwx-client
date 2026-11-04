@@ -11,9 +11,10 @@
 //! use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
 //!
 //! let intent = Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("example.com")?);
-//! let request = TransferRequest::new(intent)?
+//! let request = TransferRequest::builder(intent)
 //!     .auth_code(inwx_client::AuthCode::new("aB3-xY9_42")?)
-//!     .with_registrant(inwx_client::Handle::new(991)?);
+//!     .with_registrant(inwx_client::Handle::new(991)?)
+//!     .call()?;
 //! assert_eq!(request.params()?["domain"], "example.com");
 //! # Ok::<(), inwx_client::Error>(())
 //! ```
@@ -33,6 +34,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use bon::bon;
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{json, Map, Value};
 
@@ -397,7 +399,8 @@ impl ExtData {
     /// # Errors
     ///
     /// [`Error::Validation`] when the key is not an upper-case token of 1–64
-    /// characters (`A-Z`, `0-9`, `-`), or the value is empty.
+    /// characters (`A-Z`, `0-9`, `-`), the key is one of the documented typed
+    /// keys, or the value is empty.
     ///
     /// ```
     /// use inwx_client::ExtData;
@@ -422,6 +425,12 @@ impl ExtData {
             return Err(Error::validation(
                 "extData",
                 format!("{key:?} must be an upper-case A-Z, 0-9, - token"),
+            ));
+        }
+        if is_reserved_ext_data_key(key) {
+            return Err(Error::validation(
+                "extData",
+                format!("{key:?} must be set with its typed builder"),
             ));
         }
         if value.trim().is_empty() {
@@ -449,6 +458,13 @@ impl ExtData {
                 .collect::<Map<String, Value>>(),
         )
     }
+}
+
+fn is_reserved_ext_data_key(key: &str) -> bool {
+    matches!(
+        key,
+        "NO-DOMAIN-CHECK" | "NO-HOST-CHECK" | "BIRTH-DATE" | "BIRTH-CITY"
+    )
 }
 
 /// What a completed transfer, trade or push cost.
@@ -513,14 +529,15 @@ pub struct RestoreResult {
 ///     ActionKind, AuthCode, DomainName, Handle, Irreversible, TransferRequest,
 /// };
 ///
-/// let request = TransferRequest::new(Irreversible::acknowledge(
+/// let request = TransferRequest::builder(Irreversible::acknowledge(
 ///     ActionKind::Transfer,
 ///     &DomainName::parse("example.com")?,
-/// ))?
+/// ))
 /// .auth_code(AuthCode::new("aB3-xY9_42")?)
 /// .with_registrant(Handle::new(991)?)
 /// .with_transfer_lock(false)
-/// .with_period(inwx_client::Period::years(2)?);
+/// .with_period(inwx_client::Period::years(2)?)
+/// .call()?;
 ///
 /// let params = request.params()?;
 /// assert_eq!(params["authCode"], "aB3-xY9_42");
@@ -552,6 +569,7 @@ pub struct TransferRequest {
     testing: bool,
 }
 
+#[bon::bon]
 impl TransferRequest {
     /// Starts a transfer for the domain named in `intent`.
     ///
@@ -567,33 +585,520 @@ impl TransferRequest {
     /// assert!(TransferRequest::new(wrong).is_err());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
-    pub fn new(intent: Irreversible) -> Result<Self> {
+    #[builder(
+        start_fn(name = builder, vis = "pub"),
+        builder_type(
+            name = TransferRequestBuilder,
+            vis = "pub",
+            doc {
+                /// Builder for [`TransferRequest`].
+                ///
+                /// ```
+                /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
+                ///
+                /// let request = TransferRequest::builder(
+                ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+                /// )
+                /// .call()?;
+                /// assert_eq!(request.domain().as_str(), "a.de");
+                /// # Ok::<(), inwx_client::Error>(())
+                /// ```
+            }
+        ),
+        finish_fn(doc {
+            /// Finishes building the transfer request.
+            ///
+            /// # Errors
+            ///
+            /// [`Error::Validation`] unless the acknowledgement names
+            /// [`ActionKind::Transfer`].
+            ///
+            /// ```
+            /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
+            ///
+            /// let request = TransferRequest::builder(
+            ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+            /// )
+            /// .call()?;
+            /// assert_eq!(request.domain().as_str(), "a.de");
+            /// # Ok::<(), inwx_client::Error>(())
+            /// ```
+        })
+    )]
+    #[allow(clippy::too_many_arguments)]
+    fn create(
+        #[builder(start_fn)] intent: Irreversible,
+        #[builder(setters(
+            name = auth_code,
+            option_fn(vis = ""),
+            doc {
+                /// Sets the authorisation code (`authCode`).
+                ///
+                /// ```
+                /// use inwx_client::{ActionKind, AuthCode, DomainName, Irreversible, TransferRequest};
+                ///
+                /// let request = TransferRequest::builder(
+                ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+                /// )
+                /// .auth_code(AuthCode::new("code-42")?)
+                /// .call()?;
+                /// assert_eq!(request.params()?["authCode"], "code-42");
+                /// # Ok::<(), inwx_client::Error>(())
+                /// ```
+            }
+        ))]
+        auth_code: Option<AuthCode>,
+        #[builder(setters(
+            name = with_registrant,
+            option_fn(vis = ""),
+            doc {
+                /// Sets the registrant handle for the transferred domain.
+                ///
+                /// ```
+                /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TransferRequest};
+                ///
+                /// let request = TransferRequest::builder(
+                ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+                /// )
+                /// .with_registrant(Handle::new(7)?)
+                /// .call()?;
+                /// assert_eq!(request.params()?["registrant"], 7);
+                /// # Ok::<(), inwx_client::Error>(())
+                /// ```
+            }
+        ))]
+        registrant: Option<Handle>,
+        #[builder(setters(
+            name = with_admin,
+            option_fn(vis = ""),
+            doc {
+                /// Sets the administrative contact handle.
+                ///
+                /// ```
+                /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TransferRequest};
+                ///
+                /// let request = TransferRequest::builder(
+                ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+                /// )
+                /// .with_admin(Handle::new(8)?)
+                /// .call()?;
+                /// assert_eq!(request.params()?["admin"], 8);
+                /// # Ok::<(), inwx_client::Error>(())
+                /// ```
+            }
+        ))]
+        admin: Option<Handle>,
+        #[builder(setters(
+            name = with_tech,
+            option_fn(vis = ""),
+            doc {
+                /// Sets the technical contact handle.
+                ///
+                /// ```
+                /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TransferRequest};
+                ///
+                /// let request = TransferRequest::builder(
+                ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+                /// )
+                /// .with_tech(Handle::new(9)?)
+                /// .call()?;
+                /// assert_eq!(request.params()?["tech"], 9);
+                /// # Ok::<(), inwx_client::Error>(())
+                /// ```
+            }
+        ))]
+        tech: Option<Handle>,
+        #[builder(setters(
+            name = with_billing,
+            option_fn(vis = ""),
+            doc {
+                /// Sets the billing contact handle.
+                ///
+                /// ```
+                /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TransferRequest};
+                ///
+                /// let request = TransferRequest::builder(
+                ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+                /// )
+                /// .with_billing(Handle::new(10)?)
+                /// .call()?;
+                /// assert_eq!(request.params()?["billing"], 10);
+                /// # Ok::<(), inwx_client::Error>(())
+                /// ```
+            }
+        ))]
+        billing: Option<Handle>,
+        #[builder(
+            with = |nameservers: &[Hostname]| -> Result<_> {
+                validate_nameservers(nameservers)?;
+                Ok(nameservers.to_vec())
+            },
+            setters(
+                name = with_nameservers,
+                option_fn(vis = ""),
+                doc {
+                    /// Sets the nameservers to use after the transfer.
+                    ///
+                    /// # Errors
+                    ///
+                    /// [`Error::Validation`] for an empty or duplicate list.
+                    ///
+                    /// ```
+                    /// use inwx_client::{ActionKind, DomainName, Hostname, Irreversible, TransferRequest};
+                    ///
+                    /// let request = TransferRequest::builder(
+                    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+                    /// )
+                    /// .with_nameservers(&[Hostname::parse("ns1.example.net")?])?
+                    /// .call()?;
+                    /// assert_eq!(request.params()?["ns"][0], "ns1.example.net");
+                    /// # Ok::<(), inwx_client::Error>(())
+                    /// ```
+                }
+            )
+        )]
+        nameservers: Option<Vec<Hostname>>,
+        #[builder(with = || true, setters(
+            name = keeping_nameservers,
+            option_fn(vis = ""),
+            doc {
+                /// Keeps the nameservers the domain currently uses (`nsTakeover`).
+                ///
+                /// ```
+                /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
+                ///
+                /// let request = TransferRequest::builder(
+                ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+                /// )
+                /// .keeping_nameservers()
+                /// .call()?;
+                /// assert_eq!(request.params()?["nsTakeover"], true);
+                /// # Ok::<(), inwx_client::Error>(())
+                /// ```
+            }
+        ))]
+        ns_takeover: Option<bool>,
+        #[builder(setters(
+            name = with_contact_takeover,
+            option_fn(vis = ""),
+            doc {
+                /// Transfers the gTLD data along with the domain (`contactTakeover`).
+                ///
+                /// ```
+                /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
+                ///
+                /// let request = TransferRequest::builder(
+                ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+                /// )
+                /// .with_contact_takeover(true)
+                /// .call()?;
+                /// assert_eq!(request.params()?["contactTakeover"], true);
+                /// # Ok::<(), inwx_client::Error>(())
+                /// ```
+            }
+        ))]
+        contact_takeover: Option<bool>,
+        #[builder(setters(
+            name = with_transfer_lock,
+            option_fn(vis = ""),
+            doc {
+                /// Sets the transfer lock (`transferLock`; the API defaults it to on).
+                ///
+                /// ```
+                /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
+                ///
+                /// let request = TransferRequest::builder(
+                ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+                /// )
+                /// .with_transfer_lock(false)
+                /// .call()?;
+                /// assert_eq!(request.params()?["transferLock"], false);
+                /// # Ok::<(), inwx_client::Error>(())
+                /// ```
+            }
+        ))]
+        transfer_lock: Option<bool>,
+        #[builder(setters(
+            name = with_renewal_mode,
+            option_fn(vis = ""),
+            doc {
+                /// Sets what happens at expiry.
+                ///
+                /// ```
+                /// use inwx_client::{ActionKind, DomainName, Irreversible, RenewalMode, TransferRequest};
+                ///
+                /// let request = TransferRequest::builder(
+                ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+                /// )
+                /// .with_renewal_mode(RenewalMode::AutoRenew)
+                /// .call()?;
+                /// assert_eq!(request.params()?["renewalMode"], "AUTORENEW");
+                /// # Ok::<(), inwx_client::Error>(())
+                /// ```
+            }
+        ))]
+        renewal_mode: Option<RenewalMode>,
+        #[builder(setters(
+            name = with_period,
+            option_fn(vis = ""),
+            doc {
+                /// Sets the registration period bought with the transfer.
+                ///
+                /// ```
+                /// use inwx_client::{ActionKind, DomainName, Irreversible, Period, TransferRequest};
+                ///
+                /// let request = TransferRequest::builder(
+                ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+                /// )
+                /// .with_period(Period::years(1)?)
+                /// .call()?;
+                /// assert_eq!(request.params()?["period"], "1Y");
+                /// # Ok::<(), inwx_client::Error>(())
+                /// ```
+            }
+        ))]
+        period: Option<Period>,
+        #[builder(
+            with = |provider: impl Into<String>| -> Result<_> {
+                let provider = provider.into();
+                validate_token("whoisProvider", &provider)?;
+                Ok(provider.trim().to_owned())
+            },
+            setters(
+                name = with_whois_provider,
+                option_fn(vis = ""),
+                doc {
+                    /// Sets the whois provider handed to the registry (`whoisProvider`).
+                    ///
+                    /// # Errors
+                    ///
+                    /// [`Error::Validation`] when the value is unusable.
+                    ///
+                    /// ```
+                    /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
+                    ///
+                    /// let request = TransferRequest::builder(
+                    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+                    /// )
+                    /// .with_whois_provider("Example Whois")?
+                    /// .call()?;
+                    /// assert_eq!(request.params()?["whoisProvider"], "Example Whois");
+                    /// # Ok::<(), inwx_client::Error>(())
+                    /// ```
+                }
+            )
+        )]
+        whois_provider: Option<String>,
+        #[builder(
+            with = |url: impl Into<String>| -> Result<_> {
+                let url = url.into();
+                validate_token("whoisUrl", &url)?;
+                Ok(url.trim().to_owned())
+            },
+            setters(
+                name = with_whois_url,
+                option_fn(vis = ""),
+                doc {
+                    /// Sets the whois URL handed to the registry (`whoisUrl`).
+                    ///
+                    /// # Errors
+                    ///
+                    /// [`Error::Validation`] when the value is unusable.
+                    ///
+                    /// ```
+                    /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
+                    ///
+                    /// let request = TransferRequest::builder(
+                    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+                    /// )
+                    /// .with_whois_url("https://whois.example.net")?
+                    /// .call()?;
+                    /// assert_eq!(request.params()?["whoisUrl"], "https://whois.example.net");
+                    /// # Ok::<(), inwx_client::Error>(())
+                    /// ```
+                }
+            )
+        )]
+        whois_url: Option<String>,
+        #[builder(setters(
+            name = scheduled_at,
+            option_fn(vis = ""),
+            doc {
+                /// Schedules the transfer for a later date (`scDate`).
+                ///
+                /// ```
+                /// use inwx_client::{ActionKind, DomainName, Irreversible, Timestamp, TransferRequest};
+                ///
+                /// let request = TransferRequest::builder(
+                ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+                /// )
+                /// .scheduled_at(Timestamp::parse("2026-11-01T03:00:00")?)
+                /// .call()?;
+                /// assert_eq!(request.params()?["scDate"], "2026-11-01T03:00:00");
+                /// # Ok::<(), inwx_client::Error>(())
+                /// ```
+            }
+        ))]
+        sc_date: Option<Timestamp>,
+        #[builder(setters(
+            name = with_ext_data,
+            option_fn(vis = ""),
+            doc {
+                /// Sets the TLD-specific extra data.
+                ///
+                /// ```
+                /// use inwx_client::{ActionKind, DomainName, ExtData, Irreversible, TransferRequest};
+                ///
+                /// let mut extra = ExtData::new();
+                /// extra.no_domain_check(true);
+                /// let request = TransferRequest::builder(
+                ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+                /// )
+                /// .with_ext_data(extra)
+                /// .call()?;
+                /// assert_eq!(request.params()?["extData"]["NO-DOMAIN-CHECK"], true);
+                /// # Ok::<(), inwx_client::Error>(())
+                /// ```
+            }
+        ))]
+        ext_data: Option<ExtData>,
+        #[builder(
+            with = |voucher: impl Into<String>| -> Result<_> {
+                let voucher = voucher.into();
+                validate_token("voucher", &voucher)?;
+                Ok(voucher.trim().to_owned())
+            },
+            setters(
+                name = with_voucher,
+                option_fn(vis = ""),
+                doc {
+                    /// Sets a voucher code.
+                    ///
+                    /// # Errors
+                    ///
+                    /// [`Error::Validation`] when the value is unusable.
+                    ///
+                    /// ```
+                    /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
+                    ///
+                    /// let request = TransferRequest::builder(
+                    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+                    /// )
+                    /// .with_voucher("SUMMER26")?
+                    /// .call()?;
+                    /// assert_eq!(request.params()?["voucher"], "SUMMER26");
+                    /// # Ok::<(), inwx_client::Error>(())
+                    /// ```
+                }
+            )
+        )]
+        voucher: Option<String>,
+        #[builder(
+            with = |price: f64| -> Result<_> {
+                validate_price(price)?;
+                Ok(price)
+            },
+            setters(
+                name = with_agreed_price,
+                option_fn(vis = ""),
+                doc {
+                    /// Sets the price agreed for a premium transfer.
+                    ///
+                    /// # Errors
+                    ///
+                    /// [`Error::Validation`] unless the price is finite and positive.
+                    ///
+                    /// ```
+                    /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
+                    ///
+                    /// let request = TransferRequest::builder(
+                    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+                    /// )
+                    /// .with_agreed_price(250.0)?
+                    /// .call()?;
+                    /// assert_eq!(request.params()?["agreedPrice"], 250.0);
+                    /// # Ok::<(), inwx_client::Error>(())
+                    /// ```
+                }
+            )
+        )]
+        agreed_price: Option<f64>,
+        #[builder(with = || true, setters(
+            name = asynchronous,
+            option_fn(vis = ""),
+            doc {
+                /// Asks the API to answer before the registry does (`asynchron`).
+                ///
+                /// ```
+                /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
+                ///
+                /// let request = TransferRequest::builder(
+                ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+                /// )
+                /// .asynchronous()
+                /// .call()?;
+                /// assert_eq!(request.params()?["asynchron"], true);
+                /// # Ok::<(), inwx_client::Error>(())
+                /// ```
+            }
+        ))]
+        asynchron: Option<bool>,
+        #[builder(with = || true, default, setters(
+            name = dry_run,
+            option_fn(vis = ""),
+            doc {
+                /// Runs the command in testing mode (`testing=true`).
+                ///
+                /// ```
+                /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
+                ///
+                /// let request = TransferRequest::builder(
+                ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+                /// )
+                /// .dry_run()
+                /// .call()?;
+                /// assert_eq!(request.params()?["testing"], true);
+                /// # Ok::<(), inwx_client::Error>(())
+                /// ```
+            }
+        ))]
+        testing: bool,
+    ) -> Result<Self> {
         let domain = intent.into_domain(ActionKind::Transfer)?;
         Ok(Self {
             domain,
-            auth_code: None,
-            registrant: None,
-            admin: None,
-            tech: None,
-            billing: None,
-            nameservers: None,
-            ns_takeover: None,
-            contact_takeover: None,
-            transfer_lock: None,
-            renewal_mode: None,
-            period: None,
-            whois_provider: None,
-            whois_url: None,
-            sc_date: None,
-            ext_data: None,
-            voucher: None,
-            agreed_price: None,
-            asynchron: None,
-            testing: false,
+            auth_code,
+            registrant,
+            admin,
+            tech,
+            billing,
+            nameservers,
+            ns_takeover,
+            contact_takeover,
+            transfer_lock,
+            renewal_mode,
+            period,
+            whois_provider,
+            whois_url,
+            sc_date,
+            ext_data,
+            voucher,
+            agreed_price,
+            asynchron,
+            testing,
         })
     }
 
-    /// The domain being transferred.
+    /// Starts a transfer for the domain named in `intent`.
+    ///
+    /// This is the compatibility constructor for callers that do not set any
+    /// optional transfer options. Use [`TransferRequest::builder`] when options
+    /// are needed.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] unless `intent` acknowledges
+    /// [`ActionKind::Transfer`].
     ///
     /// ```
     /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
@@ -604,376 +1109,25 @@ impl TransferRequest {
     /// assert_eq!(request.domain().as_str(), "a.de");
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
+    pub fn new(intent: Irreversible) -> Result<Self> {
+        Self::builder(intent).call()
+    }
+
+    /// The domain being transferred.
+    ///
+    /// ```
+    /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
+    ///
+    /// let request = TransferRequest::builder(
+    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
+    /// )
+    /// .call()?;
+    /// assert_eq!(request.domain().as_str(), "a.de");
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
     #[must_use]
     pub fn domain(&self) -> &DomainName {
         &self.domain
-    }
-
-    /// Sets the authorisation code (`authCode`).
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, AuthCode, DomainName, Irreversible, TransferRequest};
-    ///
-    /// let request = TransferRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
-    /// )?
-    /// .auth_code(AuthCode::new("code-42")?);
-    /// assert_eq!(request.params()?["authCode"], "code-42");
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn auth_code(mut self, code: AuthCode) -> Self {
-        self.auth_code = Some(code);
-        self
-    }
-
-    /// Sets the registrant handle for the transferred domain.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TransferRequest};
-    ///
-    /// let request = TransferRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_registrant(Handle::new(7)?);
-    /// assert_eq!(request.params()?["registrant"], 7);
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn with_registrant(mut self, handle: Handle) -> Self {
-        self.registrant = Some(handle);
-        self
-    }
-
-    /// Sets the administrative contact handle.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TransferRequest};
-    ///
-    /// let request = TransferRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_admin(Handle::new(8)?);
-    /// assert_eq!(request.params()?["admin"], 8);
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn with_admin(mut self, handle: Handle) -> Self {
-        self.admin = Some(handle);
-        self
-    }
-
-    /// Sets the technical contact handle.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TransferRequest};
-    ///
-    /// let request = TransferRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_tech(Handle::new(9)?);
-    /// assert_eq!(request.params()?["tech"], 9);
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn with_tech(mut self, handle: Handle) -> Self {
-        self.tech = Some(handle);
-        self
-    }
-
-    /// Sets the billing contact handle.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TransferRequest};
-    ///
-    /// let request = TransferRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_billing(Handle::new(10)?);
-    /// assert_eq!(request.params()?["billing"], 10);
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn with_billing(mut self, handle: Handle) -> Self {
-        self.billing = Some(handle);
-        self
-    }
-
-    /// Sets the nameservers to use after the transfer.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Validation`] for an empty or duplicate list.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Hostname, Irreversible, TransferRequest};
-    ///
-    /// let request = TransferRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_nameservers(&[Hostname::parse("ns1.example.net")?])?;
-    /// assert_eq!(request.params()?["ns"][0], "ns1.example.net");
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    pub fn with_nameservers(mut self, nameservers: &[Hostname]) -> Result<Self> {
-        validate_nameservers(nameservers)?;
-        self.nameservers = Some(nameservers.to_vec());
-        Ok(self)
-    }
-
-    /// Keeps the nameservers the domain currently uses (`nsTakeover`).
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
-    ///
-    /// let request = TransferRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
-    /// )?
-    /// .keeping_nameservers();
-    /// assert_eq!(request.params()?["nsTakeover"], true);
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn keeping_nameservers(mut self) -> Self {
-        self.ns_takeover = Some(true);
-        self
-    }
-
-    /// Transfers the gTLD data along with the domain (`contactTakeover`).
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
-    ///
-    /// let request = TransferRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_contact_takeover(true);
-    /// assert_eq!(request.params()?["contactTakeover"], true);
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn with_contact_takeover(mut self, takeover: bool) -> Self {
-        self.contact_takeover = Some(takeover);
-        self
-    }
-
-    /// Sets the transfer lock (`transferLock`; the API defaults it to on).
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
-    ///
-    /// let request = TransferRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_transfer_lock(false);
-    /// assert_eq!(request.params()?["transferLock"], false);
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn with_transfer_lock(mut self, locked: bool) -> Self {
-        self.transfer_lock = Some(locked);
-        self
-    }
-
-    /// Sets what happens at expiry.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, RenewalMode, TransferRequest};
-    ///
-    /// let request = TransferRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_renewal_mode(RenewalMode::AutoRenew);
-    /// assert_eq!(request.params()?["renewalMode"], "AUTORENEW");
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn with_renewal_mode(mut self, mode: RenewalMode) -> Self {
-        self.renewal_mode = Some(mode);
-        self
-    }
-
-    /// Sets the registration period bought with the transfer.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, Period, TransferRequest};
-    ///
-    /// let request = TransferRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_period(Period::years(1)?);
-    /// assert_eq!(request.params()?["period"], "1Y");
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn with_period(mut self, period: Period) -> Self {
-        self.period = Some(period);
-        self
-    }
-
-    /// Sets the whois provider handed to the registry (`whoisProvider`).
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Validation`] when the value is unusable.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
-    ///
-    /// let request = TransferRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_whois_provider("Example Whois")?;
-    /// assert_eq!(request.params()?["whoisProvider"], "Example Whois");
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    pub fn with_whois_provider(mut self, provider: impl Into<String>) -> Result<Self> {
-        let provider = provider.into();
-        validate_token("whoisProvider", &provider)?;
-        self.whois_provider = Some(provider.trim().to_owned());
-        Ok(self)
-    }
-
-    /// Sets the whois URL handed to the registry (`whoisUrl`).
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Validation`] when the value is unusable.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
-    ///
-    /// let request = TransferRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_whois_url("https://whois.example.net")?;
-    /// assert_eq!(request.params()?["whoisUrl"], "https://whois.example.net");
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    pub fn with_whois_url(mut self, url: impl Into<String>) -> Result<Self> {
-        let url = url.into();
-        validate_token("whoisUrl", &url)?;
-        self.whois_url = Some(url.trim().to_owned());
-        Ok(self)
-    }
-
-    /// Schedules the transfer for a later date (`scDate`).
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, Timestamp, TransferRequest};
-    ///
-    /// let request = TransferRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
-    /// )?
-    /// .scheduled_at(Timestamp::parse("2026-11-01T03:00:00")?);
-    /// assert_eq!(request.params()?["scDate"], "2026-11-01T03:00:00");
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn scheduled_at(mut self, at: Timestamp) -> Self {
-        self.sc_date = Some(at);
-        self
-    }
-
-    /// Sets the TLD-specific extra data.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, ExtData, Irreversible, TransferRequest};
-    ///
-    /// let mut extra = ExtData::new();
-    /// extra.no_domain_check(true);
-    /// let request = TransferRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_ext_data(extra);
-    /// assert_eq!(request.params()?["extData"]["NO-DOMAIN-CHECK"], true);
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn with_ext_data(mut self, extra: ExtData) -> Self {
-        self.ext_data = Some(extra);
-        self
-    }
-
-    /// Sets a voucher code.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Validation`] when the value is unusable.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
-    ///
-    /// let request = TransferRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_voucher("SUMMER26")?;
-    /// assert_eq!(request.params()?["voucher"], "SUMMER26");
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    pub fn with_voucher(mut self, voucher: impl Into<String>) -> Result<Self> {
-        let voucher = voucher.into();
-        validate_token("voucher", &voucher)?;
-        self.voucher = Some(voucher.trim().to_owned());
-        Ok(self)
-    }
-
-    /// Sets the price agreed for a premium transfer.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Validation`] unless the price is finite and positive.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
-    ///
-    /// let request = TransferRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_agreed_price(250.0)?;
-    /// assert_eq!(request.params()?["agreedPrice"], 250.0);
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    pub fn with_agreed_price(mut self, price: f64) -> Result<Self> {
-        validate_price(price)?;
-        self.agreed_price = Some(price);
-        Ok(self)
-    }
-
-    /// Asks the API to answer before the registry does (`asynchron`).
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
-    ///
-    /// let request = TransferRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
-    /// )?
-    /// .asynchronous();
-    /// assert_eq!(request.params()?["asynchron"], true);
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn asynchronous(mut self) -> Self {
-        self.asynchron = Some(true);
-        self
-    }
-
-    /// Runs the command in testing mode (`testing=true`).
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, TransferRequest};
-    ///
-    /// let request = TransferRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
-    /// )?
-    /// .dry_run();
-    /// assert_eq!(request.params()?["testing"], true);
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn dry_run(mut self) -> Self {
-        self.testing = true;
-        self
     }
 
     /// The `domain.transfer` parameters.
@@ -987,11 +1141,12 @@ impl TransferRequest {
     /// ```
     /// use inwx_client::{ActionKind, DomainName, Hostname, Irreversible, TransferRequest};
     ///
-    /// let request = TransferRequest::new(
+    /// let request = TransferRequest::builder(
     ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
-    /// )?
+    /// )
     /// .keeping_nameservers()
-    /// .with_nameservers(&[Hostname::parse("ns1.example.net")?])?;
+    /// .with_nameservers(&[Hostname::parse("ns1.example.net")?])?
+    /// .call()?;
     /// assert!(request.params().is_err());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
@@ -1450,11 +1605,12 @@ impl TradeRequest {
 /// ```
 /// use inwx_client::{ActionKind, DomainName, Irreversible, PushRequest};
 ///
-/// let push = PushRequest::new(Irreversible::acknowledge(
+/// let push = PushRequest::builder(Irreversible::acknowledge(
 ///     ActionKind::Push,
 ///     &DomainName::parse("example.com")?,
-/// ))?
-/// .with_target("other-registrar")?;
+/// ))
+/// .with_target("other-registrar")?
+/// .build()?;
 ///
 /// assert_eq!(push.params()["target"], "other-registrar");
 /// # Ok::<(), inwx_client::Error>(())
@@ -1467,28 +1623,96 @@ pub struct PushRequest {
     testing: bool,
 }
 
+#[bon]
 impl PushRequest {
     /// Starts a push for the domain named in `intent`.
     ///
     /// # Errors
     ///
     /// [`Error::Validation`] unless `intent` acknowledges
-    /// [`ActionKind::Push`].
+    /// [`ActionKind::Push`]. The acknowledgement is checked by
+    /// [`build`](PushRequestBuilder::build).
     ///
     /// ```
     /// use inwx_client::{ActionKind, DomainName, Irreversible, PushRequest};
     ///
     /// let wrong = Irreversible::acknowledge(ActionKind::Restore, &DomainName::parse("a.de")?);
-    /// assert!(PushRequest::new(wrong).is_err());
+    /// assert!(PushRequest::builder(wrong).build().is_err());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
-    pub fn new(intent: Irreversible) -> Result<Self> {
+    #[builder]
+    pub fn new(
+        #[builder(start_fn)] intent: Irreversible,
+        /// Names the receiving registrar, where the TLD supports it (`target`).
+        ///
+        /// # Errors
+        ///
+        /// [`Error::Validation`] when the value is empty or longer than 64
+        /// characters.
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, DomainName, Irreversible, PushRequest};
+        ///
+        /// let push = PushRequest::builder(
+        ///     Irreversible::acknowledge(ActionKind::Push, &DomainName::parse("a.de")?),
+        /// )
+        /// .with_target("other-registrar")?
+        /// .build()?;
+        /// assert_eq!(push.params()["target"], "other-registrar");
+        /// assert!(PushRequest::builder(
+        ///     Irreversible::acknowledge(ActionKind::Push, &DomainName::parse("a.de")?),
+        /// )
+        /// .with_target("")
+        /// .is_err());
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(setters(name = with_target), with = |target: impl Into<String>| -> Result<_> {
+            let target = target.into();
+            let trimmed = target.trim();
+            if trimmed.is_empty() || trimmed.chars().count() > 64 {
+                return Err(Error::validation("target", "must be 1 to 64 characters"));
+            }
+            reject_control_chars("target", trimmed)?;
+            Ok(trimmed.to_owned())
+        })]
+        target: Option<String>,
+        /// Schedules the push for a later date (`scDate`).
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, DomainName, Irreversible, PushRequest, Timestamp};
+        ///
+        /// let push = PushRequest::builder(
+        ///     Irreversible::acknowledge(ActionKind::Push, &DomainName::parse("a.de")?),
+        /// )
+        /// .scheduled_at(Timestamp::parse("2026-12-01T00:00:00")?)
+        /// .build()?;
+        /// assert_eq!(push.params()["scDate"], "2026-12-01T00:00:00");
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(setters(name = scheduled_at))]
+        sc_date: Option<Timestamp>,
+        /// Runs the command in testing mode (`testing=true`).
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, DomainName, Irreversible, PushRequest};
+        ///
+        /// let push = PushRequest::builder(
+        ///     Irreversible::acknowledge(ActionKind::Push, &DomainName::parse("a.de")?),
+        /// )
+        /// .dry_run()
+        /// .build()?;
+        /// assert_eq!(push.params()["testing"], true);
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(default, setters(name = dry_run), with = || true)]
+        testing: bool,
+    ) -> Result<Self> {
         let domain = intent.into_domain(ActionKind::Push)?;
         Ok(Self {
             domain,
-            target: None,
-            sc_date: None,
-            testing: false,
+            target,
+            sc_date,
+            testing,
         })
     }
 
@@ -1497,9 +1721,10 @@ impl PushRequest {
     /// ```
     /// use inwx_client::{ActionKind, DomainName, Irreversible, PushRequest};
     ///
-    /// let push = PushRequest::new(
+    /// let push = PushRequest::builder(
     ///     Irreversible::acknowledge(ActionKind::Push, &DomainName::parse("a.de")?),
-    /// )?;
+    /// )
+    /// .build()?;
     /// assert_eq!(push.domain().as_str(), "a.de");
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
@@ -1508,79 +1733,15 @@ impl PushRequest {
         &self.domain
     }
 
-    /// Names the receiving registrar, where the TLD supports it (`target`).
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Validation`] when the value is empty or longer than 64
-    /// characters.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, PushRequest};
-    ///
-    /// let push = PushRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Push, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_target("other-registrar")?;
-    /// assert_eq!(push.params()["target"], "other-registrar");
-    /// assert!(push.with_target("").is_err());
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    pub fn with_target(mut self, target: impl Into<String>) -> Result<Self> {
-        let target = target.into();
-        let trimmed = target.trim();
-        if trimmed.is_empty() || trimmed.chars().count() > 64 {
-            return Err(Error::validation("target", "must be 1 to 64 characters"));
-        }
-        reject_control_chars("target", trimmed)?;
-        self.target = Some(trimmed.to_owned());
-        Ok(self)
-    }
-
-    /// Schedules the push for a later date (`scDate`).
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, PushRequest, Timestamp};
-    ///
-    /// let push = PushRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Push, &DomainName::parse("a.de")?),
-    /// )?
-    /// .scheduled_at(Timestamp::parse("2026-12-01T00:00:00")?);
-    /// assert_eq!(push.params()["scDate"], "2026-12-01T00:00:00");
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn scheduled_at(mut self, at: Timestamp) -> Self {
-        self.sc_date = Some(at);
-        self
-    }
-
-    /// Runs the command in testing mode (`testing=true`).
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, PushRequest};
-    ///
-    /// let push = PushRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Push, &DomainName::parse("a.de")?),
-    /// )?
-    /// .dry_run();
-    /// assert_eq!(push.params()["testing"], true);
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn dry_run(mut self) -> Self {
-        self.testing = true;
-        self
-    }
-
     /// The `domain.push` parameters.
     ///
     /// ```
     /// use inwx_client::{ActionKind, DomainName, Irreversible, PushRequest};
     ///
-    /// let params = PushRequest::new(
+    /// let params = PushRequest::builder(
     ///     Irreversible::acknowledge(ActionKind::Push, &DomainName::parse("a.de")?),
-    /// )?
+    /// )
+    /// .build()?
     /// .params();
     /// assert_eq!(params["domain"], "a.de");
     /// assert!(params.get("target").is_none());
@@ -1605,11 +1766,12 @@ impl PushRequest {
 /// ```
 /// use inwx_client::{ActionKind, DomainName, Irreversible, RenewalMode, RestoreRequest};
 ///
-/// let restore = RestoreRequest::new(Irreversible::acknowledge(
+/// let restore = RestoreRequest::builder(Irreversible::acknowledge(
 ///     ActionKind::Restore,
 ///     &DomainName::parse("example.com")?,
-/// ))?
-/// .with_renewal_mode(RenewalMode::AutoRenew);
+/// ))
+/// .with_renewal_mode(RenewalMode::AutoRenew)
+/// .build()?;
 ///
 /// assert_eq!(restore.params()["renewalMode"], "AUTORENEW");
 /// # Ok::<(), inwx_client::Error>(())
@@ -1621,27 +1783,62 @@ pub struct RestoreRequest {
     testing: bool,
 }
 
+#[bon]
 impl RestoreRequest {
     /// Starts a restore for the domain named in `intent`.
     ///
     /// # Errors
     ///
     /// [`Error::Validation`] unless `intent` acknowledges
-    /// [`ActionKind::Restore`].
+    /// [`ActionKind::Restore`]. The acknowledgement is checked by
+    /// [`build`](RestoreRequestBuilder::build).
     ///
     /// ```
     /// use inwx_client::{ActionKind, DomainName, Irreversible, RestoreRequest};
     ///
     /// let wrong = Irreversible::acknowledge(ActionKind::Push, &DomainName::parse("a.de")?);
-    /// assert!(RestoreRequest::new(wrong).is_err());
+    /// assert!(RestoreRequest::builder(wrong).build().is_err());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
-    pub fn new(intent: Irreversible) -> Result<Self> {
+    #[builder]
+    pub fn new(
+        #[builder(start_fn)] intent: Irreversible,
+        /// What happens at expiry after the restore (`renewalMode`).
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, DomainName, Irreversible, RenewalMode, RestoreRequest};
+        ///
+        /// let restore = RestoreRequest::builder(
+        ///     Irreversible::acknowledge(ActionKind::Restore, &DomainName::parse("a.de")?),
+        /// )
+        /// .with_renewal_mode(RenewalMode::AutoDelete)
+        /// .build()?;
+        /// assert_eq!(restore.params()["renewalMode"], "AUTODELETE");
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(setters(name = with_renewal_mode))]
+        renewal_mode: Option<RenewalMode>,
+        /// Runs the command in testing mode (`testing=true`).
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, DomainName, Irreversible, RestoreRequest};
+        ///
+        /// let restore = RestoreRequest::builder(
+        ///     Irreversible::acknowledge(ActionKind::Restore, &DomainName::parse("a.de")?),
+        /// )
+        /// .dry_run()
+        /// .build()?;
+        /// assert_eq!(restore.params()["testing"], true);
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(default, setters(name = dry_run), with = || true)]
+        testing: bool,
+    ) -> Result<Self> {
         let domain = intent.into_domain(ActionKind::Restore)?;
         Ok(Self {
             domain,
-            renewal_mode: None,
-            testing: false,
+            renewal_mode,
+            testing,
         })
     }
 
@@ -1650,9 +1847,10 @@ impl RestoreRequest {
     /// ```
     /// use inwx_client::{ActionKind, DomainName, Irreversible, RestoreRequest};
     ///
-    /// let restore = RestoreRequest::new(
+    /// let restore = RestoreRequest::builder(
     ///     Irreversible::acknowledge(ActionKind::Restore, &DomainName::parse("a.de")?),
-    /// )?;
+    /// )
+    /// .build()?;
     /// assert_eq!(restore.domain().as_str(), "a.de");
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
@@ -1661,52 +1859,18 @@ impl RestoreRequest {
         &self.domain
     }
 
-    /// Sets what happens at expiry after the restore.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, RenewalMode, RestoreRequest};
-    ///
-    /// let restore = RestoreRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Restore, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_renewal_mode(RenewalMode::AutoDelete);
-    /// assert_eq!(restore.params()["renewalMode"], "AUTODELETE");
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn with_renewal_mode(mut self, mode: RenewalMode) -> Self {
-        self.renewal_mode = Some(mode);
-        self
-    }
-
-    /// Runs the command in testing mode (`testing=true`).
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, RestoreRequest};
-    ///
-    /// let restore = RestoreRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Restore, &DomainName::parse("a.de")?),
-    /// )?
-    /// .dry_run();
-    /// assert_eq!(restore.params()["testing"], true);
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn dry_run(mut self) -> Self {
-        self.testing = true;
-        self
-    }
-
     /// The `domain.restore` parameters.
     ///
     /// ```
     /// use inwx_client::{ActionKind, DomainName, Irreversible, RestoreRequest};
     ///
-    /// let params = RestoreRequest::new(
+    /// let params = RestoreRequest::builder(
     ///     Irreversible::acknowledge(ActionKind::Restore, &DomainName::parse("a.de")?),
-    /// )?
+    /// )
+    /// .build()?
     /// .params();
     /// assert_eq!(params["domain"], "a.de");
+    /// assert!(params.get("renewalMode").is_none());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     #[must_use]
@@ -1993,11 +2157,12 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
-    /// let request = TransferRequest::new(Irreversible::acknowledge(
+    /// let request = TransferRequest::builder(Irreversible::acknowledge(
     ///     ActionKind::Transfer,
     ///     &DomainName::parse("example.com")?,
-    /// ))?
-    /// .auth_code(AuthCode::new("aB3-xY9_42")?);
+    /// ))
+    /// .auth_code(AuthCode::new("aB3-xY9_42")?)
+    /// .call()?;
     /// let outcome = client.transfer_domain(&request).await?;
     /// println!("charged {:?} {}", outcome.price, outcome.currency.unwrap_or_default());
     /// # Ok(())
@@ -2056,10 +2221,11 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
-    /// let push = PushRequest::new(Irreversible::acknowledge(
+    /// let push = PushRequest::builder(Irreversible::acknowledge(
     ///     ActionKind::Push,
     ///     &DomainName::parse("example.com")?,
-    /// ))?;
+    /// ))
+    /// .build()?;
     /// client.push_domain(&push).await?;
     /// # Ok(())
     /// # }
@@ -2085,10 +2251,11 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
-    /// let restore = RestoreRequest::new(Irreversible::acknowledge(
+    /// let restore = RestoreRequest::builder(Irreversible::acknowledge(
     ///     ActionKind::Restore,
     ///     &DomainName::parse("example.com")?,
-    /// ))?;
+    /// ))
+    /// .build()?;
     /// let restored = client.restore_domain(&restore).await?;
     /// println!("{:?}", restored.domain_ace);
     /// # Ok(())
@@ -2225,14 +2392,45 @@ mod tests {
     }
 
     #[test]
+    fn restore_builder_keeps_the_wire_shape() {
+        let restore = RestoreRequest::builder(Irreversible::acknowledge(
+            ActionKind::Restore,
+            &domain("a.de"),
+        ))
+        .with_renewal_mode(RenewalMode::AutoRenew)
+        .dry_run()
+        .build()
+        .unwrap();
+        assert_eq!(
+            restore.params(),
+            json!({
+                "domain": "a.de",
+                "renewalMode": "AUTORENEW",
+                "testing": true,
+            })
+        );
+    }
+
+    #[test]
+    fn restore_builder_requires_the_restore_acknowledgement() {
+        assert!(RestoreRequest::builder(Irreversible::acknowledge(
+            ActionKind::Push,
+            &domain("a.de")
+        ))
+        .build()
+        .is_err());
+    }
+
+    #[test]
     fn takeover_and_explicit_nameservers_conflict() {
-        let request = TransferRequest::new(Irreversible::acknowledge(
+        let request = TransferRequest::builder(Irreversible::acknowledge(
             ActionKind::Transfer,
             &domain("a.de"),
         ))
-        .unwrap()
         .keeping_nameservers()
         .with_nameservers(&[Hostname::parse("ns1.example.net").unwrap()])
+        .unwrap()
+        .call()
         .unwrap();
         assert!(request.params().is_err());
     }
@@ -2242,6 +2440,10 @@ mod tests {
         let mut extra = ExtData::new();
         assert!(extra.set("BAD KEY", "x").is_err());
         assert!(extra.set("GOOD", "").is_err());
+        assert!(extra.set("NO-DOMAIN-CHECK", "false").is_err());
+        assert!(extra.set("NO-HOST-CHECK", "false").is_err());
+        assert!(extra.set("BIRTH-DATE", "23.05.1990").is_err());
+        assert!(extra.set("BIRTH-CITY", "x").is_err());
         assert!(extra.birth_date("2026-02-30").is_err());
         assert!(extra.birth_date("2026-02-28").is_ok());
         assert!(extra.birth_city("x".repeat(65).as_str()).is_err());
@@ -2257,9 +2459,11 @@ mod tests {
 
     #[test]
     fn dnssec_free_defaults_do_not_leak_into_requests() {
-        let params = PushRequest::new(Irreversible::acknowledge(ActionKind::Push, &domain("a.de")))
-            .unwrap()
-            .params();
+        let params =
+            PushRequest::builder(Irreversible::acknowledge(ActionKind::Push, &domain("a.de")))
+                .build()
+                .unwrap()
+                .params();
         assert_eq!(params.as_object().unwrap().len(), 2);
     }
 }

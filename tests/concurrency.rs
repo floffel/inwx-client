@@ -56,7 +56,7 @@ impl OneSessionServer {
 
 impl Transport for OneSessionServer {
     async fn execute(&self, request: Request<'_>) -> Result<Response> {
-        let body: Value = serde_json::from_slice(request.body).unwrap_or(Value::Null);
+        let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
         let method = body
             .get("method")
             .and_then(Value::as_str)
@@ -372,14 +372,15 @@ async fn thirty_two_tasks_share_one_client_across_the_new_surface() {
                     client.update_zone(&update).await
                 }
                 2 => {
-                    let request = TransferRequest::new(Irreversible::acknowledge(
+                    let request = TransferRequest::builder(Irreversible::acknowledge(
                         ActionKind::Transfer,
                         &domain,
                     ))
-                    .unwrap()
                     .auth_code(AuthCode::new("aB3-xY9_42").unwrap())
                     .with_registrant(Handle::new(991).unwrap())
-                    .scheduled_at(Timestamp::parse("2026-11-01T03:00:00").unwrap());
+                    .scheduled_at(Timestamp::parse("2026-11-01T03:00:00").unwrap())
+                    .call()
+                    .unwrap();
                     client.transfer_domain(&request).await.map(|_| ())
                 }
                 _ => client.account_balance().await.map(|_| ()),

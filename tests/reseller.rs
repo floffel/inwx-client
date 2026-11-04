@@ -1118,9 +1118,10 @@ async fn list_news_pages() {
     let transport = MockTransport::new();
     transport.ok(json!({ "news": [{ "id": 1, "title": "Maintenance" }] }));
 
-    let items = client(transport.clone()).list_news(1, 20).await.unwrap();
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].title.as_deref(), Some("Maintenance"));
+    let page = client(transport.clone()).list_news(1, 20).await.unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.items[0].title.as_deref(), Some("Maintenance"));
+    assert!(!page.has_more());
 
     let call = transport.only_call();
     assert_eq!(call.method, "news.list");
@@ -1161,6 +1162,37 @@ async fn a_zero_page_limit_for_news_never_reaches_the_wire() {
     let transport = MockTransport::new();
     assert!(client(transport.clone()).list_news(1, 0).await.is_err());
     assert_eq!(transport.call_count(), 0);
+}
+
+#[tokio::test]
+async fn news_page_limit_stays_inside_the_crate_ceiling() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "news": [] }));
+
+    let page = client(transport.clone())
+        .list_news(1, inwx_client::MAX_PAGE_SIZE)
+        .await
+        .unwrap();
+    assert_eq!(page.limit, inwx_client::MAX_PAGE_SIZE);
+    assert_eq!(transport.only_call().params["pagelimit"], 1000);
+
+    let transport = MockTransport::new();
+    let error = client(transport.clone())
+        .list_news(1, inwx_client::MAX_PAGE_SIZE + 1)
+        .await
+        .unwrap_err();
+    assert!(error.is_validation());
+    assert_eq!(transport.call_count(), 0);
+}
+
+#[tokio::test]
+async fn a_full_news_page_says_that_more_may_follow() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "news": [{ "id": 1 }, { "id": 2 }] }));
+
+    let page = client(transport).list_news(1, 2).await.unwrap();
+    assert_eq!(page.len(), 2);
+    assert!(page.has_more());
 }
 
 #[tokio::test]
@@ -1230,10 +1262,7 @@ async fn list_all_nichandles_reads_a_single_short_page() {
         .unwrap();
 
     assert_eq!(
-        handles
-            .iter()
-            .filter_map(|handle| handle.id)
-            .collect::<Vec<_>>(),
+        handles.iter().map(|handle| handle.id).collect::<Vec<_>>(),
         [1, 2]
     );
     assert_eq!(transport.call_count(), 1);
@@ -1273,10 +1302,7 @@ async fn list_all_nichandles_fetches_until_the_reported_total() {
         .unwrap();
 
     assert_eq!(
-        handles
-            .iter()
-            .filter_map(|handle| handle.id)
-            .collect::<Vec<_>>(),
+        handles.iter().map(|handle| handle.id).collect::<Vec<_>>(),
         [1, 2, 3]
     );
     let calls = transport.calls();
@@ -1311,10 +1337,7 @@ async fn list_all_nichandles_stops_on_an_exactly_complete_page() {
         .unwrap();
 
     assert_eq!(
-        handles
-            .iter()
-            .filter_map(|handle| handle.id)
-            .collect::<Vec<_>>(),
+        handles.iter().map(|handle| handle.id).collect::<Vec<_>>(),
         [1, 2]
     );
     assert_eq!(transport.call_count(), 1);
@@ -1341,13 +1364,42 @@ async fn list_all_nichandles_does_not_treat_a_full_page_without_count_as_complet
         .unwrap();
 
     assert_eq!(
-        handles
-            .iter()
-            .filter_map(|handle| handle.id)
-            .collect::<Vec<_>>(),
+        handles.iter().map(|handle| handle.id).collect::<Vec<_>>(),
         [1, 2]
     );
     assert_eq!(transport.call_count(), 2);
+}
+
+#[tokio::test]
+async fn list_all_nichandles_counts_skipped_rows_as_part_of_the_page() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "count": 3,
+        "nichandle": [
+            { "nicId": 1, "handle": "ACME-1" },
+            { "nicId": "not-a-number", "handle": "BROKEN" },
+        ],
+    }));
+    transport.ok(json!({
+        "count": 3,
+        "nichandle": [
+            { "nicId": 2, "handle": "ACME-2" },
+        ],
+    }));
+
+    let pagination = Pagination::new().with_page_size(2).unwrap();
+    let handles = client(transport.clone())
+        .list_all_nichandles(&NicHandleQuery::new(), &pagination)
+        .collect_all()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        handles.iter().map(|handle| handle.id).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(transport.call_count(), 2);
+    assert_eq!(transport.calls()[1].params["page"], 2);
 }
 
 // ---------------------------------------------------------------------- pdf --

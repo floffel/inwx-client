@@ -13,19 +13,23 @@
 //! let handle: NicHandle = serde_json::from_str(
 //!     r#"{"id":98765,"handle":"ACME-1234","name":"Max Mustermann","email":"max@example.com"}"#,
 //! )?;
-//! assert_eq!(handle.id, Some(98765));
+//! assert_eq!(handle.id, 98765);
 //! assert_eq!(handle.handle.as_deref(), Some("ACME-1234"));
 //! # Ok::<(), serde_json::Error>(())
 //! ```
 
-use serde::Deserialize;
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, Map, Value};
 
 use crate::client::InwxClient;
 use crate::error::{Error, Result};
 use crate::pagination::{self, Listing, Page, Pages, Pagination};
 use crate::transport::Transport;
-use crate::types::{de, validate_id, validate_page_limit, validate_token, validate_upper_token};
+use crate::types::{
+    field_map, opt_i64_value, pick_bool, pick_i64, pick_text, validate_id, validate_page_limit,
+    validate_token, validate_upper_token,
+};
 
 /// Longest handle token this crate accepts.
 const MAX_HANDLE_LEN: usize = 64;
@@ -38,78 +42,69 @@ const MAX_HANDLE_LEN: usize = 64;
 /// let handle: NicHandle = serde_json::from_str(
 ///     r#"{"id":"98765","handle":"ACME-1","type":"PERSON","cc":"DE","restricted":"0","deleted":0}"#,
 /// )?;
-/// assert_eq!(handle.id, Some(98765));
+/// assert_eq!(handle.id, 98765);
 /// assert_eq!(handle.handle_type.as_deref(), Some("PERSON"));
 /// assert_eq!(handle.is_deleted(), Some(false));
 /// # Ok::<(), serde_json::Error>(())
 /// ```
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NicHandle {
     /// Handle id, the number a domain refers to.
-    #[serde(
-        default,
-        rename = "nicId",
-        alias = "id",
-        deserialize_with = "de::opt_i64"
-    )]
-    pub id: Option<i64>,
+    pub id: i64,
     /// Handle label.
-    #[serde(default, deserialize_with = "de::opt_string")]
     pub handle: Option<String>,
     /// Name of the person or organisation.
-    #[serde(default, deserialize_with = "de::opt_string")]
     pub name: Option<String>,
     /// Organisation, when the handle is one.
-    #[serde(default, deserialize_with = "de::opt_string")]
     pub company: Option<String>,
     /// Contact address.
-    #[serde(default, deserialize_with = "de::opt_string")]
     pub email: Option<String>,
     /// Street line.
-    #[serde(default, deserialize_with = "de::opt_string")]
     pub street: Option<String>,
     /// City.
-    #[serde(default, deserialize_with = "de::opt_string")]
     pub city: Option<String>,
     /// Postal code.
-    #[serde(
-        default,
-        rename = "zip",
-        alias = "postalCode",
-        deserialize_with = "de::opt_string"
-    )]
     pub zip: Option<String>,
     /// Country code.
-    #[serde(
-        default,
-        rename = "cc",
-        alias = "country",
-        deserialize_with = "de::opt_string"
-    )]
     pub country_code: Option<String>,
     /// Phone number.
-    #[serde(default, deserialize_with = "de::opt_string")]
     pub phone: Option<String>,
     /// Fax number.
-    #[serde(default, deserialize_with = "de::opt_string")]
     pub fax: Option<String>,
     /// Handle class, carried verbatim (`PERSON`, `ORGANISATION`, …).
-    #[serde(default, rename = "type", deserialize_with = "de::opt_string")]
     pub handle_type: Option<String>,
     /// Customer the handle belongs to.
-    #[serde(
-        default,
-        rename = "customerNumber",
-        alias = "customer_number",
-        deserialize_with = "de::opt_i64"
-    )]
     pub customer_number: Option<i64>,
     /// Whether the handle is restricted by a registry.
-    #[serde(default, deserialize_with = "de::opt_bool")]
     pub restricted: Option<bool>,
     /// Whether the handle is soft-deleted.
-    #[serde(default, deserialize_with = "de::opt_bool")]
     pub deleted: Option<bool>,
+}
+
+impl<'de> Deserialize<'de> for NicHandle {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let fields = field_map(deserializer)?;
+        let id = pick_i64(&fields, &["nicId", "id"])
+            .and_then(|id| validate_id("nicHandle.id", id).ok())
+            .ok_or_else(|| D::Error::custom("nicHandle.id must be a positive id"))?;
+        Ok(Self {
+            id,
+            handle: pick_text(&fields, &["handle"]),
+            name: pick_text(&fields, &["name"]),
+            company: pick_text(&fields, &["company"]),
+            email: pick_text(&fields, &["email"]),
+            street: pick_text(&fields, &["street"]),
+            city: pick_text(&fields, &["city"]),
+            zip: pick_text(&fields, &["zip", "postalCode"]),
+            country_code: pick_text(&fields, &["cc", "country"]),
+            phone: pick_text(&fields, &["phone"]),
+            fax: pick_text(&fields, &["fax"]),
+            handle_type: pick_text(&fields, &["type"]),
+            customer_number: pick_i64(&fields, &["customerNumber", "customer_number"]),
+            restricted: pick_bool(&fields, &["restricted"]),
+            deleted: pick_bool(&fields, &["deleted"]),
+        })
+    }
 }
 
 impl NicHandle {
@@ -118,9 +113,10 @@ impl NicHandle {
     /// ```
     /// use inwx_client::NicHandle;
     ///
-    /// let handle: NicHandle = serde_json::from_str(r#"{"deleted":"1"}"#)?;
+    /// let handle: NicHandle = serde_json::from_str(r#"{"id":1,"deleted":"1"}"#)?;
     /// assert_eq!(handle.is_deleted(), Some(true));
-    /// assert_eq!(NicHandle::default().is_deleted(), None);
+    /// let quiet: NicHandle = serde_json::from_str(r#"{"id":2}"#)?;
+    /// assert_eq!(quiet.is_deleted(), None);
     /// # Ok::<(), serde_json::Error>(())
     /// ```
     #[must_use]
@@ -133,8 +129,9 @@ impl NicHandle {
 ///
 /// The `nichandle` rows are read the way every other list answer in this crate
 /// is read: an array, or a single object where the array belongs (one handle),
-/// and a row that does not fit [`NicHandle`] is skipped instead of failing the
-/// page. `count` is `None` when the answer does not carry a usable total.
+/// and a row that does not fit [`NicHandle`] is kept in
+/// [`unparsed`](Self::unparsed) instead of failing the page. `count` is `None`
+/// when the answer does not carry a usable total.
 ///
 /// ```
 /// use inwx_client::NicHandleListPage;
@@ -154,16 +151,65 @@ impl NicHandle {
 ///     r#"{"count":2,"nichandle":[{"nicId":98765},null]}"#,
 /// )?;
 /// assert_eq!(mixed.handles.len(), 1);
+/// assert_eq!(mixed.unparsed.len(), 1);
 /// # Ok::<(), serde_json::Error>(())
 /// ```
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NicHandleListPage {
     /// Total number of handles matching the query, when the API reports one.
-    #[serde(default, deserialize_with = "de::opt_i64")]
     pub count: Option<i64>,
     /// The handles on this page.
-    #[serde(default, rename = "nichandle", deserialize_with = "de::rows")]
     pub handles: Vec<NicHandle>,
+    /// Raw rows from `nichandle` that could not be decoded as [`NicHandle`].
+    ///
+    /// A handle is only useful with its id, so a row whose `nicId`/`id` is
+    /// missing, unparsable or outside the API integer range is not silently
+    /// turned into a handle with no id. It stays here while every decodable
+    /// handle remains in [`handles`](Self::handles).
+    ///
+    /// ```
+    /// use inwx_client::NicHandleListPage;
+    ///
+    /// let page: NicHandleListPage = serde_json::from_str(
+    ///     r#"{"count":2,"nichandle":[{"nicId":"bad"},{"nicId":7}]}"#,
+    /// )?;
+    /// assert_eq!(page.handles.len(), 1);
+    /// assert_eq!(page.unparsed.len(), 1);
+    /// assert_eq!(page.unparsed[0]["nicId"], "bad");
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
+    pub unparsed: Vec<Value>,
+}
+
+impl<'de> Deserialize<'de> for NicHandleListPage {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let mut fields = field_map(deserializer)?;
+        let count = fields.remove("count").as_ref().and_then(opt_i64_value);
+        let (handles, unparsed) = nic_handle_rows(fields.remove("nichandle"));
+        Ok(Self {
+            count,
+            handles,
+            unparsed,
+        })
+    }
+}
+
+/// Splits a `nichandle.list` row field into decodable handles and raw failures.
+fn nic_handle_rows(value: Option<Value>) -> (Vec<NicHandle>, Vec<Value>) {
+    let rows = match value {
+        Some(Value::Array(rows)) => rows,
+        Some(single @ Value::Object(_)) => vec![single],
+        _ => Vec::new(),
+    };
+    let mut handles = Vec::new();
+    let mut unparsed = Vec::new();
+    for row in rows {
+        match serde_json::from_value::<NicHandle>(row.clone()) {
+            Ok(handle) => handles.push(handle),
+            Err(_) => unparsed.push(row),
+        }
+    }
+    (handles, unparsed)
 }
 
 impl NicHandleListPage {
@@ -210,7 +256,7 @@ impl NicHandleListPage {
     #[must_use]
     pub fn has_more(&self) -> bool {
         self.count
-            .is_some_and(|count| i64::try_from(self.handles.len()).unwrap_or(i64::MAX) < count)
+            .is_some_and(|count| i64::try_from(self.received_len()).unwrap_or(i64::MAX) < count)
     }
 }
 
@@ -237,8 +283,13 @@ impl Page for NicHandleListPage {
         self.handles.len()
     }
 
+    fn received_len(&self) -> usize {
+        self.handles.len().saturating_add(self.unparsed.len())
+    }
+
     fn truncate_to(&mut self, len: usize) {
         self.handles.truncate(len);
+        self.unparsed.clear();
     }
 
     fn into_items(self) -> Vec<NicHandle> {
@@ -384,7 +435,7 @@ impl NicHandleQuery {
     ///
     /// # Errors
     ///
-    /// [`crate::Error::Validation`] when the page size is zero.
+    /// [`crate::Error::Validation`] when the page size is zero or above [`crate::MAX_PAGE_SIZE`].
     ///
     /// ```
     /// use inwx_client::NicHandleQuery;
@@ -573,7 +624,7 @@ impl<T: Transport> InwxClient<T> {
     ///     .collect_all()
     ///     .await?
     ///     .iter()
-    ///     .filter_map(|handle| handle.id)
+    ///     .map(|handle| handle.id)
     ///     .collect();
     /// # Ok(handles)
     /// # }
@@ -645,5 +696,57 @@ mod tests {
             serde_json::from_str(r#"{"id":7,"customer_number":"3","deleted":"true"}"#).unwrap();
         assert_eq!(camel, snake);
         assert_eq!(camel.is_deleted(), Some(true));
+    }
+
+    #[test]
+    fn a_handle_needs_a_positive_id_inside_the_api_range() {
+        let just_inside = serde_json::from_str::<NicHandle>(r#"{"nicId":2147483647}"#).unwrap();
+        assert_eq!(just_inside.id, i64::from(i32::MAX));
+
+        for row in [
+            r"{}",
+            r#"{"nicId":null}"#,
+            r#"{"nicId":"abc"}"#,
+            r#"{"nicId":0}"#,
+            r#"{"nicId":-1}"#,
+            r#"{"nicId":2147483648}"#,
+            r#"{"nicId":{}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<NicHandle>(row).is_err(),
+                "{row} must not become a handle"
+            );
+        }
+    }
+
+    #[test]
+    fn a_page_keeps_rows_without_usable_ids_but_does_not_count_them_as_handles() {
+        let page: NicHandleListPage = serde_json::from_str(
+            r#"{"count":4,"nichandle":[
+                {"nicId":1},
+                {"nicId":"bad"},
+                null,
+                {"id":2147483648}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(page.handles.len(), 1);
+        assert_eq!(page.handles[0].id, 1);
+        assert_eq!(page.unparsed.len(), 3);
+        assert_eq!(page.unparsed[0]["nicId"], "bad");
+        assert!(page.unparsed[1].is_null());
+        assert_eq!(page.unparsed[2]["id"], 2_147_483_648_i64);
+        assert!(!page.has_more());
+    }
+
+    #[test]
+    fn a_full_page_with_skipped_rows_still_proves_more_pages() {
+        let page: NicHandleListPage =
+            serde_json::from_str(r#"{"count":3,"nichandle":[{"nicId":1},{"nicId":"bad"}]}"#)
+                .unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page.unparsed.len(), 1);
+        assert_eq!(page.received_len(), 2);
+        assert!(page.has_more());
     }
 }
