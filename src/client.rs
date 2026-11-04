@@ -1045,7 +1045,7 @@ impl<T: Transport> InwxClient<T> {
     /// The same rule covers HTTP: a 429 or a 5xx is replayed only for a
     /// read-only method. For a mutating method the status says nothing about
     /// whether the command already ran, so the call answers
-    /// [`Error::Uncertain`] after a single attempt instead of retrying.
+    /// [`Error::HttpUncertain`] after a single attempt instead of retrying.
     ///
     /// API code `2300` (object pending transfer) is gated the same way: a read
     /// is replayed once the object is out of the transfer, a mutation is
@@ -1129,7 +1129,8 @@ impl<T: Transport> InwxClient<T> {
                             continue;
                         }
                     }
-                    return match RpcResponse::parse(response.body()) {
+                    let parse = RpcResponse::parse(response.body());
+                    return match parse {
                         // The API did answer with a verdict, so the verdict
                         // outranks the status and is never repeated.
                         Ok(envelope) if !envelope.is_success() => envelope.into_result(),
@@ -1137,10 +1138,19 @@ impl<T: Transport> InwxClient<T> {
                         // The request was written, so on a command that mutates
                         // the outcome is unknown and a replay could duplicate
                         // the work.
-                        _ if status_is_uncertain(status, method) => Err(Error::uncertain(format!(
-                            "`{method}` answered HTTP {status}; the command may have been \
-                             executed, check the current state before retrying"
-                        ))),
+                        _ if status_is_uncertain(status, method) => match parse {
+                            Err(source) => Err(Error::http_uncertain(
+                                method,
+                                status,
+                                HttpBody::from_bytes(response.body()),
+                            )
+                            .with_source(source)),
+                            Ok(_) => Err(Error::http_uncertain(
+                                method,
+                                status,
+                                HttpBody::from_bytes(response.body()),
+                            )),
+                        },
                         Ok(envelope) => envelope.into_result(),
                         // The body is unreadable, and the parse error is the
                         // only thing that separates "not JSON at all" — a proxy

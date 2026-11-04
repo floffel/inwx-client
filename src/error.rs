@@ -9,13 +9,15 @@
 //! [`Error::with_source`] is how a cause is attached.
 //!
 //! Certainty is part of the type. A failure that happened after the request was
-//! written leaves the outcome of the command unknown, and it is spelled four
+//! written leaves the outcome of the command unknown, and it is spelled five
 //! ways: [`Error::Uncertain`] for the transport (a timeout, a reset),
 //! [`Error::Undecodable`] for decoding (an answer whose body cannot be read),
 //! [`Error::Ambiguous`] for an answer that arrives and names no result (an
-//! upload the API accepted without returning a `documentId`) and
+//! upload the API accepted without returning a `documentId`),
+//! [`Error::HttpUncertain`] for a transient HTTP status on a mutating command,
+//! and
 //! [`Error::CertificateOrderUnreadable`] for one that names the certificate it
-//! created but fits no model. All four answer [`Error::is_uncertain`] with
+//! created but fits no model. All five answer [`Error::is_uncertain`] with
 //! `true` and are never replayed for a mutating command; [`Error::Json`] is the
 //! other side of that line — a payload that arrived intact and does not fit the
 //! model, behind a command that ran. A billed certificate order is the one place
@@ -489,6 +491,45 @@ pub enum Error {
         source: Option<ErrorSource>,
     },
 
+    /// A transient HTTP status answered a command that may already have run.
+    ///
+    /// A `429` or a `5xx` says the endpoint was unable to answer normally, but
+    /// not whether it read and executed the request first. For a mutating
+    /// command that is an ambiguous outcome: a replay can duplicate an order, a
+    /// charge or a deletion. The client therefore answers this variant after
+    /// exactly one attempt instead of sleeping and sending again.
+    ///
+    /// The status and the bounded body are carried so a caller can distinguish
+    /// a gateway page from a server-side failure. Like [`Error::Http`], the
+    /// body is bounded to [`MAX_HTTP_BODY_CHARS`] characters and redacted before
+    /// it enters the error.
+    ///
+    /// ```
+    /// use inwx_client::Error;
+    ///
+    /// let err = Error::http_uncertain("certificate.create", 503, "upstream failed");
+    /// assert!(err.is_uncertain());
+    /// assert!(!err.is_retryable());
+    /// assert!(err.to_string().contains("certificate.create"));
+    /// ```
+    #[error(
+        "uncertain HTTP answer for `{method}`: HTTP {status}: {body} \
+         (the command may have been executed)"
+    )]
+    HttpUncertain {
+        /// The method that was called.
+        method: String,
+        /// HTTP status code.
+        status: u16,
+        /// Body, bounded and redacted like [`Error::Http`].
+        body: HttpBody,
+        /// The failure behind the answer, when there was one — the parse error
+        /// of a body the client could not read as an envelope, or a decode or
+        /// framing error from a custom transport. See [`Error::with_source`].
+        #[source]
+        source: Option<ErrorSource>,
+    },
+
     /// A response body crossed the transport's size cap, so it was discarded
     /// before the JSON parser ever saw a byte.
     ///
@@ -817,6 +858,36 @@ impl Error {
         }
     }
 
+    /// Builds an [`Error::HttpUncertain`] for a transient HTTP answer whose
+    /// command may already have executed.
+    ///
+    /// The status alone decides nothing for a mutating command: a `429` or a
+    /// `5xx` can arrive after the server has read the request, so a replay may
+    /// duplicate the work. The bounded, redacted body is carried as evidence,
+    /// and the error is uncertain rather than retryable.
+    ///
+    /// ```
+    /// use inwx_client::Error;
+    ///
+    /// let err = Error::http_uncertain("certificate.create", 503, "upstream failed");
+    /// assert!(err.is_uncertain());
+    /// assert!(!err.is_retryable());
+    /// assert!(err.to_string().contains("HTTP 503"));
+    /// ```
+    #[must_use]
+    pub fn http_uncertain(
+        method: impl Into<String>,
+        status: u16,
+        body: impl Into<HttpBody>,
+    ) -> Self {
+        Self::HttpUncertain {
+            method: method.into(),
+            status,
+            body: body.into(),
+            source: None,
+        }
+    }
+
     /// Attaches `source` as the cause of this error, so `err.source()` walks
     /// into it instead of the failure existing only as text in `message`.
     ///
@@ -827,8 +898,8 @@ impl Error {
     /// parse a message.
     ///
     /// Supported on [`Error::Transport`], [`Error::Uncertain`],
-    /// [`Error::Authentication`], [`Error::Ambiguous`] and [`Error::Http`]. On
-    /// any other variant it is a no-op, like
+    /// [`Error::Authentication`], [`Error::Ambiguous`], [`Error::Http`] and
+    /// [`Error::HttpUncertain`]. On any other variant it is a no-op, like
     /// [`with_retry_after`](Self::with_retry_after), so a path that builds an
     /// error without matching first stays readable.
     ///
@@ -859,7 +930,8 @@ impl Error {
             | Self::Uncertain { source: slot, .. }
             | Self::Authentication { source: slot, .. }
             | Self::Ambiguous { source: slot, .. }
-            | Self::Http { source: slot, .. } => *slot = Some(source),
+            | Self::Http { source: slot, .. }
+            | Self::HttpUncertain { source: slot, .. } => *slot = Some(source),
             _ => {}
         }
         self
@@ -971,7 +1043,8 @@ impl Error {
     /// of the answer, and the command behind it may already have run. An
     /// [`Error::Undecodable`] is not retryable either — like
     /// [`Error::Uncertain`] it means the command may have been executed, so it
-    /// is uncertain rather than merely failed. An
+    /// is uncertain rather than merely failed. [`Error::HttpUncertain`] carries
+    /// the same verdict. An
     /// [`Error::Http`] is classified by its status: `429`, `502`, `503` and
     /// `504` are retryable, all other non-2xx statuses (`400`, `401`, `403`,
     /// `404`, …) are terminal.
@@ -1038,7 +1111,8 @@ impl Error {
     /// ([`Error::Ambiguous`], an accepted upload without a `documentId`) — or it
     /// completed and named one the model cannot read
     /// ([`Error::CertificateOrderUnreadable`], a billed order whose answer
-    /// carries an unexpected field).
+    /// carries an unexpected field), or a transient HTTP status on a mutating
+    /// command ([`Error::HttpUncertain`]).
     ///
     /// All of them mean the API may already have executed the command, so a
     /// replay can duplicate a mutation.
@@ -1068,6 +1142,7 @@ impl Error {
             Self::Uncertain { .. }
                 | Self::Undecodable { .. }
                 | Self::Ambiguous { .. }
+                | Self::HttpUncertain { .. }
                 | Self::CertificateOrderUnreadable { .. }
         )
     }

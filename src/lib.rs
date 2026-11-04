@@ -244,7 +244,7 @@
 //!   `2300` (pending transfer) on a read-only method — a rejected command is
 //!   never repeated. A 429/5xx is replayed only for a read-only method as well:
 //!   for an order the status says nothing about whether it already went
-//!   through, so that outcome is [`Error::Uncertain`] after a single attempt.
+//!   through, so that outcome is [`Error::HttpUncertain`] after a single attempt.
 //!   `2300` follows the same gate and is returned as-is for a mutation, because
 //!   the object was already reached and a second `domain.transfer` after the
 //!   pending one settled is a second order. `account.login` is the one
