@@ -22,7 +22,7 @@ async fn create_sends_every_documented_field() {
         .unwrap();
     let id = client.create_record(&domain(), &spec).await.unwrap();
 
-    assert_eq!(id, RecordId::from("4711"));
+    assert_eq!(id, RecordId::parse("4711").unwrap());
     let call = transport.only_call();
     assert_eq!(call.method, "nameserver.createRecord");
     assert_eq!(call.params["domain"], "example.com");
@@ -45,6 +45,54 @@ async fn create_accepts_a_numeric_id_answer() {
         .unwrap();
 
     assert_eq!(id.as_str(), "4711");
+}
+
+#[test]
+fn record_id_parse_accepts_valid_forms_and_rejects_invalid() {
+    // Valid forms, including the just-inside boundary.
+    assert!(RecordId::parse("4711").is_ok());
+    assert!(RecordId::parse("0011").is_ok());
+    assert!(RecordId::parse("x".repeat(64)).is_ok());
+    assert_eq!(RecordId::from_number(4711).as_str(), "4711");
+
+    // Invalid forms: empty, just-over the length limit, control characters.
+    assert!(RecordId::parse("").is_err());
+    assert!(RecordId::parse("   ").is_err());
+    assert!(RecordId::parse("x".repeat(65)).is_err());
+    assert!(RecordId::parse("a\nb").is_err());
+    assert!(RecordId::parse("a\u{0}b").is_err());
+    assert!(RecordId::try_from("").is_err());
+    assert!(RecordId::try_from(String::from("a\nb")).is_err());
+}
+
+#[test]
+fn record_id_deserialize_enforces_parse_validation() {
+    // A response id goes through the same check as a caller-supplied one.
+    assert!(serde_json::from_str::<RecordId>("\"4711\"").is_ok());
+    assert!(serde_json::from_str::<RecordId>("4711").is_ok());
+
+    let empty = serde_json::from_str::<RecordId>("\"\"");
+    assert!(empty.is_err(), "an empty id must not deserialize");
+
+    let control = serde_json::from_str::<RecordId>("\"a\\nb\"");
+    assert!(control.is_err(), "a control character must be rejected");
+
+    let too_long = format!("\"{}\"", "x".repeat(65));
+    assert!(
+        serde_json::from_str::<RecordId>(&too_long).is_err(),
+        "an over-long id must be rejected"
+    );
+}
+
+#[test]
+fn record_id_round_trips_through_serde() {
+    for raw in ["1", "4711", "0011"] {
+        let id = RecordId::parse(raw).unwrap();
+        let encoded = serde_json::to_string(&id).unwrap();
+        assert_eq!(encoded, format!("\"{raw}\""));
+        let decoded: RecordId = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, id);
+    }
 }
 
 #[tokio::test]
@@ -94,7 +142,10 @@ async fn batch_create_is_sequential_and_returns_ids_in_order() {
     ];
     let ids = client.create_records(&domain(), &specs).await.unwrap();
 
-    assert_eq!(ids, [RecordId::from("1"), RecordId::from("2")]);
+    assert_eq!(
+        ids,
+        [RecordId::parse("1").unwrap(), RecordId::parse("2").unwrap()]
+    );
     let calls = transport.calls();
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[0].params["type"], "A");
@@ -125,7 +176,7 @@ async fn update_sends_an_id_array_and_only_the_changed_fields() {
     transport.ok_empty();
 
     let client = client(transport.clone());
-    let update = RecordUpdate::new([RecordId::from(88), RecordId::from(89)])
+    let update = RecordUpdate::new([RecordId::from_number(88), RecordId::from_number(89)])
         .content("203.0.113.9")
         .with_ttl(300)
         .unwrap();
@@ -144,7 +195,7 @@ async fn update_sends_an_id_array_and_only_the_changed_fields() {
 async fn an_invalid_update_never_reaches_the_transport() {
     let transport = MockTransport::new();
     let client = client(transport.clone());
-    let update = RecordUpdate::new([RecordId::from(1)]);
+    let update = RecordUpdate::new([RecordId::from_number(1)]);
 
     let error = client.update_record(&update).await.unwrap_err();
 
@@ -158,7 +209,10 @@ async fn delete_sends_the_id_as_a_string() {
     transport.ok_empty();
 
     let client = client(transport.clone());
-    client.delete_record(&RecordId::from(4711)).await.unwrap();
+    client
+        .delete_record(&RecordId::from_number(4711))
+        .await
+        .unwrap();
 
     let call = transport.only_call();
     assert_eq!(call.method, "nameserver.deleteRecord");
@@ -183,7 +237,7 @@ async fn list_records_reads_nameserver_info_and_parses_records() {
 
     assert_eq!(transport.only_call().method, "nameserver.info");
     assert_eq!(records.len(), 3);
-    assert_eq!(records[0].id, RecordId::from("1"));
+    assert_eq!(records[0].id, RecordId::parse("1").unwrap());
     assert_eq!(records[0].ip().unwrap().to_string(), "203.0.113.7");
     assert_eq!(records[1].priority(), 10);
     assert_eq!(records[1].ttl_seconds(), 600);
@@ -222,7 +276,7 @@ async fn replace_record_deletes_matching_name_and_type_then_creates() {
     let spec = RecordSpec::a("www", "203.0.113.99").unwrap();
     let id = client.replace_record(&domain(), &spec).await.unwrap();
 
-    assert_eq!(id, RecordId::from("4"));
+    assert_eq!(id, RecordId::parse("4").unwrap());
     let calls = transport.calls();
     assert_eq!(calls.len(), 3);
     assert_eq!(calls[1].method, "nameserver.deleteRecord");

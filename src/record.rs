@@ -284,17 +284,21 @@ impl<'de> Deserialize<'de> for RecordType {
 ///
 /// INWX types record ids as `token255`, so they arrive as JSON **strings** even
 /// though they look like numbers. Holding them in a `String` newtype means a
-/// response round-trips unchanged, while `From<i64>` keeps the convenient
-/// `delete_record(1)` form working.
+/// response round-trips unchanged. Every construction path validates through
+/// [`RecordId::parse`]; the numeric convenience lives in
+/// [`RecordId::from_number`] and the fallible string forms in
+/// [`TryFrom`].
 ///
 /// ```
 /// use inwx_client::RecordId;
 ///
-/// let from_number = RecordId::from(4711);
-/// let from_text = RecordId::from("4711");
+/// let from_number = RecordId::from_number(4711);
+/// let from_text = RecordId::try_from("4711")?;
 /// assert_eq!(from_number, from_text);
 /// assert_eq!(from_number.to_string(), "4711");
 /// assert!(RecordId::parse("").is_err());
+/// assert!(RecordId::try_from("").is_err());
+/// # Ok::<(), inwx_client::Error>(())
 /// ```
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RecordId(String);
@@ -322,11 +326,26 @@ impl RecordId {
         Ok(Self(trimmed.to_owned()))
     }
 
+    /// Wraps a numeric record id.
+    ///
+    /// INWX hands out numeric ids, so this constructor cannot fail: any `i64`
+    /// renders as a non-empty, control-free token well under 64 characters.
+    ///
+    /// ```
+    /// use inwx_client::RecordId;
+    ///
+    /// assert_eq!(RecordId::from_number(4711).as_str(), "4711");
+    /// ```
+    #[must_use]
+    pub fn from_number(id: i64) -> Self {
+        Self(id.to_string())
+    }
+
     /// The id as sent on the wire.
     ///
     /// ```
     /// use inwx_client::RecordId;
-    /// assert_eq!(RecordId::from(42).as_str(), "42");
+    /// assert_eq!(RecordId::from_number(42).as_str(), "42");
     /// ```
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -334,21 +353,19 @@ impl RecordId {
     }
 }
 
-impl From<i64> for RecordId {
-    fn from(id: i64) -> Self {
-        Self(id.to_string())
+impl TryFrom<&str> for RecordId {
+    type Error = Error;
+
+    fn try_from(id: &str) -> Result<Self> {
+        Self::parse(id)
     }
 }
 
-impl From<&str> for RecordId {
-    fn from(id: &str) -> Self {
-        Self(id.to_owned())
-    }
-}
+impl TryFrom<String> for RecordId {
+    type Error = Error;
 
-impl From<String> for RecordId {
-    fn from(id: String) -> Self {
-        Self(id)
+    fn try_from(id: String) -> Result<Self> {
+        Self::parse(id)
     }
 }
 
@@ -374,8 +391,8 @@ impl<'de> Deserialize<'de> for RecordId {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
         let value = Value::deserialize(deserializer)?;
         match value {
-            Value::String(text) => Ok(Self(text)),
-            Value::Number(number) => Ok(Self(number.to_string())),
+            Value::String(text) => Self::parse(text).map_err(D::Error::custom),
+            Value::Number(number) => Self::parse(number.to_string()).map_err(D::Error::custom),
             other => Err(D::Error::custom(format!(
                 "record id must be a string or number, got {other}"
             ))),
@@ -1060,7 +1077,7 @@ fn validate_record_name(field: &'static str, name: &str) -> Result<()> {
 /// ```
 /// use inwx_client::{RecordId, RecordUpdate};
 ///
-/// let update = RecordUpdate::new([RecordId::from(88)])
+/// let update = RecordUpdate::new([RecordId::from_number(88)])
 ///     .content("203.0.113.9")
 ///     .with_ttl(600)?;
 /// let params = update.params()?;
@@ -1085,7 +1102,7 @@ impl RecordUpdate {
     ///
     /// ```
     /// use inwx_client::{RecordId, RecordUpdate};
-    /// assert!(RecordUpdate::new([RecordId::from(1)]).params().is_err());
+    /// assert!(RecordUpdate::new([RecordId::from_number(1)]).params().is_err());
     /// ```
     pub fn new(ids: impl IntoIterator<Item = RecordId>) -> Self {
         Self {
@@ -1103,7 +1120,7 @@ impl RecordUpdate {
     /// ```
     /// use inwx_client::{RecordId, RecordUpdate};
     ///
-    /// let params = RecordUpdate::new([RecordId::from(1)]).name("api").params()?;
+    /// let params = RecordUpdate::new([RecordId::from_number(1)]).name("api").params()?;
     /// assert_eq!(params["name"], "api");
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
@@ -1118,7 +1135,7 @@ impl RecordUpdate {
     /// ```
     /// use inwx_client::{RecordId, RecordType, RecordUpdate};
     ///
-    /// let params = RecordUpdate::new([RecordId::from(1)])
+    /// let params = RecordUpdate::new([RecordId::from_number(1)])
     ///     .record_type(RecordType::Txt)
     ///     .params()?;
     /// assert_eq!(params["type"], "TXT");
@@ -1135,7 +1152,7 @@ impl RecordUpdate {
     /// ```
     /// use inwx_client::{RecordId, RecordUpdate};
     ///
-    /// let params = RecordUpdate::new([RecordId::from(1)]).content("v=spf1 -all").params()?;
+    /// let params = RecordUpdate::new([RecordId::from_number(1)]).content("v=spf1 -all").params()?;
     /// assert_eq!(params["content"], "v=spf1 -all");
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
@@ -1166,7 +1183,7 @@ impl RecordUpdate {
     /// ```
     /// use inwx_client::{RecordId, RecordUpdate};
     ///
-    /// let params = RecordUpdate::new([RecordId::from(1)]).prio(20).params()?;
+    /// let params = RecordUpdate::new([RecordId::from_number(1)]).prio(20).params()?;
     /// assert_eq!(params["prio"], 20);
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
@@ -1400,7 +1417,7 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
-    /// let update = RecordUpdate::new([RecordId::from(88)]).content("203.0.113.9").with_ttl(600)?;
+    /// let update = RecordUpdate::new([RecordId::from_number(88)]).content("203.0.113.9").with_ttl(600)?;
     /// client.update_record(&update).await?;
     /// # Ok(())
     /// # }
@@ -1425,7 +1442,7 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
-    /// client.delete_record(&RecordId::from(88)).await?;
+    /// client.delete_record(&RecordId::from_number(88)).await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -1563,7 +1580,7 @@ mod tests {
     fn record_id_accepts_numbers_and_strings() {
         let record: DnsRecord =
             serde_json::from_str(r#"{"id":77,"type":"A","content":"203.0.113.1"}"#).unwrap();
-        assert_eq!(record.id, RecordId::from("77"));
+        assert_eq!(record.id, RecordId::parse("77").unwrap());
         assert_eq!(record.ttl_seconds(), i64::from(DEFAULT_TTL));
         assert_eq!(record.priority(), 0);
     }
@@ -1585,14 +1602,14 @@ mod tests {
 
     #[test]
     fn update_requires_a_change() {
-        let update = RecordUpdate::new([RecordId::from(1)]);
+        let update = RecordUpdate::new([RecordId::from_number(1)]);
         assert!(update.params().is_err());
         assert!(RecordUpdate::new([]).name("x").params().is_err());
     }
 
     #[test]
     fn update_validates_content_only_with_a_type() {
-        let update = RecordUpdate::new([RecordId::from(1)])
+        let update = RecordUpdate::new([RecordId::from_number(1)])
             .record_type(RecordType::A)
             .content("nope");
         assert!(update.params().is_err());
