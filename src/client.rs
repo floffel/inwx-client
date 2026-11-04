@@ -16,7 +16,7 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
 use crate::error::{retry_after_at, Error, HttpBody, Result};
-use crate::rpc::{RpcRequest, RpcResponse};
+use crate::rpc::{not_an_object, RpcRequest, RpcResponse};
 use crate::transport::{Request, Response, Transport};
 use crate::types::de;
 
@@ -1078,7 +1078,7 @@ impl<T: Transport> InwxClient<T> {
     /// either way.
     pub async fn logout(&self) -> Result<()> {
         let result = if self.is_authenticated() {
-            self.call("account.logout", Value::Null).await.map(|_| ())
+            self.call("account.logout", json!({})).await.map(|_| ())
         } else {
             Ok(())
         };
@@ -1265,10 +1265,21 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
+    /// [`Error::Validation`] when `params` is not a JSON object, before
+    /// anything is sent and before a session is opened: a method that takes no
+    /// parameters passes `{}`. Silently sending an empty object instead would
+    /// drop the caller's payload — a mutating call whose fields are all optional
+    /// would go out with nothing set, and a read without its required filter
+    /// would come back as a server-side rejection that looks like an API
+    /// problem.
+    ///
     /// [`Error::NotAuthenticated`], [`Error::Api`], [`Error::Transport`],
     /// [`Error::Uncertain`], [`Error::Undecodable`], [`Error::Json`] or
     /// [`Error::Http`].
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
+        let Value::Object(params) = params else {
+            return Err(not_an_object());
+        };
         if !is_public_method(method) {
             self.ensure_session().await?;
         }
@@ -1276,9 +1287,7 @@ impl<T: Transport> InwxClient<T> {
         let mut attempt = 1u32;
 
         loop {
-            let outcome = self
-                .send(method, params.as_object().cloned().unwrap_or_default())
-                .await;
+            let outcome = self.send(method, params.clone()).await;
             match outcome {
                 Ok(response) if response.is_success() => {
                     // The request was written and a 2xx came back, so a body
@@ -1367,10 +1376,13 @@ impl<T: Transport> InwxClient<T> {
     }
 
     /// One HTTP round trip, no retries and no session logic.
+    ///
+    /// `params` is already a map: the shape is decided in [`Self::call`], so
+    /// there is no second coercion here.
     async fn send(&self, method: &str, params: Map<String, Value>) -> Result<Response> {
         let mut params = params;
         self.add_language(&mut params);
-        let body = RpcRequest::new(method, &Value::Object(params)).to_bytes()?;
+        let body = RpcRequest::from_map(method, params).to_bytes()?;
 
         let cookie = self
             .session

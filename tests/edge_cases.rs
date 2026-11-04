@@ -392,9 +392,19 @@ fn rpc_parsing_survives_arbitrary_bodies() {
 }
 
 #[test]
-fn a_request_with_non_object_params_is_sent_with_empty_params() {
-    let request = RpcRequest::new("account.logout", &json!([1, 2, 3]));
-    assert_eq!(request.params.len(), 0);
+fn a_request_with_non_object_params_is_refused() {
+    // Just inside: the documented object shape, empty or not.
+    assert_eq!(
+        RpcRequest::new("account.logout", &json!({}))
+            .unwrap()
+            .params
+            .len(),
+        0
+    );
+
+    // Just outside: an array is not an object, and must not be sent as one.
+    let error = RpcRequest::new("account.logout", &json!([1, 2, 3])).unwrap_err();
+    assert!(error.is_validation());
 }
 
 #[test]

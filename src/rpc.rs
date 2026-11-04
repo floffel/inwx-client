@@ -61,7 +61,7 @@ pub struct Detail {
 /// ```
 /// use inwx_client::rpc::RpcRequest;
 ///
-/// let request = RpcRequest::new("account.check", &serde_json::json!({}));
+/// let request = RpcRequest::new("account.check", &serde_json::json!({}))?;
 /// let bytes = request.to_bytes()?;
 /// assert_eq!(
 ///     String::from_utf8(bytes).unwrap(),
@@ -77,25 +77,70 @@ pub struct RpcRequest {
     pub params: Map<String, Value>,
 }
 
+/// The error a non-object `params` produces.
+///
+/// One message for both entry points — [`RpcRequest::new`] and
+/// [`crate::InwxClient::call`] — so a caller cannot tell which layer refused,
+/// only that the shape is wrong.
+pub(crate) fn not_an_object() -> Error {
+    Error::validation(
+        "params",
+        "must be a JSON object; a method without parameters passes `{}`",
+    )
+}
+
 impl RpcRequest {
-    /// Builds a request from a method name and any JSON value that is an
-    /// object.
+    /// Builds a request from a method name and a JSON object.
     ///
     /// ```
     /// use inwx_client::rpc::RpcRequest;
     ///
-    /// let request = RpcRequest::new("domain.check", &serde_json::json!({"domain": ["example.com"]}));
+    /// let params = serde_json::json!({"domain": ["example.com"]});
+    /// let request = RpcRequest::new("domain.check", &params)?;
     /// assert_eq!(request.params["domain"][0], "example.com");
+    /// // `params` is borrowed, so the caller keeps its object.
+    /// assert_eq!(params["domain"][0], "example.com");
+    /// # Ok::<(), inwx_client::Error>(())
     /// ```
     ///
-    /// A non-object `params` is treated as empty rather than rejected: the
-    /// methods that take no parameters (`account.logout`) are called with
-    /// `null` often enough that panicking would be unkind.
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `params` is not a JSON object — `null`, an
+    /// array, a string, a number. The API takes one object per method, so any
+    /// other shape would arrive as an empty parameter set: a mutation whose
+    /// fields are all optional would go out with nothing set, and a listing
+    /// without its required filter would fail server-side in a way that looks
+    /// like an API problem. A method that takes no parameters passes `{}`.
+    ///
+    /// ```
+    /// use inwx_client::rpc::RpcRequest;
+    ///
+    /// // Just inside: an object, empty or not, is the documented shape.
+    /// assert!(RpcRequest::new("account.logout", &serde_json::json!({})).is_ok());
+    ///
+    /// // Just outside: `null` is not an object.
+    /// let error = RpcRequest::new("account.logout", &serde_json::Value::Null).unwrap_err();
+    /// assert!(error.is_validation());
+    /// ```
+    pub fn new(method: impl Into<String>, params: &Value) -> Result<Self> {
+        match params {
+            Value::Object(map) => Ok(Self {
+                method: method.into(),
+                params: map.clone(),
+            }),
+            _ => Err(not_an_object()),
+        }
+    }
+
+    /// Builds a request from a parameter map that is already an object.
+    ///
+    /// Used by the client's request path, which holds the map itself and would
+    /// otherwise have to wrap it in a [`Value`] only to unpack it again.
     #[must_use]
-    pub fn new(method: impl Into<String>, params: &Value) -> Self {
+    pub(crate) fn from_map(method: impl Into<String>, params: Map<String, Value>) -> Self {
         Self {
             method: method.into(),
-            params: params.as_object().cloned().unwrap_or_default(),
+            params,
         }
     }
 
@@ -285,6 +330,7 @@ impl RpcResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn unknown_fields_are_ignored() {
@@ -308,13 +354,39 @@ mod tests {
     }
 
     #[test]
-    fn request_with_non_object_params_is_empty() {
-        let request = RpcRequest::new("account.logout", &Value::Null);
+    fn a_request_without_params_is_built_from_an_empty_object() {
+        let request = RpcRequest::new("account.logout", &json!({})).unwrap();
         assert!(request.params.is_empty());
         assert_eq!(
             std::str::from_utf8(&request.to_bytes().unwrap()).unwrap(),
             r#"{"method":"account.logout","params":{}}"#
         );
+    }
+
+    #[test]
+    fn a_non_object_request_params_is_refused() {
+        // Just inside: an object with one field keeps that field.
+        let inside = RpcRequest::new("domain.info", &json!({"domain": "example.com"})).unwrap();
+        assert_eq!(inside.params.len(), 1);
+
+        // Just outside: every non-object shape is a validation error, not an
+        // empty parameter set that would drop the caller's payload.
+        for params in [
+            Value::Null,
+            json!([]),
+            json!([1, 2, 3]),
+            json!("domain"),
+            json!(7),
+            json!(true),
+        ] {
+            let error = RpcRequest::new("domain.info", &params).unwrap_err();
+            assert!(error.is_validation(), "{params} should be refused");
+            assert!(error.to_string().contains("params"), "{error}");
+            assert!(
+                error.to_string().contains("JSON object"),
+                "the message names the expected shape: {error}"
+            );
+        }
     }
 
     #[test]
