@@ -251,6 +251,26 @@ async fn reissue_renew_and_settings_commands() {
     assert_eq!(calls[4].params["certificateId"], 9);
 }
 
+#[test]
+fn certificate_product_wildcard_is_a_plain_builder_step() {
+    // Regression for #102: the setter once returned `Result` and documented a
+    // validation it never ran. The type now says what the code does — a flag
+    // with no other filter is the caller's decision, and the API accepts it.
+    let wildcard_only: CertificateProductQuery = CertificateProductQuery::new().with_wildcard(true);
+    assert_eq!(wildcard_only.params()["wildcard"], true);
+    assert_eq!(
+        wildcard_only.params().as_object().map(serde_json::Map::len),
+        Some(1)
+    );
+
+    let filtered = CertificateProductQuery::new()
+        .with_kind("OV")
+        .unwrap()
+        .with_wildcard(false);
+    assert_eq!(filtered.params()["type"], "OV");
+    assert_eq!(filtered.params()["wildcard"], false);
+}
+
 #[tokio::test]
 async fn certificate_validation_short_circuits() {
     let transport = MockTransport::new();

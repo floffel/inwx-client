@@ -1449,7 +1449,7 @@ impl CertificateQuery {
 ///
 /// let query = CertificateProductQuery::new()
 ///     .with_kind("DV")?
-///     .with_wildcard(true)?;
+///     .with_wildcard(true);
 /// assert_eq!(query.params()["type"], "DV");
 /// # Ok::<(), inwx_client::Error>(())
 /// ```
@@ -1510,21 +1510,22 @@ impl CertificateProductQuery {
         Ok(self)
     }
 
-    /// Filters by wildcard support.
+    /// Sets the wildcard-support filter.
     ///
-    /// # Errors
-    ///
-    /// [`Error::Validation`] when the filter carries nothing else — an
-    /// accidental empty query is more likely a bug than a request for the whole
-    /// catalogue. (The API accepts an empty filter; this is a caller guard.)
+    /// The flag is sent as given and is not a guard on its own: the API accepts
+    /// a filter that carries nothing else and then answers with the whole
+    /// product catalogue. Add [`with_kind`](Self::with_kind) or
+    /// [`with_brand`](Self::with_brand) when a narrow answer is what you want.
     ///
     /// ```
     /// use inwx_client::CertificateProductQuery;
-    /// assert!(CertificateProductQuery::new().with_wildcard(true).is_ok());
+    /// let query = CertificateProductQuery::new().with_wildcard(true);
+    /// assert_eq!(query.params()["wildcard"], true);
     /// ```
-    pub fn with_wildcard(mut self, wildcard: bool) -> Result<Self> {
+    #[must_use]
+    pub fn with_wildcard(mut self, wildcard: bool) -> Self {
         self.params.insert("wildcard".to_owned(), json!(wildcard));
-        Ok(self)
+        self
     }
 
     /// The `certificate.listProducts` parameters.

@@ -485,8 +485,7 @@ fn certificate_query_and_update_branches() {
         .unwrap()
         .with_brand("ExampleCA")
         .unwrap()
-        .with_wildcard(false)
-        .unwrap();
+        .with_wildcard(false);
     let params = products.params();
     assert_eq!(params["type"], "OV");
     assert_eq!(params["brand"], "ExampleCA");
