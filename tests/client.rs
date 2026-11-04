@@ -323,6 +323,51 @@ async fn logout_drops_the_session_even_when_the_call_fails() {
     assert!(!client.is_authenticated());
 }
 
+/// `logout` once leaned on a `null` payload being read as `{}`. It sends the
+/// empty object itself, so the wire is the same and no call has to tolerate a
+/// non-object any more.
+#[tokio::test]
+async fn logout_sends_an_explicit_empty_object() {
+    let transport = MockTransport::new();
+    transport.ok_empty();
+
+    let client = client(transport.clone());
+    client.logout().await.unwrap();
+
+    let call = transport.only_call();
+    assert_eq!(call.method, "account.logout");
+    assert_eq!(call.params, json!({}));
+}
+
+/// A `params` that is not an object is refused before a session is opened and
+/// before a single byte is written. Sending `{}` instead — what the old
+/// `unwrap_or_default` did — would drop the caller's payload without a word: a
+/// `nameserver.update` with all-optional fields would go out empty, a
+/// `domain.info` without its domain would come back as a server-side rejection.
+#[tokio::test]
+async fn a_non_object_params_is_refused_without_a_request() {
+    for params in [
+        json!(null),
+        json!(["example.com"]),
+        json!("example.com"),
+        json!(2024),
+        json!(true),
+    ] {
+        let transport = MockTransport::new();
+        let client = anonymous_client(transport.clone());
+
+        let error = client
+            .call("domain.info", params.clone())
+            .await
+            .unwrap_err();
+
+        assert!(error.is_validation(), "`{params}` was not refused");
+        assert_eq!(transport.call_count(), 0, "`{params}` reached the wire");
+        // Refused before `ensure_session`, so no login was attempted either.
+        assert!(!client.is_authenticated());
+    }
+}
+
 /// Both secrets belong in the JSON body. A password in a URL ends up in access
 /// logs, and one in a header is easy to echo back, so neither is allowed.
 #[tokio::test]

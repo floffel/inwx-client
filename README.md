@@ -150,7 +150,7 @@ Every method below is implemented against the published INWX API documentation
 | Reseller: documents | `document.upload`, `list`, `download`, `delete` | the file name is never a path in either direction (upload refuses one, a download hands its name out as `SavedName`), size checked before base64, the body stays out of `Debug`; an upload answers the stored id or `Error::Ambiguous`, a dry run answers `DryRun`; a download is held against the size it declares, a short body is `Error::SizeMismatch`, and what the file is comes from the `%PDF-` header read out of a base64 prefix (`DocumentKind`), never from the file name |
 | Reseller: messages, news, handles, PDFs | `message.poll`, `message.ack`, `news.list`, `nichandle.list`, `pdf.document`, `pdf.get` | an empty mailbox is `None`, not an error; a counted answer that carries no message is an `Error::UnexpectedAnswer` |
 | Reseller: AuthInfo2 | `authinfo2.create`, `authinfo2.getprice` | the paid order is never replayed after a 429/5xx or a timeout — that answers `Error::Uncertain`; `testing` is an explicit opt-in |
-| Anything else | `InwxClient::call(method, params)` | login, cookies, retries and error envelopes still apply |
+| Anything else | `InwxClient::call(method, params)` | login, cookies, retries and error envelopes still apply; `params` must be a JSON object, any other shape is an `Error::Validation` before anything is written |
 
 ### Design
 

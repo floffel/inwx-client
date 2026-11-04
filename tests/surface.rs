@@ -426,7 +426,7 @@ fn transport_request_accessors() {
 
 #[test]
 fn rpc_request_and_detail_types() {
-    let request = RpcRequest::new("account.check", &json!({"a": 1}));
+    let request = RpcRequest::new("account.check", &json!({"a": 1})).unwrap();
     assert_eq!(request.method, "account.check");
     assert_eq!(request.params["a"], 1);
     assert!(String::from_utf8(request.to_bytes().unwrap())
