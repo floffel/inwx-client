@@ -24,10 +24,16 @@ http = ["dep:bytes", "dep:reqwest", "dep:tokio"]
 [dependencies]
 base64 = "0.22"
 bytes = { version = "1", optional = true }
+# ISO 3166-1 lives in a maintained table, not in a two-ASCII-letters check:
+# `ZZ` and `QQ` are two letters and still not countries.
+celes = { version = "3", default-features = false }
 # The DS digest is hex and its length is fixed by the digest type; `data-encoding`
 # decodes it (both cases, with a typed error) instead of a local hex loop that
 # would report "not hex" for a digest that is hex of the wrong length.
 data-encoding = "2.11"
+# RFC 5321 address shape (local part, domain, length caps) from the maintained
+# validator; the local part is not re-implemented as a `split_once('@')`.
+garde = { version = "0.23", default-features = false, features = ["email"] }
 # `Retry-After` may be a delay in seconds or an HTTP-date; both forms are
 # parsed by the maintained `httpdate`, never by hand.
 httpdate = "1"
