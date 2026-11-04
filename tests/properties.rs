@@ -890,6 +890,26 @@ proptest! {
         );
     }
 
+    /// A handle class is validated against the `text064` field: an unknown
+    /// class is carried on the response side, but `with_type` refuses a token
+    /// past 64 characters instead of sending it.
+    #[test]
+    fn handle_class_tokens_stop_at_sixty_four_characters(token in "[A-Za-z0-9_.-]{1,63}") {
+        let inside = format!("{token}x");
+        let outside = format!("{token}xx");
+        let query = NicHandleQuery::new()
+            .with_type(ContactType::parse(&inside).unwrap())
+            .unwrap();
+        let params = query.params().unwrap();
+        prop_assert_eq!(params["type"].as_str().unwrap(), inside.to_ascii_uppercase());
+        prop_assert_eq!(
+            NicHandleQuery::new()
+                .with_type(ContactType::parse(&outside).unwrap())
+                .is_ok(),
+            outside.chars().count() <= 64
+        );
+    }
+
     /// A document file name is a name: never empty, never a dot pair.
     #[test]
     fn document_file_names_are_names_never_paths(name in "[A-Za-z0-9 ._-]{0,10}") {
