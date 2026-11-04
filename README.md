@@ -114,7 +114,8 @@ wire. The walk ends at the first of a short page, an empty page, the `count`
 the API reports, `with_max_items` or `with_max_pages`; only the last two set
 `bound_reached()`, and the page that crosses `with_max_items` is truncated so a
 walk never yields more than it promised. `list_all_contacts` works the same way,
-and `Pages::new` paginates any `Listing` of your own.
+and so do `list_all_zones`, `list_all_nichandles` and `list_all_applications`;
+`Pages::new` paginates any `Listing` of your own.
 
 ## What is covered
 
@@ -146,8 +147,8 @@ Every method below is implemented against the published INWX API documentation
 | Contacts | `contact.create`, `contact.info`, `contact.list`, `contact.update`, `contact.delete` | documented field lengths and country codes enforced |
 | Diagnostics | `domain.log`, `domain.stats`, `domain.getRules`, `domain.getTldGroups` | read-only: why an action was rejected and what a `TLD` requires |
 | Prices | `domain.getPrices`, `domain.getdomainprice` | `f64` quotes, not amounts to sum |
-| Pagination | `Pagination`, `Pages`, `DomainListing`, `ContactListing`, `ZoneListing`, `NicHandleListing` | `list_all_domains`, `list_all_contacts`, `list_all_zones`, `list_all_nichandles` walk every page with a bound that is validated before the wire |
-| Reseller: applications | `application.check`, `create`, `delete`, `info`, `list`, `update` | types are validated tokens, not a frozen enum; a check needs a selector, an update needs a change |
+| Pagination | `Pagination`, `Pages`, `DomainListing`, `ContactListing`, `ZoneListing`, `NicHandleListing`, `ApplicationListing` | `list_all_domains`, `list_all_contacts`, `list_all_zones`, `list_all_nichandles`, `list_all_applications` walk every page with a bound that is validated before the wire |
+| Reseller: applications | `application.check`, `create`, `delete`, `info`, `list`, `update` | types are validated tokens, not a frozen enum; a check needs a selector, an update needs a change; `list_applications` answers an `ApplicationListPage` and `list_all_applications` walks every page |
 | Reseller: customers | `customer.info`, `update`, `delete`, `contactverificationsettingsinfo`, `contactverificationsettingsupdate`, `listdownloads`, `requestdataexport` | e-mail, country code and address lengths checked; the data export is what copies personal data out |
 | Reseller: hosts | `host.check`, `create`, `delete`, `info`, `list`, `update` | a glue record must sit inside its own domain, 1–13 addresses, no duplicates |
 | Reseller: documents | `document.upload`, `list`, `download`, `delete` | the file name is never a path in either direction (upload refuses one, a download hands its name out as `SavedName`), size checked before base64, the body stays out of `Debug`; an upload answers the stored id or `Error::Ambiguous`, a dry run answers `DryRun`; a download is held against the size it declares, a short body is `Error::SizeMismatch`, and what the file is comes from the `%PDF-` header read out of a base64 prefix (`DocumentKind`), never from the file name |
@@ -165,10 +166,11 @@ Every method below is implemented against the published INWX API documentation
   fit the documented `int`, and the record name rules allow `@`, `*` and
   `_service` labels while refusing whitespace and control characters.
 * **Walk the whole list.** `list_all_domains`, `list_all_contacts`,
-  `list_all_zones` and `list_all_nichandles` return a `Pages` walk instead of a
-  single page, so callers never hand-roll a cursor. Page size and bound are
-  validated where they are set, the last page is cut at the bound, and
-  `bound_reached()` says whether the listing ended or the walk stopped early.
+  `list_all_zones`, `list_all_nichandles` and `list_all_applications` return a
+  `Pages` walk instead of a single page, so callers never hand-roll a cursor.
+  Page size and bound are validated where they are set, the last page is cut at
+  the bound, and `bound_reached()` says whether the listing ended or the walk
+  stopped early.
 * **Parse permissively.** Unknown fields are ignored; unknown enum values are
   carried (`RecordType::Other`, `RenewalMode::Other`, `ContactType::Other`);
   scalars are accepted as numbers *or* strings, because INWX is not consistent

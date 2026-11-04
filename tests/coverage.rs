@@ -791,6 +791,12 @@ fn listing_helpers_report_empty_and_full_pages() {
     assert_eq!(handles.len(), 2);
     assert!(!handles.is_empty());
     assert!(handles.has_more());
+
+    let applications: inwx_client::ApplicationListPage =
+        serde_json::from_str(r#"{"count":40,"application":[{"id":1},{"id":2}]}"#).unwrap();
+    assert_eq!(applications.len(), 2);
+    assert!(!applications.is_empty());
+    assert!(applications.has_more());
 }
 
 // ------------------------------------------------------------ reseller #22 --
