@@ -318,23 +318,57 @@ async fn dry_run_alone_is_not_a_change() {
 }
 
 #[tokio::test]
-async fn frame_fields_require_a_frame_redirect() {
-    let mut update = ZoneUpdate::new(domain("a.de"))
-        .with_web("https://example.net")
-        .unwrap()
-        .with_redirect_type(UrlRedirectType::Header301)
-        .unwrap();
-    assert!(update.clone().with_frame_title("x").is_err());
-    assert!(update.clone().with_frame_description("x").is_err());
-    assert!(update.clone().with_frame_favicon("x").is_err());
-    assert!(update.clone().with_frame_keywords("x").is_err());
+async fn frame_fields_patch_the_existing_frame_redirect() {
+    let transport = MockTransport::new();
+    transport.ok_empty();
 
-    update = ZoneUpdate::new(domain("a.de"))
-        .with_web("https://example.net")
+    let update = ZoneUpdate::new(domain("a.de"))
+        .with_frame_title("Tenant")
         .unwrap()
-        .with_redirect_type(UrlRedirectType::Frame)
+        .with_frame_description("Tenant portal")
+        .unwrap()
+        .with_frame_favicon("https://example.net/favicon.ico")
+        .unwrap()
+        .with_frame_keywords("tenant, portal")
         .unwrap();
-    assert!(update.with_frame_title("x").is_ok());
+    assert!(update.params().unwrap().get("web").is_none());
+    assert!(update.params().unwrap().get("urlRedirectType").is_none());
+
+    client(transport.clone())
+        .update_zone(&update)
+        .await
+        .unwrap();
+
+    let call = transport.only_call();
+    assert_eq!(call.method, "nameserver.update");
+    assert_eq!(call.params["domain"], "a.de");
+    assert_eq!(call.params["urlRedirectTitle"], "Tenant");
+    assert_eq!(call.params["urlRedirectDescription"], "Tenant portal");
+    assert_eq!(
+        call.params["urlRedirectFavIcon"],
+        "https://example.net/favicon.ico"
+    );
+    assert_eq!(call.params["urlRedirectKeywords"], "tenant, portal");
+    assert!(call.params.get("web").is_none());
+    assert!(call.params.get("urlRedirectType").is_none());
+}
+
+#[tokio::test]
+async fn frame_fields_conflict_with_a_non_frame_redirect_in_the_same_patch() {
+    let update = ZoneUpdate::new(domain("a.de"))
+        .with_redirect_type(UrlRedirectType::Header301)
+        .unwrap()
+        .with_frame_title("x")
+        .unwrap();
+    let error = update.params().unwrap_err();
+    assert!(error.is_validation());
+
+    update
+        .clone()
+        .with_redirect_type(UrlRedirectType::Frame)
+        .unwrap()
+        .params()
+        .unwrap();
 }
 
 #[tokio::test]
