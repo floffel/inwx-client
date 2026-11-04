@@ -20,7 +20,7 @@ use idna::uts46::{AsciiDenyList, DnsLength, Hyphens, Uts46};
 use celes::Country;
 use garde::rules::email::parse_email;
 
-use crate::{Error, Result};
+use crate::{pagination::MAX_PAGE_SIZE, Error, Result};
 
 /// Largest value the API's `int` parameters accept.
 const MAX_API_INT: i64 = i32::MAX as i64;
@@ -525,23 +525,37 @@ pub(crate) fn canonical_dns_name(field: &'static str, kind: &str, input: &str) -
 /// # Ok::<(), inwx_client::Error>(())
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Period {
-    /// One month — only some TLDs offer it.
+pub struct Period {
+    kind: PeriodKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum PeriodKind {
     OneMonth,
-    /// One to ten whole years.
     Years(u8),
 }
 
 impl Period {
     /// One month.
-    pub const ONE_MONTH: Self = Self::OneMonth;
+    ///
+    /// ```
+    /// use inwx_client::Period;
+    ///
+    /// assert_eq!(Period::ONE_MONTH.to_string(), "1M");
+    /// ```
+    pub const ONE_MONTH: Self = Self {
+        kind: PeriodKind::OneMonth,
+    };
 
     /// A period of `years` years, from 1 to 10.
     ///
     /// ```
     /// use inwx_client::Period;
-    /// assert!(Period::years(0).is_err());
+    ///
+    /// assert!(Period::years(1).is_ok());
+    /// assert!(Period::years(5).is_ok());
     /// assert!(Period::years(10).is_ok());
+    /// assert!(Period::years(0).is_err());
     /// assert!(Period::years(11).is_err());
     /// ```
     ///
@@ -550,7 +564,9 @@ impl Period {
     /// [`Error::Validation`] when `years` is outside `1..=10`.
     pub fn years(years: u8) -> Result<Self> {
         if (1..=10).contains(&years) {
-            Ok(Self::Years(years))
+            Ok(Self {
+                kind: PeriodKind::Years(years),
+            })
         } else {
             Err(Error::validation(
                 "period",
@@ -558,13 +574,20 @@ impl Period {
             ))
         }
     }
+
+    pub(crate) const fn parts(self) -> (u8, &'static str) {
+        match self.kind {
+            PeriodKind::OneMonth => (1, "M"),
+            PeriodKind::Years(years) => (years, "Y"),
+        }
+    }
 }
 
 impl fmt::Display for Period {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::OneMonth => formatter.write_str("1M"),
-            Self::Years(years) => write!(formatter, "{years}Y"),
+        match self.kind {
+            PeriodKind::OneMonth => formatter.write_str("1M"),
+            PeriodKind::Years(years) => write!(formatter, "{years}Y"),
         }
     }
 }
@@ -575,7 +598,7 @@ impl FromStr for Period {
     fn from_str(input: &str) -> Result<Self> {
         let upper = input.trim().to_ascii_uppercase();
         if upper.as_str() == "1M" {
-            Ok(Self::OneMonth)
+            Ok(Self::ONE_MONTH)
         } else {
             let digits = upper.strip_suffix('Y').unwrap_or("");
             match digits.parse::<u8>() {
@@ -1576,10 +1599,17 @@ fn validate_int_id(field: &'static str, id: i64, description: &str) -> Result<i6
     Ok(id)
 }
 
-/// A page size: the API pages from one and rejects a limit of zero.
+/// A page size: the API pages from one, and the crate caps the request at its
+/// documented [`MAX_PAGE_SIZE`] ceiling.
 pub(crate) fn validate_page_limit(limit: u32) -> Result<u32> {
     if limit == 0 {
         return Err(Error::validation("pagelimit", "must be at least 1"));
+    }
+    if limit > MAX_PAGE_SIZE {
+        return Err(Error::validation(
+            "pagelimit",
+            format!("must be at most {MAX_PAGE_SIZE}, got {limit}"),
+        ));
     }
     Ok(limit)
 }
@@ -2033,7 +2063,7 @@ mod tests {
 
     #[test]
     fn period_parsing_is_case_insensitive() {
-        assert_eq!("3y".parse::<Period>().unwrap(), Period::Years(3));
+        assert_eq!("3y".parse::<Period>().unwrap(), Period::years(3).unwrap());
         assert!("0Y".parse::<Period>().is_err());
         assert!("Y".parse::<Period>().is_err());
         assert!("".parse::<Period>().is_err());

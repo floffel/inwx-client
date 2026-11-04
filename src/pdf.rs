@@ -17,7 +17,9 @@
 //! ```
 
 use std::fmt;
+use std::io::Read as _;
 
+use base64::read::DecoderReader;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
@@ -25,9 +27,7 @@ use crate::client::InwxClient;
 use crate::document::MAX_DOCUMENT_BYTES;
 use crate::error::{Error, Result};
 use crate::transport::Transport;
-use crate::types::{
-    de, decode_base64, validate_id, validate_upper_token, DocumentFormat, Timestamp,
-};
+use crate::types::{de, validate_id, validate_upper_token, DocumentFormat, Timestamp};
 
 /// Longest document type token this crate accepts.
 const MAX_TYPE_LEN: usize = 64;
@@ -334,16 +334,19 @@ impl PdfFile {
         let encoded = self.content.as_deref().ok_or_else(|| {
             Error::validation("pdf.content", "the answer carries no document body")
         })?;
-        check_pdf_size(encoded.len())?;
-        decode_base64("pdf.content", encoded)
+        decode_pdf_base64(encoded)
     }
 }
 
-/// Largest base64 body this crate is willing to decode.
+/// Largest base64 body this crate is willing to decode before the decoded
+/// length is checked.
 ///
 /// Base64 grows its input by four thirds, so the limit on the decoded document
 /// becomes a limit on the string length — checked before `base64` allocates the
-/// decoded copy.
+/// decoded copy. The decoded length is still the authoritative check: this
+/// encoded length alone cannot distinguish `MAX_DOCUMENT_BYTES`,
+/// `MAX_DOCUMENT_BYTES + 1` and `MAX_DOCUMENT_BYTES + 2`, which all encode to
+/// the same number of base64 characters.
 const MAX_ENCODED_LEN: usize = MAX_DOCUMENT_BYTES.div_ceil(3) * 4;
 
 /// Refuses an oversized body before decoding it.
@@ -358,6 +361,34 @@ fn check_pdf_size(encoded_len: usize) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Decodes a PDF body, refusing more than [`MAX_DOCUMENT_BYTES`] once decoded.
+fn decode_pdf_base64(encoded: &str) -> Result<Vec<u8>> {
+    check_pdf_size(encoded.len())?;
+    let encoded = encoded.trim();
+    let decoder = DecoderReader::new(
+        encoded.as_bytes(),
+        &base64::engine::general_purpose::STANDARD,
+    );
+    let limit = u64::try_from(MAX_DOCUMENT_BYTES.saturating_add(1)).unwrap_or(u64::MAX);
+    let mut bytes = Vec::new();
+    decoder
+        .take(limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            Error::validation("pdf.content", format!("is not valid base64: {error}"))
+        })?;
+    if bytes.len() > MAX_DOCUMENT_BYTES {
+        return Err(Error::validation(
+            "pdf.content",
+            format!(
+                "exceeds the {MAX_DOCUMENT_BYTES} byte decoded document limit ({} bytes read)",
+                bytes.len(),
+            ),
+        ));
+    }
+    Ok(bytes)
 }
 
 impl<T: Transport> InwxClient<T> {
@@ -415,6 +446,7 @@ impl<T: Transport> InwxClient<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::encode_base64;
 
     #[test]
     fn a_type_token_of_64_characters_is_accepted_and_65_is_not() {
@@ -477,10 +509,30 @@ mod tests {
     }
 
     #[test]
-    fn the_last_accepted_body_is_one_byte_bigger_than_the_first_rejected() {
+    fn the_encoded_length_guard_accepts_the_padded_maximum() {
         assert!(check_pdf_size(MAX_ENCODED_LEN).is_ok());
         assert!(check_pdf_size(MAX_ENCODED_LEN + 1).is_err());
         assert!(check_pdf_size(0).is_ok());
+    }
+
+    #[test]
+    fn decoded_documents_are_limited_at_the_documented_boundary() {
+        for (len, accepted) in [
+            (MAX_DOCUMENT_BYTES, true),
+            (MAX_DOCUMENT_BYTES + 1, false),
+            (MAX_DOCUMENT_BYTES + 2, false),
+        ] {
+            let body = vec![b'x'; len];
+            let file = PdfFile {
+                content: Some(encode_base64(&body)),
+                ..PdfFile::default()
+            };
+            let decoded = file.bytes();
+            assert_eq!(decoded.is_ok(), accepted, "{len} decoded bytes");
+            if let Ok(bytes) = decoded {
+                assert_eq!(bytes.len(), len);
+            }
+        }
     }
 
     #[test]
