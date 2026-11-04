@@ -16,22 +16,25 @@
 
 use std::{fmt, time::Duration};
 
+use http::header::{HeaderName, HeaderValue};
+use http::{HeaderMap, StatusCode};
 use serde_json::Value;
 
 use crate::{Error, Result};
 
 /// A single JSON-RPC call, transport agnostic.
 ///
-/// Headers are owned pairs because the client sets `Content-Type`, `Cookie` and
-/// `User-Agent` per call. They never contain the password: the only credential
-/// on the wire is the session cookie, and it is opaque.
+/// Headers are owned [`HeaderMap`] entries because the client sets
+/// `Content-Type`, `Cookie` and `User-Agent` per call. They never contain the
+/// password: the only credential on the wire is the session cookie, and it is
+/// opaque.
 ///
 /// ```
 /// use inwx_client::transport::Request;
 ///
 /// let body = br#"{"method":"account.check","params":{}}"#;
 /// let request = Request::post_json("https://api.domrobot.com/jsonrpc/", body.to_vec())
-///     .with_header("Cookie", "session=abc")
+///     .with_header("Cookie", "session=abc").unwrap()
 ///     .with_timeout(Some(std::time::Duration::from_secs(5)));
 /// assert_eq!(request.header("cookie"), Some("session=abc"));
 /// assert_eq!(request.timeout.unwrap().as_secs(), 5);
@@ -45,8 +48,11 @@ pub struct Request<'a> {
     /// Stored by value so the transport can hand it to the HTTP client without
     /// copying the whole envelope again.
     pub body: Vec<u8>,
-    /// Additional headers, as `(name, value)` pairs in insertion order.
-    pub headers: Vec<(String, String)>,
+    /// Additional HTTP headers.
+    ///
+    /// [`HeaderMap`] validates names and values, keeps names case-insensitive,
+    /// and retains repeated headers such as `Set-Cookie`.
+    pub headers: HeaderMap<HeaderValue>,
     /// Per-request timeout; `None` leaves the transport default in place.
     pub timeout: Option<Duration>,
 }
@@ -56,11 +62,7 @@ pub struct Request<'a> {
 /// a log line.
 impl fmt::Debug for Request<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let header_names: Vec<&str> = self
-            .headers
-            .iter()
-            .map(|(name, _value)| name.as_str())
-            .collect();
+        let header_names: Vec<&str> = self.headers.keys().map(HeaderName::as_str).collect();
         formatter
             .debug_struct("Request")
             .field("method", &"POST")
@@ -89,24 +91,42 @@ impl<'a> Request<'a> {
         Self {
             url,
             body: body.into(),
-            headers: Vec::new(),
+            headers: HeaderMap::new(),
             timeout: None,
         }
     }
 
-    /// Adds one header.
+    /// Adds one header, or returns a local transport error for an invalid name
+    /// or value.
     ///
     /// ```
     /// use inwx_client::transport::Request;
     ///
     /// let request = Request::post_json("https://example.test/", b"{}")
-    ///     .with_header("User-Agent", "inwx-client/0.1");
+    ///     .with_header("User-Agent", "inwx-client/0.1").unwrap();
     /// assert_eq!(request.header("user-agent"), Some("inwx-client/0.1"));
     /// ```
-    #[must_use]
-    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.headers.push((name.into(), value.into()));
-        self
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Transport`] at [`TransportStage::Local`] when the name or value
+    /// is not valid HTTP header syntax, or when the map would exceed the
+    /// maintained `http` crate's per-map limit.
+    pub fn with_header(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<Self> {
+        let name = name.into();
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|error| header_error("invalid request header name", error))?;
+        let value = value.into();
+        let value = HeaderValue::from_bytes(value.as_bytes())
+            .map_err(|error| header_error("invalid request header value", error))?;
+        self.headers
+            .try_append(name, value)
+            .map_err(|error| header_error("too many request headers", error))?;
+        Ok(self)
     }
 
     /// Case-insensitive header lookup.
@@ -115,16 +135,14 @@ impl<'a> Request<'a> {
     /// use inwx_client::transport::Request;
     ///
     /// let request = Request::post_json("https://example.test/", b"{}")
-    ///     .with_header("Content-Type", "application/json");
+    ///     .with_header("Content-Type", "application/json").unwrap();
     /// assert_eq!(request.header("CONTENT-TYPE"), Some("application/json"));
     /// assert_eq!(request.header("accept"), None);
     /// ```
     #[must_use]
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
+        let name = name.parse::<HeaderName>().ok()?;
+        self.headers.get(name).and_then(|value| value.to_str().ok())
     }
 
     /// Attaches a per-request timeout (no-op for `None`).
@@ -145,62 +163,82 @@ impl<'a> Request<'a> {
 
 /// A response as the client needs it: status, headers, body.
 ///
-/// Header names are lower-cased on construction and duplicates are preserved,
-/// because a `Set-Cookie` per session is normal and the client must see them
-/// all. Header values stay as bytes until a caller asks for text, so an opaque
-/// cookie or an extension header is not rounded to an empty string.
+/// Header names are validated and normalized by [`HeaderMap`], and duplicates
+/// are preserved because a `Set-Cookie` per session is normal and the client
+/// must see them all. Header values stay as bytes until a caller asks for text,
+/// so an opaque cookie or an extension header is not rounded to an empty
+/// string.
 ///
 /// ```
 /// use inwx_client::transport::Response;
 ///
+/// # fn main() -> inwx_client::Result<()> {
 /// let response = Response::new(
 ///     200,
 ///     [("Set-Cookie".to_string(), "session=abc; Path=/".to_string())],
 ///     br#"{"code":1000,"msg":"ok"}"#.to_vec(),
-/// );
+/// )?;
 /// assert!(response.is_success());
 /// assert_eq!(response.header("set-cookie"), Some("session=abc; Path=/"));
 /// assert_eq!(response.json().unwrap()["code"], 1000);
+/// # Ok(())
+/// # }
 /// ```
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Response {
-    status: u16,
-    headers: Vec<(String, Vec<u8>)>,
-    body: Vec<u8>,
+    inner: http::Response<Vec<u8>>,
 }
+
+impl PartialEq for Response {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.status() == other.inner.status()
+            && self.inner.headers() == other.inner.headers()
+            && self.inner.body() == other.inner.body()
+    }
+}
+
+impl Eq for Response {}
 
 /// `Debug` prints only the status, header names and body length; values such as
 /// `Set-Cookie` and response body bytes never reach a log line.
 impl fmt::Debug for Response {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let header_names: Vec<&str> = self
-            .headers
-            .iter()
-            .map(|(name, _value)| name.as_str())
+            .inner
+            .headers()
+            .keys()
+            .map(HeaderName::as_str)
             .collect();
         formatter
             .debug_struct("Response")
-            .field("status", &self.status)
+            .field("status", &self.inner.status().as_u16())
             .field("header_names", &header_names)
-            .field("body_len", &self.body.len())
+            .field("body_len", &self.inner.body().len())
             .finish()
     }
 }
 
 impl Response {
-    /// Builds a response from text header values, lower-casing header names.
+    /// Builds a response from text header values.
+    ///
+    /// Header names and values are validated by the maintained `http` crate.
     ///
     /// ```
     /// use inwx_client::transport::Response;
     ///
-    /// let response = Response::new(204, std::iter::empty(), Vec::new());
+    /// let response = Response::new(204, std::iter::empty(), Vec::new()).unwrap();
     /// assert_eq!(response.body(), b"");
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Transport`] at [`TransportStage::Local`] when the status,
+    /// header name or header value is invalid.
     pub fn new(
         status: u16,
         headers: impl IntoIterator<Item = (String, String)>,
         body: Vec<u8>,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::from_header_bytes(
             status,
             headers
@@ -210,7 +248,7 @@ impl Response {
         )
     }
 
-    /// Builds a response from raw header bytes, lower-casing header names.
+    /// Builds a response from raw header bytes.
     ///
     /// HTTP header values are bytes, not UTF-8 strings. This constructor is
     /// the lossless one for transports that can see opaque values; the client
@@ -224,34 +262,54 @@ impl Response {
     ///     200,
     ///     [("X-Opaque".to_string(), vec![0xff, 0xfe])],
     ///     Vec::new(),
-    /// );
+    /// ).unwrap();
     /// assert_eq!(response.header("x-opaque"), None);
     /// assert_eq!(response.header_bytes("x-opaque"), Some([0xff, 0xfe].as_slice()));
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Transport`] at [`TransportStage::Local`] when the status or a
+    /// header name/value is invalid.
     pub fn from_header_bytes(
         status: u16,
         headers: impl IntoIterator<Item = (String, Vec<u8>)>,
         body: Vec<u8>,
-    ) -> Self {
-        Self {
-            status,
-            headers: headers
-                .into_iter()
-                .map(|(name, value)| (name.to_ascii_lowercase(), value))
-                .collect(),
-            body,
+    ) -> Result<Self> {
+        let mut map = HeaderMap::new();
+        for (name, value) in headers {
+            let name = HeaderName::from_bytes(name.as_bytes())
+                .map_err(|error| header_error("invalid response header name", error))?;
+            let value = HeaderValue::from_bytes(&value)
+                .map_err(|error| header_error("invalid response header value", error))?;
+            map.try_append(name, value)
+                .map_err(|error| header_error("too many response headers", error))?;
         }
+        Self::from_header_map(status, map, body)
+    }
+
+    fn from_header_map(
+        status: u16,
+        headers: HeaderMap<HeaderValue>,
+        body: Vec<u8>,
+    ) -> Result<Self> {
+        let status = StatusCode::from_u16(status)
+            .map_err(|error| header_error("invalid response status", error))?;
+        let mut inner = http::Response::new(body);
+        *inner.status_mut() = status;
+        *inner.headers_mut() = headers;
+        Ok(Self { inner })
     }
 
     /// HTTP status code.
     ///
     /// ```
     /// use inwx_client::transport::Response;
-    /// assert_eq!(Response::new(429, std::iter::empty(), Vec::new()).status(), 429);
+    /// assert_eq!(Response::new(429, std::iter::empty(), Vec::new()).unwrap().status(), 429);
     /// ```
     #[must_use]
     pub fn status(&self) -> u16 {
-        self.status
+        self.inner.status().as_u16()
     }
 
     /// First value of a header, case-insensitively.
@@ -263,7 +321,7 @@ impl Response {
     /// ```
     /// use inwx_client::transport::Response;
     ///
-    /// let response = Response::new(200, [("X-Rate".to_string(), "9".to_string())], Vec::new());
+    /// let response = Response::new(200, [("X-Rate".to_string(), "9".to_string())], Vec::new()).unwrap();
     /// assert_eq!(response.header("x-rate"), Some("9"));
     /// ```
     #[must_use]
@@ -288,7 +346,7 @@ impl Response {
     ///         ("set-cookie".to_string(), "b=2".to_string()),
     ///     ],
     ///     Vec::new(),
-    /// );
+    /// ).unwrap();
     /// assert_eq!(response.header_all("set-cookie").count(), 2);
     /// ```
     pub fn header_all<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> + 'a {
@@ -305,17 +363,14 @@ impl Response {
     ///     200,
     ///     [("X-Trace".to_string(), b"abc".to_vec())],
     ///     Vec::new(),
-    /// );
+    /// ).unwrap();
     /// assert_eq!(response.header_bytes("x-trace"), Some(b"abc".as_slice()));
     /// assert_eq!(response.header_bytes("missing"), None);
     /// ```
     #[must_use]
     pub fn header_bytes(&self, name: &str) -> Option<&[u8]> {
-        self.headers
-            .iter()
-            .filter(move |(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_slice())
-            .next()
+        let name = name.parse::<HeaderName>().ok()?;
+        self.inner.headers().get(name).map(HeaderValue::as_bytes)
     }
 
     /// Every value of a header as raw bytes, case-insensitively.
@@ -330,40 +385,41 @@ impl Response {
     ///         ("set-cookie".to_string(), b"b=2".to_vec()),
     ///     ],
     ///     Vec::new(),
-    /// );
+    /// ).unwrap();
     /// assert_eq!(
     ///     response.header_all_bytes("set-cookie").collect::<Vec<_>>(),
     ///     [b"a=1".as_slice(), b"b=2".as_slice()],
     /// );
     /// ```
     pub fn header_all_bytes<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a [u8]> + 'a {
-        self.headers
-            .iter()
-            .filter(move |(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_slice())
+        name.parse::<HeaderName>()
+            .ok()
+            .into_iter()
+            .flat_map(move |name| self.inner.headers().get_all(name).iter())
+            .map(HeaderValue::as_bytes)
     }
 
     /// Raw body bytes.
     ///
     /// ```
     /// use inwx_client::transport::Response;
-    /// assert_eq!(Response::new(200, std::iter::empty(), b"hi".to_vec()).body(), b"hi");
+    /// assert_eq!(Response::new(200, std::iter::empty(), b"hi".to_vec()).unwrap().body(), b"hi");
     /// ```
     #[must_use]
     pub fn body(&self) -> &[u8] {
-        &self.body
+        self.inner.body()
     }
 
     /// Whether the status is 2xx.
     ///
     /// ```
     /// use inwx_client::transport::Response;
-    /// assert!(Response::new(200, std::iter::empty(), Vec::new()).is_success());
-    /// assert!(!Response::new(503, std::iter::empty(), Vec::new()).is_success());
+    /// assert!(Response::new(200, std::iter::empty(), Vec::new()).unwrap().is_success());
+    /// assert!(!Response::new(503, std::iter::empty(), Vec::new()).unwrap().is_success());
     /// ```
     #[must_use]
     pub fn is_success(&self) -> bool {
-        (200..300).contains(&self.status)
+        self.inner.status().is_success()
     }
 
     /// Parses the body as JSON.
@@ -377,11 +433,11 @@ impl Response {
     /// use inwx_client::transport::Response;
     /// use inwx_client::Error;
     ///
-    /// let response = Response::new(200, std::iter::empty(), br#"{"code":1000}"#.to_vec());
+    /// let response = Response::new(200, std::iter::empty(), br#"{"code":1000}"#.to_vec()).unwrap();
     /// assert_eq!(response.json().unwrap()["code"], 1000);
-    /// assert!(Response::new(200, std::iter::empty(), b"null".to_vec()).json().unwrap().is_null());
+    /// assert!(Response::new(200, std::iter::empty(), b"null".to_vec()).unwrap().json().unwrap().is_null());
     ///
-    /// let empty = Response::new(200, std::iter::empty(), Vec::new());
+    /// let empty = Response::new(200, std::iter::empty(), Vec::new()).unwrap();
     /// assert!(matches!(empty.json(), Err(Error::Uncertain { .. })));
     /// ```
     ///
@@ -390,14 +446,21 @@ impl Response {
     /// [`Error::Uncertain`] when the body is empty or whitespace-only, and
     /// [`Error::Json`] when a non-empty body is not valid JSON.
     pub fn json(&self) -> Result<Value> {
-        if self.body.iter().all(u8::is_ascii_whitespace) {
+        if self.body().iter().all(u8::is_ascii_whitespace) {
             return Err(Error::transport_at(
                 TransportStage::AfterSend,
                 "empty response body",
             ));
         }
-        serde_json::from_slice(&self.body).map_err(Error::from)
+        serde_json::from_slice(self.body()).map_err(Error::from)
     }
+}
+
+fn header_error(
+    message: &'static str,
+    error: impl std::error::Error + Send + Sync + 'static,
+) -> Error {
+    Error::transport_at(TransportStage::Local, message).with_source(error)
 }
 
 /// Where a transport failure happened relative to the moment the request bytes
@@ -638,11 +701,11 @@ fn parse_content_length(value: Option<&[u8]>) -> Option<u64> {
 /// impl Transport for AlwaysOk {
 ///     async fn execute(&self, request: Request<'_>) -> Result<Response> {
 ///         assert!(request.url.starts_with("https://"));
-///         Ok(Response::new(
+///         Response::new(
 ///             200,
 ///             std::iter::empty(),
 ///             br#"{"code":1000,"msg":"ok"}"#.to_vec(),
-///         ))
+///         )
 ///     }
 /// }
 /// ```
@@ -782,7 +845,7 @@ impl Transport for ReqwestTransport {
             builder = builder.timeout(timeout);
         }
         for (name, value) in &headers {
-            builder = builder.header(name.as_str(), value.as_str());
+            builder = builder.header(name, value);
         }
 
         let mut response = builder
@@ -810,7 +873,7 @@ impl Transport for ReqwestTransport {
         );
         let body = read_capped_body(&mut response, declared_len, self.max_response_bytes).await?;
 
-        Ok(Response::from_header_bytes(status, headers, body))
+        Response::from_header_bytes(status, headers, body)
     }
 }
 
@@ -1100,7 +1163,8 @@ mod tests {
                 ("Set-Cookie".to_string(), "b=2".to_string()),
             ],
             Vec::new(),
-        );
+        )
+        .unwrap();
         assert_eq!(response.header("SET-COOKIE"), Some("a=1"));
         assert_eq!(
             response.header_all("set-cookie").collect::<Vec<_>>(),
@@ -1114,7 +1178,8 @@ mod tests {
             200,
             [("X-Text".to_string(), "café".as_bytes().to_vec())],
             Vec::new(),
-        );
+        )
+        .unwrap();
         assert_eq!(valid.header("x-text"), Some("café"));
         assert_eq!(valid.header_bytes("x-text"), Some("café".as_bytes()));
 
@@ -1122,7 +1187,8 @@ mod tests {
             200,
             [("X-Opaque".to_string(), vec![0xff, 0xfe])],
             Vec::new(),
-        );
+        )
+        .unwrap();
         assert_eq!(opaque.header("x-opaque"), None);
         assert_eq!(opaque.header_all("x-opaque").next(), None);
         assert_eq!(
@@ -1137,29 +1203,74 @@ mod tests {
 
     #[test]
     fn json_on_garbage_is_an_error() {
-        let response = Response::new(200, std::iter::empty(), b"{not json".to_vec());
+        let response = Response::new(200, std::iter::empty(), b"{not json".to_vec()).unwrap();
         assert!(matches!(response.json(), Err(Error::Json { .. })));
     }
 
     #[test]
     fn empty_and_whitespace_only_bodies_are_uncertain() {
         // Valid: a literal JSON null is still a parsed value.
-        let literal_null = Response::new(200, std::iter::empty(), b"null".to_vec());
+        let literal_null = Response::new(200, std::iter::empty(), b"null".to_vec()).unwrap();
         assert!(literal_null.json().unwrap().is_null());
 
         // Just inside: padding around that value does not make it empty.
-        let padded_null = Response::new(200, std::iter::empty(), b" \n null \t".to_vec());
+        let padded_null = Response::new(200, std::iter::empty(), b" \n null \t".to_vec()).unwrap();
         assert!(padded_null.json().unwrap().is_null());
 
         // Just outside: no JSON value at all must not read as an answer.
         for body in [Vec::new(), b"  \n\t".to_vec()] {
-            let response = Response::new(200, std::iter::empty(), body);
+            let response = Response::new(200, std::iter::empty(), body).unwrap();
             let error = response.json().unwrap_err();
             assert!(matches!(error, Error::Uncertain { .. }), "{error:?}");
             assert!(error.is_uncertain(), "{error:?}");
             assert!(!error.is_retryable(), "{error:?}");
             assert!(error.to_string().contains("empty response body"));
         }
+    }
+
+    #[test]
+    fn request_headers_are_validated_and_repeated() {
+        let request = Request::post_json("https://example.test/", b"{}")
+            .with_header("X-Trace", "abc")
+            .unwrap()
+            .with_header("x-trace", "def")
+            .unwrap();
+        assert_eq!(request.header("X-TRACE"), Some("abc"));
+
+        let bad_name =
+            Request::post_json("https://example.test/", b"{}").with_header("bad name", "abc");
+        assert!(matches!(bad_name, Err(Error::Transport { .. })));
+
+        let bad_value =
+            Request::post_json("https://example.test/", b"{}").with_header("X-Bad", "a\nb");
+        assert!(matches!(bad_value, Err(Error::Transport { .. })));
+
+        assert_eq!(request.header("bad name"), None);
+    }
+
+    #[test]
+    fn response_construction_rejects_invalid_status_and_headers() {
+        let bad_status = Response::new(99, std::iter::empty(), Vec::new());
+        assert!(matches!(bad_status, Err(Error::Transport { .. })));
+
+        let bad_name = Response::new(
+            200,
+            [("bad name".to_string(), "abc".to_string())],
+            Vec::new(),
+        );
+        assert!(matches!(bad_name, Err(Error::Transport { .. })));
+
+        let bad_value = Response::new(200, [("X-Bad".to_string(), "a\nb".to_string())], Vec::new());
+        assert!(matches!(bad_value, Err(Error::Transport { .. })));
+
+        let bad_bytes_status = Response::from_header_bytes(1000, std::iter::empty(), Vec::new());
+        assert!(matches!(bad_bytes_status, Err(Error::Transport { .. })));
+
+        let response = Response::new(200, std::iter::empty(), Vec::new()).unwrap();
+        assert_eq!(response.header("bad name"), None);
+        assert_eq!(response.header_bytes("bad name"), None);
+        assert_eq!(response.header_all("bad name").next(), None);
+        assert_eq!(response.header_all_bytes("bad name").next(), None);
     }
 
     #[test]

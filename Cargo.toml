@@ -38,6 +38,10 @@ garde = { version = "0.23", default-features = false, features = ["email"] }
 # `Retry-After` may be a delay in seconds or an HTTP-date; both forms are
 # parsed by the maintained `httpdate`, never by hand.
 httpdate = "1"
+# HTTP header and response containers are maintained by the `http` crate; the
+# reqwest transport already pulls it into the tree, so naming it directly keeps
+# the shared types instead of a second hand-rolled header model.
+http = "1"
 # UTS-46 ToASCII with STD3 rules, the hyphen rule and `VerifyDNSLength`: name
 # validation belongs in a maintained IDNA implementation, not in this crate.
 idna = "1"

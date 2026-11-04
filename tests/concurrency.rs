@@ -79,7 +79,8 @@ impl Transport for OneSessionServer {
                     format!("{cookie}; Path=/; HttpOnly"),
                 )],
                 br#"{"code":1000,"msg":"Login successful","resData":{}}"#.to_vec(),
-            ));
+            )
+            .expect("test login headers are valid"));
         }
 
         let live = self.live();
@@ -88,11 +89,12 @@ impl Transport for OneSessionServer {
                 200,
                 [("content-type".to_owned(), "application/json".to_owned())],
                 br#"{"code":1000,"msg":"ok","resData":{"domain":[]}}"#.to_vec(),
-            ))
+            )
+            .expect("test response headers are valid"))
         } else {
             // A session the server dropped: the answer that makes callers
             // relogin.
-            Ok(Response::new(401, std::iter::empty(), Vec::new()))
+            Ok(Response::new(401, std::iter::empty(), Vec::new()).expect("test status is valid"))
         }
     }
 }

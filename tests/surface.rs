@@ -408,7 +408,9 @@ fn transport_request_accessors() {
     let body = b"{}".to_vec();
     let request = Request::post_json("https://example.test/jsonrpc/", body.clone())
         .with_header("Content-Type", "application/json")
+        .unwrap()
         .with_header("Cookie", "a=b")
+        .unwrap()
         .with_timeout(Some(std::time::Duration::from_secs(3)));
     assert_eq!(request.header("content-type"), Some("application/json"));
     assert_eq!(request.header("cookie"), Some("a=b"));
@@ -421,7 +423,8 @@ fn transport_request_accessors() {
         200,
         [("X-Test".to_owned(), "1".to_owned())],
         br#"{"a":1}"#.to_vec(),
-    );
+    )
+    .unwrap();
     assert_eq!(response.status(), 200);
     assert_eq!(response.header("x-test"), Some("1"));
     assert_eq!(response.header("missing"), None);
