@@ -247,16 +247,57 @@ async fn list_records_reads_nameserver_info_and_parses_records() {
 }
 
 #[tokio::test]
-async fn list_records_tolerates_a_missing_or_malformed_record_list() {
+async fn list_records_keeps_an_empty_zone_distinct_from_a_broken_answer() {
+    // Just inside: a present but empty `record` array is a documented answer —
+    // a zone without records — and stays `Ok`.
+    let transport = MockTransport::new();
+    transport.ok(json!({ "domain": "example.com", "count": 0, "record": [] }));
+    let client = client(transport.clone());
+    assert_eq!(client.list_records(&domain()).await.unwrap().len(), 0);
+    assert_eq!(transport.only_call().method, "nameserver.info");
+}
+
+#[tokio::test]
+async fn list_records_fails_when_the_record_list_is_absent_or_malformed() {
+    // Outside: a missing `record` key means the answer carries no list, so it
+    // must not read as "no records".
     let transport = MockTransport::new();
     transport.ok(json!({ "domain": "example.com" }));
     let client = client(transport.clone());
-    assert_eq!(client.list_records(&domain()).await.unwrap().len(), 0);
+    let error = client.list_records(&domain()).await.unwrap_err();
+    let Error::UnexpectedAnswer { field, .. } = &error else {
+        panic!("expected an unexpected-answer error, got {error:?}");
+    };
+    assert_eq!(*field, "record");
 
+    // Outside: a `record` that is not an array is a renamed or reshaped field,
+    // not an empty zone.
     let transport = MockTransport::new();
     transport.ok(json!({ "record": { "not": "an array" } }));
-    let client = common::client(transport);
-    assert_eq!(client.list_records(&domain()).await.unwrap().len(), 0);
+    let client = common::client(transport.clone());
+    let error = client.list_records(&domain()).await.unwrap_err();
+    assert!(matches!(error, Error::UnexpectedAnswer { .. }));
+}
+
+#[tokio::test]
+async fn a_record_that_does_not_parse_fails_the_whole_call() {
+    // Two valid rows around one the model cannot read: dropping only the bad one
+    // would shorten the list, and `replace_record` built on that would leave a
+    // stale record behind. The whole call fails, naming the offending index.
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "record": [
+            {"id": "1", "name": "@", "type": "A", "content": "203.0.113.7"},
+            {"id": {"a": 1}, "type": "A", "content": "203.0.113.8"},
+            {"id": "3", "name": "www", "type": "A", "content": "203.0.113.9"}
+        ]
+    }));
+    let client = client(transport);
+    let error = client.list_records(&domain()).await.unwrap_err();
+    let Error::UnexpectedAnswer { detail, .. } = &error else {
+        panic!("expected an unexpected-answer error, got {error:?}");
+    };
+    assert!(detail.contains("entry 1"), "detail was {detail:?}");
 }
 
 #[tokio::test]
