@@ -351,14 +351,6 @@ fn normalise_optional_text<'a>(
     Ok(Some(trimmed))
 }
 
-/// The two parameters INWX uses for a [`Period`]: a number and `Y` or `M`.
-fn period_parts(period: Period) -> (u8, &'static str) {
-    match period {
-        Period::OneMonth => (1, "M"),
-        Period::Years(years) => (years, "Y"),
-    }
-}
-
 /// Extra-data rules are documented as `array_text255`: an array of strings, one
 /// string, or nothing.
 fn parse_rule_rows(data: &Value) -> Vec<ExtraDataRule> {
@@ -930,7 +922,7 @@ impl<T: Transport> InwxClient<T> {
             );
         }
         if let Some(period) = period {
-            let (length, unit) = period_parts(period);
+            let (length, unit) = period.parts();
             params.insert("period".to_owned(), json!(length));
             params.insert("periodUnit".to_owned(), json!(unit));
         }
