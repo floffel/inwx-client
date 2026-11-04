@@ -745,18 +745,19 @@ fn response_payload_types_are_constructible_and_comparable() {
     assert!(quote.price.is_none());
 
     let rule = ExtraDataRule::default();
-    assert!(rule.key.is_none());
-    assert_eq!(rule.price_type(), None);
-    assert!(!rule.is_text());
+    assert_eq!(rule.as_str(), "");
+    assert!(rule.is_empty());
+    assert_eq!(rule.name(), None);
 
     let promo = PromoCode::default();
-    assert!(promo.code.is_none());
-    assert_eq!(promo.price_type(), None);
+    assert!(promo.tld.is_none());
+    assert!(promo.price.is_none());
+    assert_eq!(promo.normalised_tld(), None);
 
     let change = PriceChange::default();
     assert!(change.tld.is_none());
-    assert_eq!(change.price_type(), None);
-    assert_eq!(change.is_increase(), None);
+    assert!(change.change_date.is_none());
+    assert!(!change.is_past);
 
     let contact = Contact::default();
     assert!(contact.handle().is_none());

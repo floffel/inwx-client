@@ -1067,9 +1067,7 @@ fn decode_every_reseller_row(payload: &Value) {
 
 // ---------------------------------------------------------- price surface (#63)
 
-use inwx_client::{
-    DomainPriceQuote, ExtraDataRule, PriceChange, PriceList, PriceType, PromoCode, TldPrice,
-};
+use inwx_client::{DomainPriceQuote, ExtraDataRule, PriceChange, PriceList, PromoCode, TldPrice};
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
@@ -1086,17 +1084,16 @@ proptest! {
         let text = format!("{amount:.2}");
 
         let from_number: PriceChange = serde_json::from_value(serde_json::json!({
-            "tld": "de", "type": "renewal", "price": amount, "oldPrice": 0.0,
+            "tld": "de", "createPrice": amount, "renewalPrice": amount,
         }))
         .map_err(|error| TestCaseError::fail(error.to_string()))?;
         let from_text: PriceChange = serde_json::from_value(serde_json::json!({
-            "tld": "de", "type": "renewal", "price": text.as_str(), "oldPrice": "0.00",
+            "tld": "de", "create_price": text.as_str(), "renewal_price": text.as_str(),
         }))
         .map_err(|error| TestCaseError::fail(error.to_string()))?;
-        prop_assert_eq!(from_number.price, Some(amount));
-        prop_assert_eq!(from_text.price, from_number.price);
-        prop_assert_eq!(from_text.old_price, from_number.old_price);
-        prop_assert_eq!(from_text.is_increase(), from_number.is_increase());
+        prop_assert_eq!(from_number.create, Some(amount));
+        prop_assert_eq!(from_text.create, from_number.create);
+        prop_assert_eq!(from_text.renewal, from_number.renewal);
 
         let from_number: TldPrice = serde_json::from_value(serde_json::json!({
             "tld": "de", "createPrice": amount, "renewalPrice": amount,
@@ -1109,10 +1106,11 @@ proptest! {
         prop_assert_eq!(from_number.create, Some(amount));
         prop_assert_eq!(from_text, from_number);
 
-        let from_number: PromoCode = serde_json::from_value(serde_json::json!({"price": amount}))
-            .map_err(|error| TestCaseError::fail(error.to_string()))?;
+        let from_number: PromoCode =
+            serde_json::from_value(serde_json::json!({"netPrice": amount}))
+                .map_err(|error| TestCaseError::fail(error.to_string()))?;
         let from_text: PromoCode =
-            serde_json::from_value(serde_json::json!({"price": text.as_str()}))
+            serde_json::from_value(serde_json::json!({"net_price": text.as_str()}))
                 .map_err(|error| TestCaseError::fail(error.to_string()))?;
         prop_assert_eq!(from_number.price, Some(amount));
         prop_assert_eq!(from_text.price, from_number.price);
@@ -1127,49 +1125,19 @@ proptest! {
         prop_assert_eq!(from_text.price, from_number.price);
     }
 
-    /// The direction of a scheduled change is derived from its two amounts, so
-    /// it has to agree with the cents they came from: up, down, or neither when
-    /// they are equal.
+    /// A rule string is kept verbatim, and its `name=value` split stays stable
+    /// for every text the API can return.
     #[test]
-    fn a_scheduled_change_compares_its_amounts_the_other_way_too(
-        old_cents in 0i32..1_000_000,
-        new_cents in 0i32..1_000_000,
-    ) {
-        let change: PriceChange = serde_json::from_value(serde_json::json!({
-            "price": format!("{:.2}", f64::from(new_cents) / 100.0),
-            "oldPrice": format!("{:.2}", f64::from(old_cents) / 100.0),
-        }))
-        .map_err(|error| TestCaseError::fail(error.to_string()))?;
-        let expected = match new_cents.cmp(&old_cents) {
-            std::cmp::Ordering::Greater => Some(true),
-            std::cmp::Ordering::Less => Some(false),
-            std::cmp::Ordering::Equal => None,
-        };
-        prop_assert_eq!(change.is_increase(), expected);
-    }
-
-    /// An order type is carried as text and only typed on request: no spelling
-    /// loses the raw value, and `price_type()` is `Some` for exactly the six
-    /// the crate knows.
-    #[test]
-    fn an_unknown_order_type_is_carried_by_every_row(raw in any_text()) {
-        let trimmed = raw.trim().to_ascii_lowercase();
-        let known = trimmed.parse::<PriceType>().ok();
-
-        let rule: ExtraDataRule = serde_json::from_value(serde_json::json!({"orderType": raw}))
-            .map_err(|error| TestCaseError::fail(error.to_string()))?;
-        prop_assert_eq!(rule.order_type.as_deref(), Some(raw.as_str()));
-        prop_assert_eq!(rule.price_type(), known);
-
-        let promo: PromoCode = serde_json::from_value(serde_json::json!({"orderType": raw}))
-            .map_err(|error| TestCaseError::fail(error.to_string()))?;
-        prop_assert_eq!(promo.order_type.as_deref(), Some(raw.as_str()));
-        prop_assert_eq!(promo.price_type(), known);
-
-        let change: PriceChange = serde_json::from_value(serde_json::json!({"type": raw}))
-            .map_err(|error| TestCaseError::fail(error.to_string()))?;
-        prop_assert_eq!(change.action.as_deref(), Some(raw.as_str()));
-        prop_assert_eq!(change.price_type(), known);
+    fn a_rule_string_keeps_its_raw_text_and_split(raw in any_text()) {
+        let rule = ExtraDataRule::from(raw.as_str());
+        prop_assert_eq!(rule.as_str(), raw.as_str());
+        if let Some((name, value)) = raw.split_once('=') {
+            prop_assert_eq!(rule.name(), Some(name.trim()));
+            prop_assert_eq!(rule.value(), Some(value.trim()));
+        } else {
+            prop_assert_eq!(rule.name(), None);
+            prop_assert_eq!(rule.value(), None);
+        }
     }
 
     /// No payload off the wire panics a price decoder, and a row that cannot be
@@ -1191,12 +1159,13 @@ fn decode_every_price_row(payload: &Value) {
     let _ = serde_json::from_value::<DomainPriceQuote>(payload.clone());
     let _ = serde_json::from_value::<Vec<TldPrice>>(payload.clone());
     let _ = serde_json::from_value::<ExtraDataRule>(payload.clone())
-        .map(|rule| rule.is_text() || rule.price_type().is_some());
+        .map(|rule| rule.is_empty() || rule.name().is_some());
     let _ = serde_json::from_value::<Vec<ExtraDataRule>>(payload.clone());
-    let _ = serde_json::from_value::<PromoCode>(payload.clone()).map(|promo| promo.price_type());
+    let _ = serde_json::from_value::<PromoCode>(payload.clone())
+        .map(|promo| promo.normalised_tld().is_some() || promo.price.is_some());
     let _ = serde_json::from_value::<Vec<PromoCode>>(payload.clone());
     let _ = serde_json::from_value::<PriceChange>(payload.clone())
-        .map(|change| change.is_increase().unwrap_or(false) || change.price_type().is_some());
+        .map(|change| change.is_past || change.create.is_some() || change.change_date.is_some());
     let _ = serde_json::from_value::<Vec<PriceChange>>(payload.clone());
 }
 
