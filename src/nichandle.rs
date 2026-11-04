@@ -292,14 +292,13 @@ impl NicHandleQuery {
     /// ```
     /// use inwx_client::NicHandleQuery;
     ///
-    /// assert_eq!(NicHandleQuery::new().with_handle("ACME-1")?.params()?["handle"], "ACME-1");
+    /// assert_eq!(NicHandleQuery::new().with_handle(" acme-1 ")?.params()?["handle"], "ACME-1");
     /// assert!(NicHandleQuery::new().with_handle(" ").is_err());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     pub fn with_handle(mut self, handle: impl Into<String>) -> Result<Self> {
         let handle = handle.into();
-        validate_upper_token("nicHandle", &handle, MAX_HANDLE_LEN)?;
-        self.handle = Some(handle);
+        self.handle = Some(validate_upper_token("nicHandle", &handle, MAX_HANDLE_LEN)?);
         Ok(self)
     }
 
@@ -605,8 +604,25 @@ mod tests {
     #[test]
     fn a_handle_of_64_characters_is_accepted_and_65_is_not() {
         let ok = "H".repeat(64);
-        assert!(NicHandleQuery::new().with_handle(&ok).is_ok());
+        let query = NicHandleQuery::new().with_handle(&ok).unwrap();
+        assert_eq!(query.params().unwrap()["handle"], ok.as_str());
         assert!(NicHandleQuery::new().with_handle(format!("{ok}H")).is_err());
+    }
+
+    #[test]
+    fn a_handle_is_trimmed_and_upper_cased_before_it_is_sent() {
+        let query = NicHandleQuery::new().with_handle(" acme-1 ").unwrap();
+        assert_eq!(query.params().unwrap()["handle"], "ACME-1");
+    }
+
+    #[test]
+    fn the_bound_is_measured_after_trimming() {
+        let padded = format!("   {}   ", "h".repeat(64));
+        let query = NicHandleQuery::new().with_handle(&padded).unwrap();
+        assert_eq!(query.params().unwrap()["handle"], "H".repeat(64).as_str());
+        assert!(NicHandleQuery::new()
+            .with_handle(format!("   {}   ", "h".repeat(65)))
+            .is_err());
     }
 
     #[test]
