@@ -6,7 +6,10 @@
 //! still HTTP 200 with a non-`1000` code. [`RpcResponse::into_result`] is the
 //! single place that distinction is made.
 
-use serde::{Deserialize, Serialize};
+use std::fmt;
+
+use serde::de::{Error as _, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
 use crate::error::{Error, Result};
@@ -183,7 +186,7 @@ impl RpcRequest {
 /// assert_eq!(response.into_result()?["id"], 42);
 /// # Ok::<(), inwx_client::Error>(())
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RpcResponse {
     /// Result code; `None` when the field was absent or unusable.
     #[serde(default, deserialize_with = "de::opt_i32")]
@@ -227,7 +230,8 @@ impl RpcResponse {
     /// # Errors
     ///
     /// [`Error::Json`] when the bytes are not a JSON object of the expected
-    /// shape. The original `serde_json` error stays available as `source`.
+    /// shape, or when the envelope states `code` or `resData` more than once.
+    /// The original `serde_json` error stays available as `source`.
     ///
     /// This function cannot know whether a request preceded `bytes`, so an
     /// unreadable body is reported as a decode failure. Code that parses the
@@ -243,11 +247,7 @@ impl RpcResponse {
     /// assert!(matches!(err, inwx_client::Error::Json { .. }));
     /// ```
     pub fn parse(bytes: &[u8]) -> Result<Self> {
-        // `serde` happily fills a struct from a JSON *array* (fields in order),
-        // which would turn `[]` into "code 0, message empty" instead of an
-        // error. Parsing the object first keeps that accident out.
-        let object: Map<String, Value> = serde_json::from_slice(bytes).map_err(Error::from)?;
-        serde_json::from_value(Value::Object(object)).map_err(Error::from)
+        serde_json::from_slice(bytes).map_err(Error::from)
     }
 
     /// Parses the body of an answer to a request that had already been written.
@@ -356,6 +356,120 @@ impl RpcResponse {
     }
 }
 
+impl<'de> Deserialize<'de> for RpcResponse {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(RpcResponseVisitor)
+    }
+}
+
+struct RpcResponseVisitor;
+
+impl<'de> Visitor<'de> for RpcResponseVisitor {
+    type Value = RpcResponse;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a map of JSON-RPC response fields")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut response = RpcResponse {
+            code: None,
+            msg: String::new(),
+            reason_code: None,
+            reason: None,
+            res_data: None,
+            sv_trid: None,
+            runtime: None,
+            details: Vec::new(),
+            extra: Map::new(),
+        };
+        let mut code_seen = false;
+        let mut msg_seen = false;
+        let mut reason_code_seen = false;
+        let mut reason_seen = false;
+        let mut res_data_seen = false;
+        let mut sv_trid_seen = false;
+        let mut runtime_seen = false;
+        let mut details_seen = false;
+
+        while let Some(key) = map.next_key::<String>()? {
+            let value = map.next_value::<Value>()?;
+            match key.as_str() {
+                "code" => {
+                    if code_seen {
+                        return Err(A::Error::custom("duplicate field `code`"));
+                    }
+                    code_seen = true;
+                    response.code = de::opt_i32(value).map_err(A::Error::custom)?;
+                }
+                "msg" => {
+                    if msg_seen {
+                        return Err(A::Error::custom("duplicate field `msg`"));
+                    }
+                    msg_seen = true;
+                    response.msg = de::string_with_default(value).map_err(A::Error::custom)?;
+                }
+                "reasonCode" => {
+                    if reason_code_seen {
+                        return Err(A::Error::custom("duplicate field `reasonCode`"));
+                    }
+                    reason_code_seen = true;
+                    response.reason_code = de::opt_string(value).map_err(A::Error::custom)?;
+                }
+                "reason" => {
+                    if reason_seen {
+                        return Err(A::Error::custom("duplicate field `reason`"));
+                    }
+                    reason_seen = true;
+                    response.reason = de::opt_string(value).map_err(A::Error::custom)?;
+                }
+                "resData" => {
+                    if res_data_seen {
+                        return Err(A::Error::custom("duplicate field `resData`"));
+                    }
+                    res_data_seen = true;
+                    response.res_data = match value {
+                        Value::Null => None,
+                        value => Some(value),
+                    };
+                }
+                "svTRID" => {
+                    if sv_trid_seen {
+                        return Err(A::Error::custom("duplicate field `svTRID`"));
+                    }
+                    sv_trid_seen = true;
+                    response.sv_trid = de::opt_string(value).map_err(A::Error::custom)?;
+                }
+                "runtime" => {
+                    if runtime_seen {
+                        return Err(A::Error::custom("duplicate field `runtime`"));
+                    }
+                    runtime_seen = true;
+                    response.runtime = de::opt_f64(value).map_err(A::Error::custom)?;
+                }
+                "details" => {
+                    if details_seen {
+                        return Err(A::Error::custom("duplicate field `details`"));
+                    }
+                    details_seen = true;
+                    response.details = de::rows::<Detail, _>(value).map_err(A::Error::custom)?;
+                }
+                _ => {
+                    response.extra.insert(key, value);
+                }
+            }
+        }
+
+        Ok(response)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,6 +502,33 @@ mod tests {
             value["details"][0]["detailField"],
             original["details"][0]["detailField"]
         );
+    }
+
+    #[test]
+    fn duplicate_code_is_rejected_in_either_order() {
+        for body in [
+            br#"{"code":2303,"msg":"not found","code":1000}"#.as_slice(),
+            br#"{"code":1000,"msg":"not found","code":2303}"#.as_slice(),
+        ] {
+            let label = String::from_utf8_lossy(body);
+            let public = RpcResponse::parse(body).unwrap_err();
+            let answered = RpcResponse::parse_answer(body).unwrap_err();
+
+            assert!(matches!(public, Error::Json { .. }), "{label}");
+            assert!(!public.is_uncertain(), "{label}");
+            assert!(answered.is_uncertain(), "{label}");
+            assert!(!answered.is_retryable(), "{label}");
+        }
+    }
+
+    #[test]
+    fn duplicate_res_data_is_rejected_in_either_order() {
+        for body in [
+            br#"{"code":1000,"resData":{"id":1},"resData":{"id":2}}"#.as_slice(),
+            br#"{"resData":{"id":2},"resData":{"id":1},"code":1000}"#.as_slice(),
+        ] {
+            assert!(matches!(RpcResponse::parse(body), Err(Error::Json { .. })));
+        }
     }
 
     #[test]
