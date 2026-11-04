@@ -1051,6 +1051,33 @@ fn apex_normalised(name: &str) -> String {
     }
 }
 
+/// Whether two record types cannot both exist at the same name.
+fn replacement_conflicts(existing: &RecordType, replacement: &RecordType) -> bool {
+    existing == replacement
+        || (is_single_valued_type(existing) && is_single_valued_type(replacement))
+}
+
+/// The types [`InwxClient::replace_record`] treats as mutually exclusive at a
+/// name: one address family, or a CNAME, is the useful terminal answer there.
+fn is_single_valued_type(record_type: &RecordType) -> bool {
+    matches!(
+        record_type,
+        RecordType::A | RecordType::Aaaa | RecordType::Cname
+    )
+}
+
+/// Renders record ids for an uncertain replacement message.
+fn record_ids_for_message(ids: &[RecordId]) -> String {
+    if ids.is_empty() {
+        "none".to_owned()
+    } else {
+        ids.iter()
+            .map(RecordId::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 /// Record names may be relative (`www`), the apex (`@`), a wildcard (`*`) or a
 /// service label (`_acme-challenge`); they may not contain whitespace or
 /// control characters.
@@ -1473,13 +1500,20 @@ impl<T: Transport> InwxClient<T> {
         Ok(())
     }
 
-    /// Replaces every record of `record_type` at `name`: deletes what is there,
-    /// then creates `spec`.
+    /// Replaces every record of `record_type` at `name` with `spec`.
     ///
-    /// Useful for the single-valued types (`A`, `AAAA`, `CNAME`, `MX` with one
-    /// target) where a leftover record would shadow the new one. Not atomic —
-    /// two calls, no transaction — so a failure can leave the name without a
-    /// record. Prefer [`create_record`](InwxClient::create_record) +
+    /// Names are matched case-insensitively and with the same apex spellings as
+    /// [`RecordSet`]. The single-valued types (`A`, `AAAA`, `CNAME`) are treated
+    /// as mutually exclusive at a name, so replacing an `A` record with an
+    /// `AAAA` or `CNAME` record removes the old address record too.
+    ///
+    /// The replacement is created before the old records are deleted, so a
+    /// create failure leaves the zone unchanged. If a later deletion fails, the
+    /// failure is [`Error::Uncertain`] and names the created id and the ids
+    /// already deleted; retrying the whole call could otherwise duplicate the
+    /// replacement. Not atomic, so a delete failure can leave both the new and a
+    /// shadowed old record in place. Prefer
+    /// [`create_record`](InwxClient::create_record) +
     /// [`delete_record`](InwxClient::delete_record) when that matters.
     ///
     /// ```no_run
@@ -1498,26 +1532,44 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// The first error from the list, delete or create call.
+    /// The first error from the list or create call. A failure after the create
+    /// has succeeded is [`Error::Uncertain`] and carries the delete failure as
+    /// its source.
     pub async fn replace_record(&self, zone: &DomainName, spec: &RecordSpec) -> Result<RecordId> {
-        let name = spec.name().to_owned();
+        let normalised = apex_normalised(spec.name());
         let record_type = spec.record_type();
+        let mut old_ids = Vec::new();
         for existing in self.list_records(zone).await? {
-            if existing.record_type == record_type && existing.name_or_apex() == name {
-                self.delete_record(&existing.id).await?;
+            if apex_normalised(existing.name_or_apex()) == normalised
+                && replacement_conflicts(&existing.record_type, &record_type)
+            {
+                old_ids.push(existing.id);
             }
         }
-        self.create_record(zone, spec).await
+
+        let id = self.create_record(zone, spec).await?;
+        let mut deleted_ids = Vec::with_capacity(old_ids.len());
+        for old_id in old_ids {
+            if let Err(error) = self.delete_record(&old_id).await {
+                return Err(Error::uncertain(format!(
+                    "replace_record created record {id}; deleted old record ids [{}] before failing to delete {old_id}: {error}",
+                    record_ids_for_message(&deleted_ids),
+                ))
+                .with_source(error));
+            }
+            deleted_ids.push(old_id);
+        }
+        Ok(id)
     }
 }
 
 /// Decodes the rows of a `nameserver.info` answer, failing closed.
 ///
 /// [`InwxClient::replace_record`] follows this read with
-/// [`InwxClient::delete_record`]: it deletes the records it sees and then writes
-/// the replacement. An answer that carried no list, or a list whose rows do not
-/// parse, therefore cannot be read as "no records" — that reading deletes
-/// nothing and leaves the record it was meant to replace in place.
+/// [`InwxClient::create_record`] and [`InwxClient::delete_record`]: it creates
+/// the replacement before deleting the records it saw. An answer that carried no
+/// list, or a list whose rows do not parse, therefore cannot be read as "no
+/// records" — that reading would leave the old record beside the new one.
 ///
 /// So a missing or non-array `record` is [`Error::UnexpectedAnswer`] (the shape
 /// was renamed, or the answer carries nothing), and a row that does not parse

@@ -301,7 +301,7 @@ async fn a_record_that_does_not_parse_fails_the_whole_call() {
 }
 
 #[tokio::test]
-async fn replace_record_deletes_matching_name_and_type_then_creates() {
+async fn replace_record_creates_then_deletes_matching_name_and_type() {
     let transport = MockTransport::new();
     transport.ok(json!({
         "record": [
@@ -310,8 +310,9 @@ async fn replace_record_deletes_matching_name_and_type_then_creates() {
             {"id": "3", "name": "mail", "type": "A", "content": "203.0.113.8"}
         ]
     }));
-    transport.ok_empty(); // delete
     transport.ok(json!({ "id": "4" })); // create
+    transport.ok_empty(); // delete
+    transport.ok_empty(); // delete AAAA sibling
 
     let client = client(transport.clone());
     let spec = RecordSpec::a("www", "203.0.113.99").unwrap();
@@ -319,11 +320,138 @@ async fn replace_record_deletes_matching_name_and_type_then_creates() {
 
     assert_eq!(id, RecordId::parse("4").unwrap());
     let calls = transport.calls();
-    assert_eq!(calls.len(), 3);
-    assert_eq!(calls[1].method, "nameserver.deleteRecord");
-    assert_eq!(calls[1].params["id"], "1"); // only the matching A record
-    assert_eq!(calls[2].method, "nameserver.createRecord");
-    assert_eq!(calls[2].params["content"], "203.0.113.99");
+    assert_eq!(calls.len(), 4);
+    assert_eq!(calls[1].method, "nameserver.createRecord");
+    assert_eq!(calls[1].params["content"], "203.0.113.99");
+    assert_eq!(calls[2].method, "nameserver.deleteRecord");
+    assert_eq!(calls[2].params["id"], "1"); // the matching A record
+    assert_eq!(calls[3].method, "nameserver.deleteRecord");
+    assert_eq!(calls[3].params["id"], "2"); // the AAAA sibling is shadowed
+}
+
+#[tokio::test]
+async fn replace_record_matches_name_case_insensitively_and_apex_normalised() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "record": [
+            {"id": "1", "name": "WWW", "type": "A", "content": "203.0.113.7"},
+            {"id": "2", "name": "", "type": "A", "content": "203.0.113.8"},
+            {"id": "3", "name": " MAIL ", "type": "A", "content": "203.0.113.9"}
+        ]
+    }));
+    transport.ok(json!({ "id": "4" })); // create
+    transport.ok_empty(); // delete www
+
+    transport.ok(json!({
+        "record": [
+            {"id": "1", "name": "WWW", "type": "A", "content": "203.0.113.7"},
+            {"id": "2", "name": "", "type": "A", "content": "203.0.113.8"},
+            {"id": "3", "name": " MAIL ", "type": "A", "content": "203.0.113.9"}
+        ]
+    }));
+    transport.ok(json!({ "id": "5" })); // create
+    transport.ok_empty(); // delete apex
+
+    let client = client(transport.clone());
+    client
+        .replace_record(&domain(), &RecordSpec::a("www", "203.0.113.99").unwrap())
+        .await
+        .unwrap();
+    client
+        .replace_record(&domain(), &RecordSpec::a("@", "203.0.113.100").unwrap())
+        .await
+        .unwrap();
+
+    let calls = transport.calls();
+    assert_eq!(calls[1].method, "nameserver.createRecord");
+    assert_eq!(calls[2].params["id"], "1");
+    assert_eq!(calls[4].method, "nameserver.createRecord");
+    assert_eq!(calls[5].params["id"], "2");
+    assert_eq!(transport.call_count(), 6);
+}
+
+#[tokio::test]
+async fn replace_record_treats_address_and_cname_records_as_mutually_exclusive() {
+    for (existing_type, replacement) in [
+        ("AAAA", RecordSpec::a("www", "203.0.113.99").unwrap()),
+        ("CNAME", RecordSpec::aaaa("www", "2001:db8::99").unwrap()),
+    ] {
+        let transport = MockTransport::new();
+        transport.ok(json!({
+            "record": [
+                {"id": "1", "name": "www", "type": existing_type, "content": "target.example.net"},
+                {"id": "2", "name": "www", "type": "MX", "content": "mx.example.net"}
+            ]
+        }));
+        transport.ok(json!({ "id": "3" })); // create
+        transport.ok_empty(); // delete the single-valued sibling
+
+        let client = client(transport.clone());
+        let id = client
+            .replace_record(&domain(), &replacement)
+            .await
+            .unwrap();
+
+        assert_eq!(id, RecordId::parse("3").unwrap());
+        let calls = transport.calls();
+        assert_eq!(calls[1].method, "nameserver.createRecord");
+        assert_eq!(calls[2].method, "nameserver.deleteRecord");
+        assert_eq!(calls[2].params["id"], "1");
+        assert_eq!(calls.len(), 3);
+    }
+}
+
+#[tokio::test]
+async fn replace_record_create_failure_leaves_old_records_untouched() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "record": [
+            {"id": "1", "name": "www", "type": "A", "content": "203.0.113.7"}
+        ]
+    }));
+    transport.api_error(2302, "Object exists");
+
+    let client = client_without_retries(transport.clone());
+    let error = client
+        .replace_record(&domain(), &RecordSpec::a("www", "203.0.113.99").unwrap())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), Some(2302));
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[1].method, "nameserver.createRecord");
+}
+
+#[tokio::test]
+async fn replace_record_delete_failure_after_create_is_uncertain_with_ids() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "record": [
+            {"id": "1", "name": "www", "type": "A", "content": "203.0.113.7"},
+            {"id": "2", "name": "WWW", "type": "A", "content": "203.0.113.8"}
+        ]
+    }));
+    transport.ok(json!({ "id": "3" })); // create
+    transport.ok_empty(); // delete 1
+    transport.api_error(2303, "Object does not exist"); // delete 2
+
+    let client = client_without_retries(transport.clone());
+    let error = client
+        .replace_record(&domain(), &RecordSpec::a("www", "203.0.113.99").unwrap())
+        .await
+        .unwrap_err();
+
+    assert!(error.is_uncertain(), "{error:?}");
+    let message = error.to_string();
+    assert!(message.contains("created record 3"), "{message}");
+    assert!(message.contains("deleted old record ids [1]"), "{message}");
+    assert!(message.contains("failing to delete 2"), "{message}");
+    assert_eq!(
+        std::error::Error::source(&error).map(ToString::to_string),
+        Some("INWX API error 2303: Object does not exist".to_owned()),
+    );
+    assert_eq!(transport.call_count(), 4);
 }
 
 #[tokio::test]
