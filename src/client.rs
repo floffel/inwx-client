@@ -1218,6 +1218,11 @@ impl<T: Transport> InwxClient<T> {
     /// whether the command already ran, so the call answers
     /// [`Error::Uncertain`] after a single attempt instead of retrying.
     ///
+    /// A non-`2xx` answer whose body is not an envelope is [`Error::Http`], and
+    /// the reason it could not be read is kept as that error's `source`: a
+    /// proxy page and a JSON document of the wrong shape produce the same
+    /// status, and only the parse error tells them apart.
+    ///
     /// # Errors
     ///
     /// [`Error::NotAuthenticated`], [`Error::Api`], [`Error::Transport`],
@@ -1288,7 +1293,13 @@ impl<T: Transport> InwxClient<T> {
                              executed, check the current state before retrying"
                         ))),
                         Ok(envelope) => envelope.into_result(),
-                        Err(_) => Err(http_error(&response)),
+                        // The body is unreadable, and the parse error is the
+                        // only thing that separates "not JSON at all" — a proxy
+                        // page, a cut-off answer — from "JSON in a shape no
+                        // envelope has". Keeping it as the cause makes that
+                        // difference walkable instead of flattening both into
+                        // the same status with a body fragment.
+                        Err(cause) => Err(http_error(&response).with_source(cause)),
                     };
                 }
                 Err(error) if replay_allowed(&error, method) => {

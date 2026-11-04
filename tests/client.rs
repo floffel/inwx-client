@@ -370,6 +370,73 @@ async fn a_non_json_error_body_becomes_an_http_error() {
     }
 }
 
+/// The status alone cannot say whether the endpoint answered with a page that is
+/// not JSON or with JSON in a shape no envelope has; the parse failure kept as
+/// the cause can, and it stays walkable down to `serde_json`'s line and column.
+#[tokio::test]
+async fn an_unreadable_error_body_keeps_the_parse_failure_as_its_cause() {
+    use std::error::Error as _;
+
+    let transport = MockTransport::new();
+    transport.status(400, "<html>bad request</html>");
+
+    let client = client_without_retries(transport);
+    let error = client
+        .list_domains(&DomainListQuery::default())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, Error::Http { status: 400, .. }), "{error}");
+    let cause = error.source().expect("the parse failure is kept");
+    assert!(
+        cause.to_string().contains("expected value"),
+        "the cause names the parse failure: {cause}"
+    );
+    let below = cause.source().expect("serde_json stays below the parser");
+    assert!(
+        below.to_string().contains("line 1 column 1"),
+        "the position survives: {below}"
+    );
+    // Whatever the cause says, the body itself stays bounded and redacted.
+    assert!(!error.to_string().contains("serde_json"), "{error}");
+}
+
+/// The neighbour of the case above: the same status, a body that *is* an
+/// envelope, so the API's verdict wins and no `Http` error is built at all.
+#[tokio::test]
+async fn an_envelope_on_a_non_2xx_status_is_a_verdict_not_an_http_error() {
+    use std::error::Error as _;
+
+    let transport = MockTransport::new();
+    transport.status(400, "[]");
+    transport.status(400, r#"{"code":2005,"msg":"Parameter value syntax error"}"#);
+
+    let client = client_without_retries(transport.clone());
+    // JSON, but an array: no envelope is an array, so it is the HTTP failure
+    // and keeps the shape error as its cause.
+    let wrong_shape = client
+        .list_domains(&DomainListQuery::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(wrong_shape, Error::Http { status: 400, .. }),
+        "{wrong_shape}"
+    );
+    let cause = wrong_shape.source().expect("the shape error is kept");
+    assert!(cause.to_string().contains("expected a map"), "{cause}");
+
+    let client = client_without_retries(transport);
+    let verdict = client
+        .list_domains(&DomainListQuery::default())
+        .await
+        .unwrap_err();
+    assert_eq!(verdict.code(), Some(2005));
+    assert!(
+        verdict.source().is_none(),
+        "a verdict needs no parse cause: {verdict}"
+    );
+}
+
 #[tokio::test]
 async fn a_retry_after_header_reaches_the_error_a_caller_sees() {
     let transport = MockTransport::new();
