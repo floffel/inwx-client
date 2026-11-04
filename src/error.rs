@@ -9,14 +9,18 @@
 //! [`Error::with_source`] is how a cause is attached.
 //!
 //! Certainty is part of the type. A failure that happened after the request was
-//! written leaves the outcome of the command unknown, and it is spelled three
+//! written leaves the outcome of the command unknown, and it is spelled four
 //! ways: [`Error::Uncertain`] for the transport (a timeout, a reset),
-//! [`Error::Undecodable`] for decoding (an answer whose body cannot be read) and
+//! [`Error::Undecodable`] for decoding (an answer whose body cannot be read),
 //! [`Error::Ambiguous`] for an answer that arrives and names no result (an
-//! upload the API accepted without returning a `documentId`). All three answer
-//! [`Error::is_uncertain`] with `true` and are never replayed for a mutating
-//! command; [`Error::Json`] is the other side of that line — a payload that
-//! arrived intact and does not fit the model, behind a command that ran.
+//! upload the API accepted without returning a `documentId`) and
+//! [`Error::CertificateOrderUnreadable`] for one that names the certificate it
+//! created but fits no model. All four answer [`Error::is_uncertain`] with
+//! `true` and are never replayed for a mutating command; [`Error::Json`] is the
+//! other side of that line — a payload that arrived intact and does not fit the
+//! model, behind a command that ran. A billed certificate order is the one place
+//! where that reading would strand the caller, so its failure keeps the id
+//! instead of the plain parse error.
 
 use std::fmt;
 use std::ops::Deref;
@@ -320,6 +324,55 @@ pub enum Error {
         /// wrong. See [`Error::with_source`].
         #[source]
         source: Option<ErrorSource>,
+    },
+
+    /// A `certificate.*` order was placed and its answer cannot be read as an
+    /// order, yet the answer still names the certificate it created.
+    ///
+    /// `certificate.create`, `renew`, `reissue` and `updateOrder` are billed
+    /// before their answer is parsed, so a strict-model failure here is not a
+    /// local decoding problem to report as [`Error::Json`]: the order exists.
+    /// Reported as a plain parse error it leaves the caller without a handle —
+    /// the order can neither be inspected nor cancelled, and a command that
+    /// certainly ran reads as definitely failed. This variant therefore carries
+    /// the id the raw answer states, next to the bounded body, and answers the
+    /// certainty question the way [`Error::Uncertain`] does. The caller can
+    /// call [`certificate_info`](crate::InwxClient::certificate_info) or
+    /// [`cancel_certificate`](crate::InwxClient::cancel_certificate) with the
+    /// id instead of ordering again, which would bill a second certificate.
+    ///
+    /// An answer that fits no model *and* names no usable id cannot be rescued
+    /// this way; it is [`Error::Ambiguous`] instead.
+    ///
+    /// ```rust
+    /// use inwx_client::Error;
+    ///
+    /// let err = Error::CertificateOrderUnreadable {
+    ///     method: "certificate.create",
+    ///     certificate_id: 9,
+    ///     body: r#"{"certificateId":9,"price":{"amount":39.9}}"#.into(),
+    ///     source: None,
+    /// };
+    /// assert!(err.is_uncertain());
+    /// assert!(!err.is_retryable());
+    /// assert!(err.to_string().contains("certificate 9"));
+    /// ```
+    #[error(
+        "unreadable answer for `{method}`: the order exists as certificate \
+         {certificate_id} — inspect or cancel it instead of ordering again"
+    )]
+    CertificateOrderUnreadable {
+        /// The method that was called.
+        method: &'static str,
+        /// The certificate id the raw answer states.
+        certificate_id: i64,
+        /// The answer itself, bounded and redacted like every other body.
+        body: HttpBody,
+        /// The strict-model failure behind it, when reading the object itself
+        /// went wrong; `None` when the answer is not the documented object at
+        /// all, which is a mismatch of shape rather than a parse error.
+        #[source]
+        source: Option<serde_json::Error>,
     },
 
     /// A decoded body does not have the byte count the same answer declared for
@@ -982,9 +1035,12 @@ impl Error {
     /// and the exchange then broke, in transport (a timeout, a reset
     /// mid-response, a truncated body) or in decoding (an answer whose body
     /// cannot be read as an envelope) — or it completed and named no result
-    /// ([`Error::Ambiguous`], an accepted upload without a `documentId`).
+    /// ([`Error::Ambiguous`], an accepted upload without a `documentId`) — or it
+    /// completed and named one the model cannot read
+    /// ([`Error::CertificateOrderUnreadable`], a billed order whose answer
+    /// carries an unexpected field).
     ///
-    /// All three mean the API may already have executed the command, so a
+    /// All of them mean the API may already have executed the command, so a
     /// replay can duplicate a mutation.
     ///
     /// ```rust
@@ -1009,7 +1065,10 @@ impl Error {
     pub fn is_uncertain(&self) -> bool {
         matches!(
             self,
-            Self::Uncertain { .. } | Self::Undecodable { .. } | Self::Ambiguous { .. }
+            Self::Uncertain { .. }
+                | Self::Undecodable { .. }
+                | Self::Ambiguous { .. }
+                | Self::CertificateOrderUnreadable { .. }
         )
     }
 

@@ -243,6 +243,18 @@ Local checks: CSR must look like a PEM request and must not contain
 uploaded to a third party. Wildcard SANs are accepted (`*.example.com`) because
 products sell them, with exactly one leftmost `*`.
 
+Certainty of an order answer: `certificate.create`, `renew`, `reissue` and
+`updateOrder` have already been executed and billed by the time their answer is
+parsed, so a model failure is not `Error::Json` — that classification reads as a
+local decode mistake behind a command that changed nothing. Only a JSON object is
+handed to the model (`serde_json::from_value` reads an array into a struct
+positionally and would invent an empty order), the id is read out of the raw
+answer first (as a number, as text, or from the row of a wrapped answer), and the
+failure is `Error::CertificateOrderUnreadable` carrying it plus the bounded body,
+so `certificate_info` or `cancel_certificate` can be called on the order instead
+of ordering it a second time. An answer that names no usable id is
+`Error::Ambiguous`. Both answer `is_uncertain()` and are never replayed.
+
 ## 0.2.0 — hosting (`src/hosting.rs`)
 
 Source: <https://account.inwx.com/en/help/apidoc/f/ch02s13.html>

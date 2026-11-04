@@ -6,7 +6,7 @@ use common::{client, client_without_retries, MockTransport};
 use inwx_client::{
     ActionKind, CertificateId, CertificateOrder, CertificateProductQuery, CertificateQuery,
     CertificateTerm, CertificateUpdate, CertificateValidationMethod, Document, DocumentFormat,
-    DomainName, Email, Handle, Irreversible, PostalDelivery, RefundRequest, StatementQuery,
+    DomainName, Email, Error, Handle, Irreversible, PostalDelivery, RefundRequest, StatementQuery,
     Timestamp, TransactionLogQuery,
 };
 use serde_json::json;
@@ -568,4 +568,119 @@ fn certificate_term_and_validation_methods_round_trip() {
     assert!("phone".parse::<CertificateValidationMethod>().is_err());
     assert_eq!(CertificateId::new(9).unwrap().to_string(), "9");
     assert!(CertificateId::new(0).is_err());
+}
+
+/// Regression for #100: once `certificate.create` has been answered, the order
+/// exists and is billed. An answer the model cannot read must therefore not
+/// surface as a plain `Error::Json` without a handle — the id it states is
+/// carried, so the order can be inspected or cancelled instead of ordered again.
+#[tokio::test]
+async fn an_unreadable_order_answer_still_names_the_billed_certificate() {
+    let transport = MockTransport::new();
+    // The documented answer is one object; this one is wrapped in a one-row
+    // array. `from_value` would read that positionally into an empty order and
+    // drop the id, so the shape is refused and the id is carried instead.
+    transport.ok(json!([{ "certificateId": 9, "status": "PENDING" }]));
+
+    let error = client(transport.clone())
+        .order_certificate(&order())
+        .await
+        .expect_err("a one-row array is not the documented object");
+
+    let Error::CertificateOrderUnreadable {
+        method,
+        certificate_id,
+        body,
+        ..
+    } = &error
+    else {
+        panic!("expected the id to survive, got {error:?}");
+    };
+    assert_eq!(*method, "certificate.create");
+    assert_eq!(*certificate_id, 9);
+    assert!(body.as_str().contains("\"certificateId\":9"), "{body}");
+    // The carried id is a handle the crate itself accepts.
+    assert_eq!(CertificateId::new(*certificate_id).unwrap().get(), 9);
+    // A committed mutation, so unknown rather than failed — and never replayed,
+    // which would bill a second certificate.
+    assert!(error.is_uncertain());
+    assert!(!error.is_retryable());
+    assert!(error.to_string().contains("certificate 9"), "{error}");
+    assert!(!error.to_string().contains("invalid JSON"), "{error}");
+}
+
+/// The other side of that boundary: an answer that names no certificate at all
+/// cannot be rescued into a handle, so it is `Ambiguous` — same verdict
+/// (uncertain, never retried), and the caller is told to list before ordering.
+#[tokio::test]
+async fn an_unreadable_order_answer_without_an_id_is_ambiguous() {
+    let transport = MockTransport::new();
+    transport.ok(json!([]));
+
+    let error = client(transport.clone())
+        .order_certificate(&order())
+        .await
+        .expect_err("an empty array is not an order");
+
+    assert!(matches!(error, Error::Ambiguous { .. }), "{error:?}");
+    assert!(error.is_uncertain());
+    assert!(!error.is_retryable());
+    assert!(error.to_string().contains("certificate.create"), "{error}");
+}
+
+/// Renew, reissue and `updateOrder` are the same commitment as `create`, so all
+/// three keep the id of an answer they cannot read instead of reporting a parse
+/// failure.
+#[tokio::test]
+async fn every_other_billed_order_command_keeps_the_id_too() {
+    let transport = MockTransport::new();
+    for id in [10, 11, 12] {
+        transport.ok(json!([{ "certificateId": id }]));
+    }
+    let client = client(transport.clone());
+
+    let reissue = client
+        .reissue_certificate(
+            certificate_id(),
+            "-----BEGIN CERTIFICATE REQUEST-----\nMIIB",
+        )
+        .await
+        .unwrap_err();
+    let renew = client
+        .renew_certificate(
+            &CertificateUpdate::new(certificate_id())
+                .unwrap()
+                .with_common_name(domain("example.com")),
+        )
+        .await
+        .unwrap_err();
+    let update = client
+        .update_certificate_order(
+            &CertificateUpdate::new(certificate_id())
+                .unwrap()
+                .with_csr("-----BEGIN CERTIFICATE REQUEST-----\nMIIB")
+                .unwrap(),
+        )
+        .await
+        .unwrap_err();
+
+    for (error, method, id) in [
+        (reissue, "certificate.reissue", 10),
+        (renew, "certificate.renew", 11),
+        (update, "certificate.updateOrder", 12),
+    ] {
+        let Error::CertificateOrderUnreadable {
+            method: sent,
+            certificate_id,
+            ..
+        } = &error
+        else {
+            panic!("expected {method} to keep its id, got {error:?}");
+        };
+        assert_eq!(*sent, method);
+        assert_eq!(*certificate_id, id);
+        assert!(error.is_uncertain());
+        assert!(!error.is_retryable());
+    }
+    assert_eq!(transport.call_count(), 3);
 }
