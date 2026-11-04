@@ -517,6 +517,13 @@ async fn domain_list_and_zone_list_read_a_single_row_and_skip_unusable_rows() {
     // One row that does not fit the model costs that row, not the page.
     transport.ok(json!({"count": 2, "domain": [null, {"domain": "a.de"}]}));
     transport.ok(json!({"count": 2, "domains": [null, {"domain": "a.de"}]}));
+    // A syntactically invalid zone name is a row-level failure too, not a
+    // page-level one; the raw row stays visible to the caller.
+    transport.ok(json!({"count": 3, "domains": [
+        {"domain": "good.de"},
+        {"domain": "bad name"},
+        {"domain": ""}
+    ]}));
 
     let client = client(transport.clone());
 
@@ -551,6 +558,44 @@ async fn domain_list_and_zone_list_read_a_single_row_and_skip_unusable_rows() {
     assert_eq!(page.count, Some(2));
 
     assert_eq!(transport.call_count(), 6);
+    let page = client.list_zones().await.unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.zones[0].domain.as_str(), "good.de");
+    assert_eq!(page.unparsed.len(), 2);
+    assert_eq!(page.unparsed[0]["domain"], "bad name");
+    assert_eq!(page.unparsed[1]["domain"], "");
+
+    assert_eq!(transport.call_count(), 7);
+}
+
+#[tokio::test]
+async fn a_zone_walk_advances_past_a_full_page_with_unusable_rows() {
+    let transport = MockTransport::new();
+    transport.ok(json!({"count": 3, "domains": [
+        {"domain": "a.de"},
+        {"domain": "bad name"}
+    ]}));
+    transport.ok(json!({"count": 3, "domains": [{"domain": "b.de"}]}));
+
+    let client = client(transport.clone());
+    let zones = client
+        .list_all_zones(
+            &inwx_client::ZoneListing::new(),
+            &Pagination::new().with_page_size(2).unwrap(),
+        )
+        .collect_all()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        zones
+            .iter()
+            .map(|zone| zone.domain.as_str())
+            .collect::<Vec<_>>(),
+        ["a.de", "b.de"]
+    );
+    assert_eq!(transport.call_count(), 2);
+    assert_eq!(transport.calls()[1].params["page"], 2);
 }
 
 #[test]

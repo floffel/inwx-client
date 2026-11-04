@@ -114,6 +114,11 @@ crate enforces, with the reason:
   page of one handle, and a row that does not fit `Contact` is skipped rather
   than failing the page (issue #114) — the same tolerance the other list answers
   get from `parse_rows`. `count` is read independently of the rows.
+- `nameserver.list` keeps the strict [`ZoneSummary`] row type but does not let
+  one row fail the page: decodable zones stay in `ZoneListPage::zones`, and raw
+  rows that fail [`DomainName`] validation or the row shape stay in
+  `ZoneListPage::unparsed` (issue #140). The page walker counts both sides when
+  deciding whether the answer was a full page.
 - A rejected page is terminal: `Error::Api` is returned as-is and the request is
   not repeated (a list command is idempotent, but retrying a rejected command is
   the client's business, not the walker's). A transport failure is returned too

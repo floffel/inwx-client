@@ -103,6 +103,28 @@ pub trait Page: DeserializeOwned + Sized {
     /// Number of objects on this page.
     fn len(&self) -> usize;
 
+    /// Number of rows received on this page, including rows the page could not
+    /// decode into [`Item`](Self::Item).
+    ///
+    /// Most pages have one row per item, so the default is [`Page::len`]. A page
+    /// type that keeps unusable rows in a side channel (see
+    /// [`ZoneListPage::unparsed`](crate::ZoneListPage::unparsed)) can override
+    /// this so the walker sees the full page and does not stop early.
+    ///
+    /// ```
+    /// use inwx_client::{Page, ZoneListPage};
+    ///
+    /// let page: ZoneListPage = serde_json::from_str(
+    ///     r#"{"domains":[{"domain":"a.de"},{"domain":"bad name"}]}"#,
+    /// )?;
+    /// assert_eq!(page.len(), 1);
+    /// assert_eq!(page.received_len(), 2);
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
+    fn received_len(&self) -> usize {
+        self.len()
+    }
+
     /// Whether the page carries nothing.
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -498,7 +520,7 @@ impl<'a, T: Transport, L: Listing> Pages<'a, T, L> {
         self.requests_sent += 1;
         self.next_page_number = self.next_page_number.saturating_add(1);
 
-        let received = page.len();
+        let received = page.received_len();
         if let Some(max_items) = self.pagination.max_items {
             let room = max_items.saturating_sub(self.yielded);
             if received > room {
