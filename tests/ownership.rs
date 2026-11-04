@@ -6,7 +6,8 @@ mod common;
 use common::{client, client_without_retries, MockTransport};
 use inwx_client::{
     ActionKind, AuthCode, DomainName, ExtData, Handle, Hostname, Irreversible, PushRequest,
-    RenewalMode, RestoreRequest, Timestamp, TradeRequest, TransferAnswer, TransferRequest,
+    RenewalMode, RestoreRequest, Timestamp, TradeRequest, TransferAnswer, TransferCancelRequest,
+    TransferOutRequest, TransferRequest,
 };
 use serde_json::json;
 
@@ -230,23 +231,30 @@ async fn restore_sends_the_renewal_mode() {
 }
 
 #[tokio::test]
-async fn cancel_transfer_and_transfer_out_send_only_the_domain() {
+async fn cancel_transfer_and_transfer_out_send_the_domain_and_testing_state() {
     let transport = MockTransport::new();
     transport.ok_empty();
     transport.ok_empty();
 
     let client = client(transport.clone());
     client
-        .cancel_transfer(&Irreversible::acknowledge(
-            ActionKind::TransferCancel,
-            &domain("example.com"),
-        ))
+        .cancel_transfer(
+            &TransferCancelRequest::new(Irreversible::acknowledge(
+                ActionKind::TransferCancel,
+                &domain("example.com"),
+            ))
+            .unwrap(),
+        )
         .await
         .unwrap();
     client
         .answer_transfer_out(
-            &Irreversible::acknowledge(ActionKind::TransferOut, &domain("example.com")),
-            TransferAnswer::Nack,
+            &TransferOutRequest::new(
+                Irreversible::acknowledge(ActionKind::TransferOut, &domain("example.com")),
+                TransferAnswer::Nack,
+            )
+            .unwrap()
+            .dry_run(),
         )
         .await
         .unwrap();
@@ -254,34 +262,32 @@ async fn cancel_transfer_and_transfer_out_send_only_the_domain() {
     let calls = transport.calls();
     assert_eq!(calls[0].method, "domain.transfercancel");
     assert_eq!(calls[0].params["domain"], "example.com");
+    assert_eq!(calls[0].params["testing"], false);
     assert_eq!(calls[1].method, "domain.transferOut");
+    assert_eq!(calls[1].params["domain"], "example.com");
     assert_eq!(calls[1].params["answer"], "NACK");
+    assert_eq!(calls[1].params["testing"], true);
 }
 
-#[tokio::test]
-async fn a_mismatched_acknowledgement_never_reaches_the_wire() {
+#[test]
+fn a_mismatched_acknowledgement_never_reaches_the_wire() {
     let transport = MockTransport::new();
-    let client = client_without_retries(transport.clone());
 
     // A trade acknowledgement cannot cancel a transfer.
-    let error = client
-        .cancel_transfer(&Irreversible::acknowledge(
-            ActionKind::Trade,
-            &domain("example.com"),
-        ))
-        .await
-        .unwrap_err();
-    assert!(error.is_validation());
+    let cancel = TransferCancelRequest::new(Irreversible::acknowledge(
+        ActionKind::Trade,
+        &domain("example.com"),
+    ));
+    assert!(cancel.is_err());
 
-    let error = client
-        .answer_transfer_out(
-            &Irreversible::acknowledge(ActionKind::Push, &domain("example.com")),
-            TransferAnswer::Ack,
-        )
-        .await
-        .unwrap_err();
-    assert!(error.is_validation());
+    let answer = TransferOutRequest::new(
+        Irreversible::acknowledge(ActionKind::Push, &domain("example.com")),
+        TransferAnswer::Ack,
+    );
+    assert!(answer.is_err());
 
+    // The request builders reject the mismatched acknowledgements before the
+    // client is involved, so no request type can be handed to the client.
     assert_eq!(transport.call_count(), 0);
 }
 
