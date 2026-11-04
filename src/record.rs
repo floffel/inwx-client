@@ -547,10 +547,12 @@ impl RecordSpec {
         name: impl Into<String>,
         content: impl Into<String>,
     ) -> Result<Self> {
+        let name = name.into();
+        let content = content.into();
         let spec = Self {
             record_type,
-            name: name.into(),
-            content: content.into(),
+            name: name.trim().to_owned(),
+            content: content.trim().to_owned(),
             ttl: DEFAULT_TTL,
             prio: 0,
         };
@@ -1160,7 +1162,8 @@ impl RecordUpdate {
     /// ```
     #[must_use]
     pub fn name(mut self, name: impl Into<String>) -> Self {
-        self.name = Some(name.into());
+        let name = name.into();
+        self.name = Some(name.trim().to_owned());
         self
     }
 
@@ -1192,7 +1195,8 @@ impl RecordUpdate {
     /// ```
     #[must_use]
     pub fn content(mut self, content: impl Into<String>) -> Self {
-        self.content = Some(content.into());
+        let content = content.into();
+        self.content = Some(content.trim().to_owned());
         self
     }
 
