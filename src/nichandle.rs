@@ -2,7 +2,10 @@
 //!
 //! A handle is the registrant, admin, tech or billing identity behind a domain.
 //! The reseller object lists them across the whole customer tree, which is how
-//! a reseller finds the handle id to put on a domain.
+//! a reseller finds the handle id to put on a domain. `nichandle.list` is paged:
+//! [`InwxClient::list_nichandles`] returns one page, and
+//! [`InwxClient::list_all_nichandles`] walks every page with a bound that is
+//! validated before the first request.
 //!
 //! ```
 //! use inwx_client::NicHandle;
@@ -19,11 +22,10 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::client::InwxClient;
-use crate::error::Result;
+use crate::error::{Error, Result};
+use crate::pagination::{self, Listing, Page, Pages, Pagination};
 use crate::transport::Transport;
-use crate::types::{
-    de, parse_rows, validate_id, validate_page_limit, validate_token, validate_upper_token,
-};
+use crate::types::{de, validate_id, validate_page_limit, validate_token, validate_upper_token};
 
 /// Longest handle token this crate accepts.
 const MAX_HANDLE_LEN: usize = 64;
@@ -124,6 +126,123 @@ impl NicHandle {
     #[must_use]
     pub fn is_deleted(&self) -> Option<bool> {
         self.deleted
+    }
+}
+
+/// One page of `nichandle.list`.
+///
+/// The `nichandle` rows are read the way every other list answer in this crate
+/// is read: an array, or a single object where the array belongs (one handle),
+/// and a row that does not fit [`NicHandle`] is skipped instead of failing the
+/// page. `count` is `None` when the answer does not carry a usable total.
+///
+/// ```
+/// use inwx_client::NicHandleListPage;
+///
+/// let page: NicHandleListPage = serde_json::from_str(
+///     r#"{"count":3,"nichandle":[{"nicId":98765,"handle":"ACME-1234"}]}"#,
+/// )?;
+/// assert_eq!(page.handles.len(), 1);
+/// assert_eq!(page.count, Some(3));
+///
+/// // A single handle where the array belongs is a page of one, and one row
+/// // that does not fit the model costs that row rather than the page.
+/// let single: NicHandleListPage =
+///     serde_json::from_str(r#"{"count":1,"nichandle":{"nicId":98765}}"#)?;
+/// assert_eq!(single.handles.len(), 1);
+/// let mixed: NicHandleListPage = serde_json::from_str(
+///     r#"{"count":2,"nichandle":[{"nicId":98765},null]}"#,
+/// )?;
+/// assert_eq!(mixed.handles.len(), 1);
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct NicHandleListPage {
+    /// Total number of handles matching the query, when the API reports one.
+    #[serde(default, deserialize_with = "de::opt_i64")]
+    pub count: Option<i64>,
+    /// The handles on this page.
+    #[serde(default, rename = "nichandle", deserialize_with = "de::rows")]
+    pub handles: Vec<NicHandle>,
+}
+
+impl NicHandleListPage {
+    /// Number of handles on this page.
+    ///
+    /// ```
+    /// use inwx_client::NicHandleListPage;
+    ///
+    /// let page: NicHandleListPage = serde_json::from_str(r#"{"nichandle":[]}"#)?;
+    /// assert_eq!(page.len(), 0);
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.handles.len()
+    }
+
+    /// Whether this page is empty.
+    ///
+    /// ```
+    /// use inwx_client::NicHandleListPage;
+    /// assert!(NicHandleListPage::default().is_empty());
+    /// ```
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.handles.is_empty()
+    }
+
+    /// Whether more pages exist according to this answer's `count`.
+    ///
+    /// When the API omits `count`, this is `false`: the page itself cannot
+    /// prove more rows exist. Use [`InwxClient::list_all_nichandles`] when the
+    /// caller needs every row rather than one page.
+    ///
+    /// ```
+    /// use inwx_client::NicHandleListPage;
+    ///
+    /// let page: NicHandleListPage = serde_json::from_str(
+    ///     r#"{"count":3,"nichandle":[{"nicId":98765},{"nicId":98766}]}"#,
+    /// )?;
+    /// assert!(page.has_more());
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
+    #[must_use]
+    pub fn has_more(&self) -> bool {
+        self.count
+            .is_some_and(|count| i64::try_from(self.handles.len()).unwrap_or(i64::MAX) < count)
+    }
+}
+
+/// The page rules [`Pages`] needs to walk `nichandle.list`.
+///
+/// ```
+/// use inwx_client::{NicHandleListPage, Page};
+///
+/// let page: NicHandleListPage = serde_json::from_str(
+///     r#"{"count":4,"nichandle":[{"nicId":98765},{"nicId":98766}]}"#,
+/// )?;
+/// assert_eq!(page.total(), Some(4));
+/// assert_eq!(page.len(), 2);
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+impl Page for NicHandleListPage {
+    type Item = NicHandle;
+
+    fn total(&self) -> Option<i64> {
+        self.count
+    }
+
+    fn len(&self) -> usize {
+        self.handles.len()
+    }
+
+    fn truncate_to(&mut self, len: usize) {
+        self.handles.truncate(len);
+    }
+
+    fn into_items(self) -> Vec<NicHandle> {
+        self.handles
     }
 }
 
@@ -294,6 +413,10 @@ impl NicHandleQuery {
     /// assert!(NicHandleQuery::new().params().unwrap().is_object());
     /// ```
     pub fn params(&self) -> Result<Value> {
+        Ok(self.param_value())
+    }
+
+    fn param_value(&self) -> Value {
         let mut params = Map::new();
         if let Some(handle) = &self.handle {
             params.insert("handle".to_owned(), json!(handle));
@@ -312,12 +435,76 @@ impl NicHandleQuery {
         }
         params.insert("page".to_owned(), json!(self.page.unwrap_or(1)));
         params.insert("pagelimit".to_owned(), json!(self.limit.unwrap_or(50)));
-        Ok(Value::Object(params))
+        Value::Object(params)
+    }
+}
+
+/// The `nichandle.list` command, ready to be walked page by page with
+/// [`Pages`].
+///
+/// The query's own `page`/`pagelimit` are overridden by the walker — a walk
+/// owns its cursor.
+///
+/// ```
+/// use inwx_client::{Listing, NicHandleListing, NicHandleQuery};
+///
+/// let listing = NicHandleListing::new(NicHandleQuery::new().with_handle("ACME-1234")?);
+/// assert_eq!(<NicHandleListing as Listing>::METHOD, "nichandle.list");
+/// let params = listing.params(2, 25);
+/// assert_eq!(params["handle"], "ACME-1234");
+/// assert_eq!(params["page"], 2);
+/// assert_eq!(params["pagelimit"], 25);
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NicHandleListing {
+    query: NicHandleQuery,
+}
+
+impl NicHandleListing {
+    /// The listing for one search.
+    ///
+    /// ```
+    /// use inwx_client::{NicHandleListing, NicHandleQuery};
+    ///
+    /// let query = NicHandleQuery::new().with_name("Mustermann")?;
+    /// assert_eq!(NicHandleListing::new(query.clone()).query(), &query);
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn new(query: NicHandleQuery) -> Self {
+        Self { query }
+    }
+
+    /// The search the walk is using.
+    ///
+    /// ```
+    /// use inwx_client::{NicHandleListing, NicHandleQuery};
+    ///
+    /// assert_eq!(NicHandleListing::default().query(), &NicHandleQuery::new());
+    /// ```
+    #[must_use]
+    pub fn query(&self) -> &NicHandleQuery {
+        &self.query
+    }
+}
+
+impl Listing for NicHandleListing {
+    type Page = NicHandleListPage;
+
+    const METHOD: &'static str = "nichandle.list";
+
+    fn params(&self, page: u32, page_size: u32) -> Value {
+        pagination::with_paging(self.query.param_value(), page, page_size)
     }
 }
 
 impl<T: Transport> InwxClient<T> {
-    /// Lists NIC handles (`nichandle.list`).
+    /// Lists one page of NIC handles (`nichandle.list`).
+    ///
+    /// The answer carries the handles on this page plus, usually, a `count` for
+    /// the whole query. For more than one page use
+    /// [`InwxClient::list_all_nichandles`], which walks them.
     ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
@@ -327,7 +514,7 @@ impl<T: Transport> InwxClient<T> {
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
     /// let query = NicHandleQuery::new().with_name("Mustermann")?;
-    /// for handle in client.list_nichandles(&query).await? {
+    /// for handle in client.list_nichandles(&query).await?.handles {
     ///     println!("{:?} {:?}", handle.id, handle.handle);
     /// }
     /// # Ok(())
@@ -338,10 +525,70 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// [`crate::Error::Validation`] when the query carries a bad filter or page size,
     /// plus the usual transport and API errors.
-    pub async fn list_nichandles(&self, query: &NicHandleQuery) -> Result<Vec<NicHandle>> {
+    pub async fn list_nichandles(&self, query: &NicHandleQuery) -> Result<NicHandleListPage> {
         let params = query.params()?;
         let data = self.call("nichandle.list", params).await?;
-        Ok(parse_rows(&data, "nichandle"))
+        serde_json::from_value(data).map_err(Error::from)
+    }
+
+    /// Walks every page of NIC handles (`nichandle.list`).
+    ///
+    /// [`InwxClient::list_nichandles`] answers one page; this is the cursor for
+    /// resellers with more handles than fit into one request. The bound in
+    /// `pagination` decides how far the walk goes, and it is checked before the
+    /// first request.
+    ///
+    /// ```
+    /// # use inwx_client::{
+    /// #     InwxClient, NicHandleQuery, Pagination, Result,
+    /// #     transport::{Request, Response, Transport},
+    /// # };
+    /// # use std::sync::{Arc, Mutex};
+    /// #[derive(Clone)]
+    /// struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+    ///
+    /// impl Transport for Scripted {
+    ///     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    ///         let body = self.0.lock().unwrap().remove(0);
+    ///         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    ///     }
+    /// }
+    ///
+    /// # async fn demo() -> Result<Vec<i64>> {
+    /// let transport = Scripted(Arc::new(Mutex::new(vec![
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"nichandle":[{"nicId":1},{"nicId":2}]}}"#,
+    ///     r#"{"code":1000,"msg":"ok","resData":{"nichandle":[{"nicId":3}]}}"#,
+    /// ])));
+    /// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+    /// let handles = client
+    ///     .list_all_nichandles(
+    ///         &NicHandleQuery::new().with_name("Mustermann")?,
+    ///         &Pagination::new().with_page_size(2)?,
+    ///     )
+    ///     .collect_all()
+    ///     .await?
+    ///     .iter()
+    ///     .filter_map(|handle| handle.id)
+    ///     .collect();
+    /// # Ok(handles)
+    /// # }
+    /// # assert_eq!(
+    /// #     tokio::runtime::Runtime::new().unwrap().block_on(demo()).unwrap(),
+    /// #     [1, 2, 3]
+    /// # );
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The bound is validated when it is built (see
+    /// [`Pagination::with_page_size`]); the walk itself reports the usual
+    /// transport and API errors.
+    pub fn list_all_nichandles(
+        &self,
+        query: &NicHandleQuery,
+        pagination: &Pagination,
+    ) -> Pages<'_, T, NicHandleListing> {
+        Pages::new(self, NicHandleListing::new(query.clone()), *pagination)
     }
 }
 
