@@ -554,10 +554,12 @@ fn transfer_branches() {
     let transfer = inwx_client::TransferRequest::new(ack.clone()).unwrap();
     assert_eq!(transfer.domain().as_str(), "a.de");
 
-    let trade = inwx_client::TradeRequest::new(Irreversible::acknowledge(
+    let trade = inwx_client::TradeRequest::builder(Irreversible::acknowledge(
         inwx_client::ActionKind::Trade,
         &domain("a.de"),
     ))
+    .with_registrant(Handle::new(1).unwrap())
+    .build()
     .unwrap();
     assert_eq!(trade.domain().as_str(), "a.de");
 
@@ -623,7 +625,15 @@ fn transfer_branches() {
     assert!(transfer.clone().with_nameservers(&[]).is_err());
     let ns = host("ns1.example.net");
     assert!(transfer.with_nameservers(&[ns.clone(), ns]).is_err());
-    assert!(trade.with_nameservers(&[]).is_err());
+    assert!(
+        inwx_client::TradeRequest::builder(Irreversible::acknowledge(
+            inwx_client::ActionKind::Trade,
+            &domain("a.de"),
+        ))
+        .with_registrant(Handle::new(1).unwrap())
+        .with_nameservers(&[])
+        .is_err()
+    );
 
     // Extra data keys: too long, and a documented value.
     let mut extra = inwx_client::ExtData::new();

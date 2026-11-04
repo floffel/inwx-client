@@ -613,7 +613,13 @@ proptest! {
         prop_assert!(rendered.contains(domain.as_str()));
         // Only the matching action builds a transfer request.
         prop_assert!(inwx_client::TransferRequest::new(intent.clone()).is_ok());
-        prop_assert!(inwx_client::TradeRequest::new(intent).is_err());
+        // The trade builder rejects the same acknowledgement in `build`; the
+        // registrant is a required member, so it is supplied here.
+        prop_assert!(inwx_client::TradeRequest::builder(
+            intent)
+            .with_registrant(inwx_client::Handle::new(1201).unwrap())
+            .build()
+            .is_err());
     }
 
     #[test]

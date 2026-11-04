@@ -138,8 +138,7 @@ async fn trade_sends_the_new_owner_and_optional_contacts() {
     let mut extra = ExtData::new();
     extra.no_domain_check(false);
 
-    let request = TradeRequest::new(ack(ActionKind::Trade))
-        .unwrap()
+    let request = TradeRequest::builder(ack(ActionKind::Trade))
         .with_registrant(Handle::new(1201).unwrap())
         .with_admin(Handle::new(1202).unwrap())
         .with_tech(Handle::new(1203).unwrap())
@@ -154,7 +153,9 @@ async fn trade_sends_the_new_owner_and_optional_contacts() {
         .scheduled_at(Timestamp::parse("2026-12-01T00:00:00").unwrap())
         .with_ext_data(extra)
         .asynchronous()
-        .dry_run();
+        .dry_run()
+        .build()
+        .unwrap();
 
     let outcome = client(transport.clone())
         .trade_domain(&request)
@@ -172,18 +173,6 @@ async fn trade_sends_the_new_owner_and_optional_contacts() {
     assert_eq!(call.params["extData"]["NO-DOMAIN-CHECK"], false);
     assert_eq!(call.params["asynchron"], true);
     assert_eq!(call.params["testing"], true);
-}
-
-#[tokio::test]
-async fn trade_without_a_registrant_never_reaches_the_wire() {
-    let transport = MockTransport::new();
-    let request = TradeRequest::new(ack(ActionKind::Trade)).unwrap();
-    let error = client_without_retries(transport.clone())
-        .trade_domain(&request)
-        .await
-        .unwrap_err();
-    assert!(error.is_validation());
-    assert_eq!(transport.call_count(), 0);
 }
 
 #[tokio::test]
@@ -296,7 +285,10 @@ fn a_mismatched_acknowledgement_never_reaches_the_wire() {
 #[test]
 fn a_builder_cannot_be_created_from_the_wrong_intent() {
     assert!(TransferRequest::new(ack(ActionKind::Push)).is_err());
-    assert!(TradeRequest::new(ack(ActionKind::Transfer)).is_err());
+    assert!(TradeRequest::builder(ack(ActionKind::Transfer))
+        .with_registrant(Handle::new(1201).unwrap())
+        .build()
+        .is_err());
     assert!(PushRequest::builder(ack(ActionKind::Restore))
         .build()
         .is_err());

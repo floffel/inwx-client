@@ -1076,17 +1076,19 @@ impl TransferRequest {
 /// A `domain.trade` request (owner change).
 ///
 /// The registrant is mandatory — a trade without a new owner is not a trade —
-/// and every other contact defaults to the current one.
+/// and every other contact defaults to the current one. It is a required member
+/// of the builder, so a trade without a registrant does not compile:
 ///
 /// ```
 /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TradeRequest};
 ///
-/// let trade = TradeRequest::new(Irreversible::acknowledge(
-///     ActionKind::Trade,
-///     &DomainName::parse("example.com")?,
-/// ))?
-/// .with_registrant(Handle::new(1201)?)
-/// .with_admin(Handle::new(1202)?);
+/// let trade = TradeRequest::builder(Irreversible::acknowledge(
+///         ActionKind::Trade,
+///         &DomainName::parse("example.com")?,
+///     ))
+///     .with_registrant(Handle::new(1201)?)
+///     .with_admin(Handle::new(1202)?)
+///     .build()?;
 ///
 /// assert_eq!(trade.params()?["registrant"], 1201);
 /// # Ok::<(), inwx_client::Error>(())
@@ -1094,7 +1096,7 @@ impl TransferRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TradeRequest {
     domain: DomainName,
-    registrant: Option<Handle>,
+    registrant: Handle,
     admin: Option<Handle>,
     tech: Option<Handle>,
     billing: Option<Handle>,
@@ -1108,48 +1110,309 @@ pub struct TradeRequest {
     testing: bool,
 }
 
+#[bon]
 impl TradeRequest {
     /// Starts an owner change for the domain named in `intent`.
     ///
-    /// # Errors
+    /// The `registrant` is a required member, so a trade without a new owner is
+    /// not representable — it fails to compile instead of failing later in
+    /// [`TradeRequest::params`]:
     ///
-    /// [`Error::Validation`] unless `intent` acknowledges
-    /// [`ActionKind::Trade`].
-    ///
-    /// ```
+    /// ```compile_fail
     /// use inwx_client::{ActionKind, DomainName, Irreversible, TradeRequest};
     ///
-    /// let wrong = Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?);
-    /// assert!(TradeRequest::new(wrong).is_err());
+    /// // No `.with_registrant(..)`: the builder has no `build` without it.
+    /// let _ = TradeRequest::builder(Irreversible::acknowledge(
+    ///         ActionKind::Trade,
+    ///         &DomainName::parse("example.com")?,
+    ///     ))
+    ///     .build();
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
-    pub fn new(intent: Irreversible) -> Result<Self> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] unless `intent` acknowledges [`ActionKind::Trade`],
+    /// or when a validating setter such as
+    /// [`with_nameservers`](TradeRequestBuilder::with_nameservers) rejects its
+    /// value.
+    #[builder(finish_fn(doc {
+        /// Finishes the trade request.
+        ///
+        /// # Errors
+        ///
+        /// [`Error::Validation`] unless the `intent` acknowledgement names
+        /// [`ActionKind::Trade`], or when a validating setter rejected its value.
+    }))]
+    pub fn new(
+        #[builder(start_fn)] intent: Irreversible,
+        /// The new owner (`registrant`); a required member of the builder.
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TradeRequest};
+        ///
+        /// let trade = TradeRequest::builder(Irreversible::acknowledge(
+        ///         ActionKind::Trade,
+        ///         &DomainName::parse("a.de")?,
+        ///     ))
+        ///     .with_registrant(Handle::new(991)?)
+        ///     .build()?;
+        /// assert_eq!(trade.params()?["registrant"], 991);
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(setters(name = with_registrant))]
+        registrant: Handle,
+        /// The administrative contact handle.
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TradeRequest};
+        ///
+        /// let trade = TradeRequest::builder(Irreversible::acknowledge(
+        ///         ActionKind::Trade,
+        ///         &DomainName::parse("a.de")?,
+        ///     ))
+        ///     .with_registrant(Handle::new(1)?)
+        ///     .with_admin(Handle::new(2)?)
+        ///     .build()?;
+        /// assert_eq!(trade.params()?["admin"], 2);
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(setters(name = with_admin, option_fn(vis = "")))]
+        admin: Option<Handle>,
+        /// The technical contact handle.
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TradeRequest};
+        ///
+        /// let trade = TradeRequest::builder(Irreversible::acknowledge(
+        ///         ActionKind::Trade,
+        ///         &DomainName::parse("a.de")?,
+        ///     ))
+        ///     .with_registrant(Handle::new(1)?)
+        ///     .with_tech(Handle::new(3)?)
+        ///     .build()?;
+        /// assert_eq!(trade.params()?["tech"], 3);
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(setters(name = with_tech, option_fn(vis = "")))]
+        tech: Option<Handle>,
+        /// The billing contact handle.
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TradeRequest};
+        ///
+        /// let trade = TradeRequest::builder(Irreversible::acknowledge(
+        ///         ActionKind::Trade,
+        ///         &DomainName::parse("a.de")?,
+        ///     ))
+        ///     .with_registrant(Handle::new(1)?)
+        ///     .with_billing(Handle::new(4)?)
+        ///     .build()?;
+        /// assert_eq!(trade.params()?["billing"], 4);
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(setters(name = with_billing, option_fn(vis = "")))]
+        billing: Option<Handle>,
+        /// The nameservers to set after the trade.
+        ///
+        /// # Errors
+        ///
+        /// [`Error::Validation`] for an empty or duplicate list.
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, DomainName, Handle, Hostname, Irreversible, TradeRequest};
+        ///
+        /// let trade = TradeRequest::builder(Irreversible::acknowledge(
+        ///         ActionKind::Trade,
+        ///         &DomainName::parse("a.de")?,
+        ///     ))
+        ///     .with_registrant(Handle::new(1)?)
+        ///     .with_nameservers(&[Hostname::parse("ns1.example.net")?])?
+        ///     .build()?;
+        /// assert_eq!(trade.params()?["ns"][0], "ns1.example.net");
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(
+            setters(name = with_nameservers, option_fn(vis = "")),
+            with = |nameservers: &[Hostname]| -> Result<_> {
+                validate_nameservers(nameservers)?;
+                Ok(nameservers.to_vec())
+            }
+        )]
+        nameservers: Option<Vec<Hostname>>,
+        /// The authorisation code some TLDs require for a trade.
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, AuthCode, DomainName, Handle, Irreversible, TradeRequest};
+        ///
+        /// let trade = TradeRequest::builder(Irreversible::acknowledge(
+        ///         ActionKind::Trade,
+        ///         &DomainName::parse("a.de")?,
+        ///     ))
+        ///     .with_registrant(Handle::new(1)?)
+        ///     .auth_code(AuthCode::new("code-1")?)
+        ///     .build()?;
+        /// assert_eq!(trade.params()?["authCode"], "code-1");
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(setters(name = auth_code, option_fn(vis = "")))]
+        auth_code: Option<AuthCode>,
+        /// The whois provider.
+        ///
+        /// # Errors
+        ///
+        /// [`Error::Validation`] when the value is unusable.
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TradeRequest};
+        ///
+        /// let trade = TradeRequest::builder(Irreversible::acknowledge(
+        ///         ActionKind::Trade,
+        ///         &DomainName::parse("a.de")?,
+        ///     ))
+        ///     .with_registrant(Handle::new(1)?)
+        ///     .with_whois_provider("Example")?
+        ///     .build()?;
+        /// assert_eq!(trade.params()?["whoisProvider"], "Example");
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(
+            setters(name = with_whois_provider, option_fn(vis = "")),
+            with = |provider: impl Into<String>| -> Result<_> {
+                let provider = provider.into();
+                validate_token("whoisProvider", &provider)?;
+                Ok(provider.trim().to_owned())
+            }
+        )]
+        whois_provider: Option<String>,
+        /// The whois URL.
+        ///
+        /// # Errors
+        ///
+        /// [`Error::Validation`] when the value is unusable.
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TradeRequest};
+        ///
+        /// let trade = TradeRequest::builder(Irreversible::acknowledge(
+        ///         ActionKind::Trade,
+        ///         &DomainName::parse("a.de")?,
+        ///     ))
+        ///     .with_registrant(Handle::new(1)?)
+        ///     .with_whois_url("https://whois.example.net")?
+        ///     .build()?;
+        /// assert_eq!(trade.params()?["whoisUrl"], "https://whois.example.net");
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(
+            setters(name = with_whois_url, option_fn(vis = "")),
+            with = |url: impl Into<String>| -> Result<_> {
+                let url = url.into();
+                validate_token("whoisUrl", &url)?;
+                Ok(url.trim().to_owned())
+            }
+        )]
+        whois_url: Option<String>,
+        /// The date the trade is scheduled for (`scDate`).
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, Timestamp, TradeRequest};
+        ///
+        /// let trade = TradeRequest::builder(Irreversible::acknowledge(
+        ///         ActionKind::Trade,
+        ///         &DomainName::parse("a.de")?,
+        ///     ))
+        ///     .with_registrant(Handle::new(1)?)
+        ///     .scheduled_at(Timestamp::parse("2026-12-01T00:00:00")?)
+        ///     .build()?;
+        /// assert_eq!(trade.params()?["scDate"], "2026-12-01T00:00:00");
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(setters(name = scheduled_at, option_fn(vis = "")))]
+        sc_date: Option<Timestamp>,
+        /// The TLD-specific extra data.
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, DomainName, ExtData, Handle, Irreversible, TradeRequest};
+        ///
+        /// let mut extra = ExtData::new();
+        /// extra.birth_city("Munich")?;
+        /// let trade = TradeRequest::builder(Irreversible::acknowledge(
+        ///         ActionKind::Trade,
+        ///         &DomainName::parse("a.de")?,
+        ///     ))
+        ///     .with_registrant(Handle::new(1)?)
+        ///     .with_ext_data(extra)
+        ///     .build()?;
+        /// assert_eq!(trade.params()?["extData"]["BIRTH-CITY"], "Munich");
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(setters(name = with_ext_data, option_fn(vis = "")))]
+        ext_data: Option<ExtData>,
+        /// Asks the API to answer before the registry does (`asynchron`).
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TradeRequest};
+        ///
+        /// let trade = TradeRequest::builder(Irreversible::acknowledge(
+        ///         ActionKind::Trade,
+        ///         &DomainName::parse("a.de")?,
+        ///     ))
+        ///     .with_registrant(Handle::new(1)?)
+        ///     .asynchronous()
+        ///     .build()?;
+        /// assert_eq!(trade.params()?["asynchron"], true);
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(setters(name = asynchronous, option_fn(vis = "")), with = || true)]
+        asynchron: Option<bool>,
+        /// Runs the command in testing mode (`testing=true`).
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TradeRequest};
+        ///
+        /// let trade = TradeRequest::builder(Irreversible::acknowledge(
+        ///         ActionKind::Trade,
+        ///         &DomainName::parse("a.de")?,
+        ///     ))
+        ///     .with_registrant(Handle::new(1)?)
+        ///     .dry_run()
+        ///     .build()?;
+        /// assert_eq!(trade.params()?["testing"], true);
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(setters(name = dry_run, option_fn(vis = "")), default, with = || true)]
+        testing: bool,
+    ) -> Result<Self> {
         let domain = intent.into_domain(ActionKind::Trade)?;
         Ok(Self {
             domain,
-            registrant: None,
-            admin: None,
-            tech: None,
-            billing: None,
-            nameservers: None,
-            auth_code: None,
-            whois_provider: None,
-            whois_url: None,
-            sc_date: None,
-            ext_data: None,
-            asynchron: None,
-            testing: false,
+            registrant,
+            admin,
+            tech,
+            billing,
+            nameservers,
+            auth_code,
+            whois_provider,
+            whois_url,
+            sc_date,
+            ext_data,
+            asynchron,
+            testing,
         })
     }
 
     /// The domain whose owner changes.
     ///
     /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, TradeRequest};
+    /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TradeRequest};
     ///
-    /// let trade = TradeRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Trade, &DomainName::parse("a.de")?),
-    /// )?;
+    /// let trade = TradeRequest::builder(Irreversible::acknowledge(
+    ///         ActionKind::Trade,
+    ///         &DomainName::parse("a.de")?,
+    ///     ))
+    ///     .with_registrant(Handle::new(1)?)
+    ///     .build()?;
     /// assert_eq!(trade.domain().as_str(), "a.de");
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
@@ -1158,274 +1421,30 @@ impl TradeRequest {
         &self.domain
     }
 
-    /// Sets the new owner (`registrant`); required before [`TradeRequest::params`].
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TradeRequest};
-    ///
-    /// let trade = TradeRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Trade, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_registrant(Handle::new(991)?);
-    /// assert_eq!(trade.params()?["registrant"], 991);
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn with_registrant(mut self, handle: Handle) -> Self {
-        self.registrant = Some(handle);
-        self
-    }
-
-    /// Sets the administrative contact handle.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TradeRequest};
-    ///
-    /// let trade = TradeRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Trade, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_registrant(Handle::new(1)?)
-    /// .with_admin(Handle::new(2)?);
-    /// assert_eq!(trade.params()?["admin"], 2);
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn with_admin(mut self, handle: Handle) -> Self {
-        self.admin = Some(handle);
-        self
-    }
-
-    /// Sets the technical contact handle.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TradeRequest};
-    ///
-    /// let trade = TradeRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Trade, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_registrant(Handle::new(1)?)
-    /// .with_tech(Handle::new(3)?);
-    /// assert_eq!(trade.params()?["tech"], 3);
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn with_tech(mut self, handle: Handle) -> Self {
-        self.tech = Some(handle);
-        self
-    }
-
-    /// Sets the billing contact handle.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TradeRequest};
-    ///
-    /// let trade = TradeRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Trade, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_registrant(Handle::new(1)?)
-    /// .with_billing(Handle::new(4)?);
-    /// assert_eq!(trade.params()?["billing"], 4);
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn with_billing(mut self, handle: Handle) -> Self {
-        self.billing = Some(handle);
-        self
-    }
-
-    /// Sets the nameservers after the trade.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Validation`] for an empty or duplicate list.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Handle, Hostname, Irreversible, TradeRequest};
-    ///
-    /// let trade = TradeRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Trade, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_registrant(Handle::new(1)?)
-    /// .with_nameservers(&[Hostname::parse("ns1.example.net")?])?;
-    /// assert_eq!(trade.params()?["ns"][0], "ns1.example.net");
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    pub fn with_nameservers(mut self, nameservers: &[Hostname]) -> Result<Self> {
-        validate_nameservers(nameservers)?;
-        self.nameservers = Some(nameservers.to_vec());
-        Ok(self)
-    }
-
-    /// Sets the authorisation code some TLDs require for a trade.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, AuthCode, DomainName, Handle, Irreversible, TradeRequest};
-    ///
-    /// let trade = TradeRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Trade, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_registrant(Handle::new(1)?)
-    /// .auth_code(AuthCode::new("code-1")?);
-    /// assert_eq!(trade.params()?["authCode"], "code-1");
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn auth_code(mut self, code: AuthCode) -> Self {
-        self.auth_code = Some(code);
-        self
-    }
-
-    /// Sets the whois provider.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Validation`] when the value is unusable.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TradeRequest};
-    ///
-    /// let trade = TradeRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Trade, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_registrant(Handle::new(1)?)
-    /// .with_whois_provider("Example")?;
-    /// assert_eq!(trade.params()?["whoisProvider"], "Example");
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    pub fn with_whois_provider(mut self, provider: impl Into<String>) -> Result<Self> {
-        let provider = provider.into();
-        validate_token("whoisProvider", &provider)?;
-        self.whois_provider = Some(provider.trim().to_owned());
-        Ok(self)
-    }
-
-    /// Sets the whois URL.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Validation`] when the value is unusable.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TradeRequest};
-    ///
-    /// let trade = TradeRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Trade, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_registrant(Handle::new(1)?)
-    /// .with_whois_url("https://whois.example.net")?;
-    /// assert_eq!(trade.params()?["whoisUrl"], "https://whois.example.net");
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    pub fn with_whois_url(mut self, url: impl Into<String>) -> Result<Self> {
-        let url = url.into();
-        validate_token("whoisUrl", &url)?;
-        self.whois_url = Some(url.trim().to_owned());
-        Ok(self)
-    }
-
-    /// Schedules the trade for a later date (`scDate`).
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, Timestamp, TradeRequest};
-    ///
-    /// let trade = TradeRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Trade, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_registrant(Handle::new(1)?)
-    /// .scheduled_at(Timestamp::parse("2026-12-01T00:00:00")?);
-    /// assert_eq!(trade.params()?["scDate"], "2026-12-01T00:00:00");
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn scheduled_at(mut self, at: Timestamp) -> Self {
-        self.sc_date = Some(at);
-        self
-    }
-
-    /// Sets the TLD-specific extra data.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, ExtData, Handle, Irreversible, TradeRequest};
-    ///
-    /// let mut extra = ExtData::new();
-    /// extra.birth_city("Munich")?;
-    /// let trade = TradeRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Trade, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_registrant(Handle::new(1)?)
-    /// .with_ext_data(extra);
-    /// assert_eq!(trade.params()?["extData"]["BIRTH-CITY"], "Munich");
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn with_ext_data(mut self, extra: ExtData) -> Self {
-        self.ext_data = Some(extra);
-        self
-    }
-
-    /// Asks the API to answer before the registry does (`asynchron`).
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TradeRequest};
-    ///
-    /// let trade = TradeRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Trade, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_registrant(Handle::new(1)?)
-    /// .asynchronous();
-    /// assert_eq!(trade.params()?["asynchron"], true);
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn asynchronous(mut self) -> Self {
-        self.asynchron = Some(true);
-        self
-    }
-
-    /// Runs the command in testing mode (`testing=true`).
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TradeRequest};
-    ///
-    /// let trade = TradeRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Trade, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_registrant(Handle::new(1)?)
-    /// .dry_run();
-    /// assert_eq!(trade.params()?["testing"], true);
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn dry_run(mut self) -> Self {
-        self.testing = true;
-        self
-    }
-
     /// The `domain.trade` parameters.
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when no registrant was set: the API documents it as
-    /// required and a trade without an owner is a guaranteed `2003`.
+    /// Currently infallible: the registrant is a required member of the
+    /// builder, so there is no missing-owner branch left to report. The
+    /// signature keeps the [`Result`] so the call site stays uniform with the
+    /// other ownership builders.
     ///
     /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, TradeRequest};
+    /// use inwx_client::{ActionKind, DomainName, Handle, Irreversible, TradeRequest};
     ///
-    /// let trade = TradeRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Trade, &DomainName::parse("a.de")?),
-    /// )?;
-    /// assert!(trade.params().is_err());
+    /// let trade = TradeRequest::builder(Irreversible::acknowledge(
+    ///         ActionKind::Trade,
+    ///         &DomainName::parse("a.de")?,
+    ///     ))
+    ///     .with_registrant(Handle::new(991)?)
+    ///     .build()?;
+    /// assert_eq!(trade.params()?["registrant"], 991);
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     pub fn params(&self) -> Result<Value> {
-        let registrant = self.registrant.ok_or_else(|| {
-            Error::validation(
-                "registrant",
-                "a trade needs the new owner (with_registrant)",
-            )
-        })?;
         let mut params = base_params(&self.domain, self.testing);
-        params.insert("registrant".to_owned(), json!(registrant));
+        params.insert("registrant".to_owned(), json!(self.registrant));
         insert_handles(
             &mut params,
             &[
@@ -2052,11 +2071,12 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
-    /// let trade = TradeRequest::new(Irreversible::acknowledge(
-    ///     ActionKind::Trade,
-    ///     &DomainName::parse("example.com")?,
-    /// ))?
-    /// .with_registrant(Handle::new(1201)?);
+    /// let trade = TradeRequest::builder(Irreversible::acknowledge(
+    ///         ActionKind::Trade,
+    ///         &DomainName::parse("example.com")?,
+    ///     ))
+    ///     .with_registrant(Handle::new(1201)?)
+    ///     .build()?;
     /// client.trade_domain(&trade).await?;
     /// # Ok(())
     /// # }
@@ -2242,12 +2262,16 @@ mod tests {
 
     #[test]
     fn trade_requires_a_registrant() {
-        let trade = TradeRequest::new(Irreversible::acknowledge(
+        // `registrant` is a required builder member, so this cannot be built
+        // without it; supplying it is the only path to `build()`.
+        let trade = TradeRequest::builder(Irreversible::acknowledge(
             ActionKind::Trade,
             &domain("a.de"),
         ))
+        .with_registrant(Handle::new(1201).unwrap())
+        .build()
         .unwrap();
-        assert!(trade.params().is_err());
+        assert_eq!(trade.params().unwrap()["registrant"], 1201);
     }
 
     #[test]
