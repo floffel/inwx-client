@@ -329,7 +329,7 @@ async fn contact_list_reads_a_single_handle_and_skips_unusable_rows() {
     );
 
     let page = client.list_contacts(&query).await.unwrap();
-    assert!(page.contacts.is_empty());
+    assert_eq!(page.contacts, Vec::<Contact>::new());
     assert_eq!(page.count, Some(12));
 
     let page = client.list_contacts(&query).await.unwrap();
@@ -337,8 +337,8 @@ async fn contact_list_reads_a_single_handle_and_skips_unusable_rows() {
     assert_eq!(page.count, None);
 
     let page = client.list_contacts(&query).await.unwrap();
-    assert!(page.is_empty());
     assert_eq!(page.total(), None);
+    assert_eq!(page.into_items(), Vec::<Contact>::new());
 
     assert_eq!(transport.call_count(), 6);
     assert_eq!(transport.calls()[0].method, "contact.list");
