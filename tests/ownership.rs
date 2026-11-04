@@ -20,8 +20,7 @@ fn ack(action: ActionKind) -> Irreversible {
 }
 
 fn transfer() -> TransferRequest {
-    TransferRequest::new(ack(ActionKind::Transfer))
-        .unwrap_or_else(|error| panic!("{error}"))
+    TransferRequest::builder(ack(ActionKind::Transfer))
         .auth_code(AuthCode::new("aB3-xY9_42").unwrap())
         .with_registrant(Handle::new(991).unwrap())
         .with_admin(Handle::new(992).unwrap())
@@ -42,6 +41,8 @@ fn transfer() -> TransferRequest {
         .with_agreed_price(250.0)
         .unwrap()
         .asynchronous()
+        .call()
+        .unwrap_or_else(|error| panic!("{error}"))
 }
 
 #[tokio::test]
@@ -90,12 +91,13 @@ async fn transfer_with_contact_takeover_and_ext_data() {
     extra.birth_city("Munich").unwrap();
     extra.set("TRADEMARK", "Example GmbH").unwrap();
 
-    let request = TransferRequest::new(ack(ActionKind::Transfer))
-        .unwrap()
+    let request = TransferRequest::builder(ack(ActionKind::Transfer))
         .keeping_nameservers()
         .with_contact_takeover(true)
         .with_ext_data(extra)
-        .dry_run();
+        .dry_run()
+        .call()
+        .unwrap();
 
     client(transport.clone())
         .transfer_domain(&request)
@@ -116,10 +118,11 @@ async fn transfer_with_contact_takeover_and_ext_data() {
 #[tokio::test]
 async fn transfer_refuses_to_mix_takeover_and_explicit_nameservers() {
     let transport = MockTransport::new();
-    let request = TransferRequest::new(ack(ActionKind::Transfer))
-        .unwrap()
+    let request = TransferRequest::builder(ack(ActionKind::Transfer))
         .keeping_nameservers()
         .with_nameservers(&[Hostname::parse("ns1.example.net").unwrap()])
+        .unwrap()
+        .call()
         .unwrap();
 
     let error = client_without_retries(transport.clone())

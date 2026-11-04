@@ -609,9 +609,14 @@ fn transfer_branches() {
     assert_eq!(out.dry_run().params()["testing"], true);
 
     // Nameserver validation inside the ownership builders.
-    assert!(transfer.clone().with_nameservers(&[]).is_err());
+    assert!(inwx_client::TransferRequest::builder(ack)
+        .with_nameservers(&[])
+        .is_err());
+    let ack = Irreversible::acknowledge(inwx_client::ActionKind::Transfer, &domain("a.de"));
     let ns = host("ns1.example.net");
-    assert!(transfer.with_nameservers(&[ns.clone(), ns]).is_err());
+    assert!(inwx_client::TransferRequest::builder(ack)
+        .with_nameservers(&[ns.clone(), ns])
+        .is_err());
     assert!(trade.with_nameservers(&[]).is_err());
 
     // Extra data keys: too long, and a documented value.
