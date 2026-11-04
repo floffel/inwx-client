@@ -27,9 +27,9 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::client::InwxClient;
-use crate::error::{Error, Result};
+use crate::error::{Error, HttpBody, Result};
 use crate::transport::Transport;
-use crate::types::{de, validate_token, DomainName, Email, Handle};
+use crate::types::{de, opt_i64_value, validate_token, DomainName, Email, Handle};
 
 /// Longest CSR the API accepts (`text`, 10000 characters).
 pub const MAX_CSR_LEN: usize = 10_000;
@@ -1665,6 +1665,83 @@ fn validate_wildcard(wildcard: &str) -> Result<String> {
     Ok(format!("*.{domain}"))
 }
 
+/// The certificate id an answer states, when it names an order this crate can
+/// address.
+///
+/// `certificateId` arrives as a number in most answers and as text in some (the
+/// documented shape of `certificate.listRemainingNeededData` is `text`), so both
+/// spellings are read. Only a positive id survives: every command that takes one
+/// goes through `CertificateId::new`, which refuses the rest, so handing out `0`
+/// would name an order the caller could neither inspect nor cancel.
+///
+/// An answer the strict model rejects can still be an object wrapped in a
+/// one-row array, so the id is read out of that shape too.
+fn stated_certificate_id(data: &Value) -> Option<i64> {
+    // The lenient model only fails on an answer that is not an object at all, so
+    // the id can also sit in a one-row array — the wrapper must not cost the
+    // caller the order.
+    let id = data
+        .get("certificateId")
+        .or_else(|| data.as_array()?.first()?.get("certificateId"))?;
+    opt_i64_value(id).filter(|id| *id > 0)
+}
+
+/// Decodes an answer that has to name a certificate order.
+///
+/// By the time the strict model runs, `certificate.create`, `renew`, `reissue`
+/// and `updateOrder` have been executed and billed: the order exists whether or
+/// not its answer fits [`CertificateOrderResult`]. A plain [`Error::Json`] would
+/// report that committed mutation as a local parsing mistake and hide the only
+/// handle that matters, so the id is read out of the raw answer *before* the
+/// model is tried. An answer that names one fails as
+/// [`Error::CertificateOrderUnreadable`] carrying that id and the bounded body;
+/// an answer that names none fails as [`Error::Ambiguous`]. Both are uncertain
+/// and neither is replayed, so ordering again cannot bill a second certificate
+/// behind the caller's back.
+///
+/// Only a JSON object is handed to the model. `serde_json::from_value` reads a
+/// JSON array into a struct *positionally*, so a wrapped answer would come back
+/// as an order with every field defaulted — a success that names no certificate
+/// while the billing already happened. The shape check turns that silent loss
+/// into the error below.
+fn decode_certificate_order(method: &'static str, data: &Value) -> Result<CertificateOrderResult> {
+    let parsed = data
+        .is_object()
+        .then(|| serde_json::from_value::<CertificateOrderResult>(data.clone()));
+    match parsed {
+        Some(Ok(result)) => Ok(result),
+        Some(Err(source)) => Err(unreadable_order(method, data, Some(source))),
+        None => Err(unreadable_order(method, data, None)),
+    }
+}
+
+/// The error for an order answer that cannot be read: the certificate it names,
+/// or [`Error::Ambiguous`] when it names none.
+fn unreadable_order(
+    method: &'static str,
+    data: &Value,
+    source: Option<serde_json::Error>,
+) -> Error {
+    if let Some(certificate_id) = stated_certificate_id(data) {
+        return Error::CertificateOrderUnreadable {
+            method,
+            certificate_id,
+            body: HttpBody::new(&data.to_string()),
+            source,
+        };
+    }
+    let mut error = Error::ambiguous(
+        method,
+        "the answer is not the documented object and names no certificate id, \
+         so the order cannot be inspected or cancelled; list the certificates \
+         before ordering again",
+    );
+    if let Some(source) = source {
+        error = error.with_source(source);
+    }
+    error
+}
+
 impl<T: Transport> InwxClient<T> {
     /// Orders a certificate (`certificate.create`).
     ///
@@ -1686,13 +1763,17 @@ impl<T: Transport> InwxClient<T> {
     /// # Errors
     ///
     /// [`Error::Validation`] from [`CertificateOrder::params`], plus the usual
-    /// transport and API errors — `2104` on a billing failure.
+    /// transport and API errors — `2104` on a billing failure. An answer that
+    /// cannot be read as a [`CertificateOrderResult`] is
+    /// [`Error::CertificateOrderUnreadable`] (the order is billed, its id is
+    /// carried) or [`Error::Ambiguous`] when it names no id; neither is a plain
+    /// parse error and neither is retried.
     pub async fn order_certificate(
         &self,
         order: &CertificateOrder,
     ) -> Result<CertificateOrderResult> {
         let data = self.call("certificate.create", order.params()?).await?;
-        serde_json::from_value(data).map_err(Error::from)
+        decode_certificate_order("certificate.create", &data)
     }
 
     /// Cancels a pending certificate request (`certificate.cancel`).
@@ -1948,7 +2029,10 @@ impl<T: Transport> InwxClient<T> {
     /// # Errors
     ///
     /// [`Error::Validation`] when the CSR is unusable, plus the usual transport
-    /// and API errors.
+    /// and API errors. An answer that cannot be read as a
+    /// [`CertificateOrderResult`] is [`Error::CertificateOrderUnreadable`] or,
+    /// without an id in it, [`Error::Ambiguous`] — the reissue is billed either
+    /// way.
     pub async fn reissue_certificate(
         &self,
         certificate_id: CertificateId,
@@ -1961,7 +2045,7 @@ impl<T: Transport> InwxClient<T> {
                 json!({ "certificateId": certificate_id.get(), "csr": csr }),
             )
             .await?;
-        serde_json::from_value(data).map_err(Error::from)
+        decode_certificate_order("certificate.reissue", &data)
     }
 
     /// Renews a certificate (`certificate.renew`).
@@ -1984,13 +2068,16 @@ impl<T: Transport> InwxClient<T> {
     /// # Errors
     ///
     /// [`Error::Validation`] from [`CertificateUpdate::params`], plus the usual
-    /// transport and API errors.
+    /// transport and API errors. An answer that cannot be read as a
+    /// [`CertificateOrderResult`] is [`Error::CertificateOrderUnreadable`] or,
+    /// without an id in it, [`Error::Ambiguous`] — the renewal is ordered and
+    /// billed either way.
     pub async fn renew_certificate(
         &self,
         renew: &CertificateUpdate,
     ) -> Result<CertificateOrderResult> {
         let data = self.call("certificate.renew", renew.params()?).await?;
-        serde_json::from_value(data).map_err(Error::from)
+        decode_certificate_order("certificate.renew", &data)
     }
 
     /// Turns automatic renewal on or off (`certificate.setAutorenew`).
@@ -2078,7 +2165,9 @@ impl<T: Transport> InwxClient<T> {
     /// # Errors
     ///
     /// [`Error::Validation`] from [`CertificateUpdate::params`], plus the usual
-    /// transport and API errors.
+    /// transport and API errors. An answer that cannot be read as a
+    /// [`CertificateOrderResult`] is [`Error::CertificateOrderUnreadable`] or,
+    /// without an id in it, [`Error::Ambiguous`].
     pub async fn update_certificate_order(
         &self,
         update: &CertificateUpdate,
@@ -2086,13 +2175,80 @@ impl<T: Transport> InwxClient<T> {
         let data = self
             .call("certificate.updateOrder", update.params()?)
             .await?;
-        serde_json::from_value(data).map_err(Error::from)
+        decode_certificate_order("certificate.updateOrder", &data)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_id_of_an_unreadable_answer_is_read_out_of_both_shapes() {
+        // Number, text, and the one-row array a strict parse rejects — the
+        // three spellings a billed order can still be recovered from.
+        assert_eq!(
+            stated_certificate_id(&json!({ "certificateId": 9 })),
+            Some(9)
+        );
+        assert_eq!(
+            stated_certificate_id(&json!({ "certificateId": " 9 " })),
+            Some(9)
+        );
+        assert_eq!(
+            stated_certificate_id(&json!([{ "certificateId": 7 }])),
+            Some(7)
+        );
+
+        // The other side of the boundary: an id `CertificateId::new` would
+        // refuse (zero, negative), a value that is not a number, a missing
+        // field, an empty array and a bare scalar all name nothing.
+        assert_eq!(stated_certificate_id(&json!({ "certificateId": 0 })), None);
+        assert_eq!(stated_certificate_id(&json!({ "certificateId": -5 })), None);
+        assert_eq!(
+            stated_certificate_id(&json!({ "certificateId": "nine" })),
+            None
+        );
+        assert_eq!(stated_certificate_id(&json!({ "status": "PENDING" })), None);
+        assert_eq!(stated_certificate_id(&json!([])), None);
+        assert_eq!(
+            stated_certificate_id(&json!([{ "status": "PENDING" }])),
+            None
+        );
+        assert_eq!(stated_certificate_id(&json!("9")), None);
+        assert_eq!(stated_certificate_id(&Value::Null), None);
+    }
+
+    #[test]
+    fn an_unreadable_answer_keeps_its_id_and_an_anonymous_one_stays_ambiguous() {
+        let unreadable =
+            decode_certificate_order("certificate.renew", &json!([{ "certificateId": 9 }]))
+                .expect_err("a one-row array is not the documented object");
+        match &unreadable {
+            Error::CertificateOrderUnreadable {
+                method,
+                certificate_id,
+                body,
+                ..
+            } => {
+                assert_eq!(*method, "certificate.renew");
+                assert_eq!(*certificate_id, 9);
+                assert!(body.as_str().contains("\"certificateId\":9"), "{body}");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(unreadable.is_uncertain());
+        assert!(!unreadable.is_retryable());
+
+        let anonymous = decode_certificate_order("certificate.create", &json!([]))
+            .expect_err("an empty array is not an order");
+        assert!(
+            matches!(anonymous, Error::Ambiguous { .. }),
+            "{anonymous:?}"
+        );
+        assert!(anonymous.is_uncertain());
+        assert!(!anonymous.is_retryable());
+    }
 
     #[test]
     fn a_csr_must_never_carry_a_private_key() {
