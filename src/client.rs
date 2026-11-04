@@ -976,6 +976,17 @@ impl<T: Transport> InwxClient<T> {
     /// # }
     /// ```
     ///
+    /// Retries follow [`RetryPolicy`] — including the ones [`InwxClient::call`]
+    /// refuses for a mutating command. `account.login` is the one command that
+    /// is replayed although it writes: it opens a session and nothing else, so a
+    /// 429, a 5xx or an answer that never arrived costs a repeat, not a
+    /// duplicate domain, order or charge. A second login only replaces the
+    /// session the first one opened.
+    ///
+    /// A login the API rejects is terminal, as everywhere else: an error
+    /// envelope on a `2xx` is the verdict, and repeating it would only repeat
+    /// the rejection.
+    ///
     /// # Errors
     ///
     /// [`Error::NotAuthenticated`] without credentials, [`Error::Api`] when the
@@ -994,7 +1005,36 @@ impl<T: Transport> InwxClient<T> {
         );
         self.add_language(&mut params);
 
-        let response = self.send("account.login", params).await?;
+        let mut attempt = 1u32;
+        let response = loop {
+            match self.send("account.login", params.clone()).await {
+                // A success, or a status no repeat could improve on: the
+                // envelope below reports what the API said, whether or not this
+                // was the last attempt.
+                Ok(response)
+                    if response.is_success() || !is_retryable_status(response.status()) =>
+                {
+                    break response;
+                }
+                Ok(response) => {
+                    if let Some(delay) = self.policy.delay_with_jitter(attempt, jitter_unit()) {
+                        sleep_for(delay).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    break response;
+                }
+                Err(error) if !login_replay_allowed(&error) => return Err(error),
+                Err(error) => {
+                    if let Some(delay) = self.policy.delay_with_jitter(attempt, jitter_unit()) {
+                        sleep_for(delay).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        };
         // The login request was written too: a body that cannot be read leaves
         // it open whether a session was opened server-side.
         let envelope = RpcResponse::parse_answer(response.body())?;
@@ -1460,6 +1500,25 @@ pub fn is_read_only_method(method: &str) -> bool {
 fn replay_allowed(error: &Error, method: &str) -> bool {
     match error {
         Error::Uncertain { .. } => is_read_only_method(method),
+        other => other.is_retryable(),
+    }
+}
+
+/// Whether a failed `account.login` attempt may be answered with another one.
+///
+/// `account.login` is the only command that writes and is still replay-safe: it
+/// opens a session, and a second login replaces that session instead of
+/// duplicating a domain, an order or a charge. So the gate is wider than
+/// [`replay_allowed`] in exactly one place — an [`Error::Uncertain`], the
+/// timeout whose answer was lost, is retried too, where the same failure on
+/// [`InwxClient::create_domain`] would be handed back to the caller.
+///
+/// An [`Error::Undecodable`] never reaches this gate: a `2xx` whose body cannot
+/// be read is reported by [`InwxClient::login`] at once, since the missing
+/// cookie says nothing about whether a repeat would open a second session.
+fn login_replay_allowed(error: &Error) -> bool {
+    match error {
+        Error::Uncertain { .. } => true,
         other => other.is_retryable(),
     }
 }
@@ -1954,6 +2013,25 @@ mod tests {
             &Error::validation("domain", "empty"),
             "domain.info"
         ));
+    }
+
+    #[test]
+    fn login_replay_is_wider_than_the_read_only_table() {
+        // The pre-write failures a `RetryPolicy` covers.
+        let before = Error::transport_at(TransportStage::BeforeSend, "dns lookup failed");
+        assert!(login_replay_allowed(&before));
+        // The lost answer: the one write a second login cannot duplicate.
+        let uncertain = Error::uncertain("timeout waiting for the answer");
+        assert!(login_replay_allowed(&uncertain));
+        // Terminal stays terminal: a local mistake, a rejection, a bad input.
+        let local = Error::transport_at(TransportStage::Local, "unsupported scheme");
+        assert!(!login_replay_allowed(&local));
+        assert!(!login_replay_allowed(&Error::validation("user", "empty")));
+        // An unreadable `2xx` is `Undecodable`, which never reaches this gate.
+        let cut = serde_json::from_str::<Value>("<html>502</html>").unwrap_err();
+        assert!(!login_replay_allowed(&Error::Undecodable { source: cut }));
+        // The gate is login-specific because the method is not read-only.
+        assert!(!is_read_only_method("account.login"));
     }
 
     #[test]
