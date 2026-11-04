@@ -404,7 +404,7 @@ pub use nameserver::{NameserverCheck, ZoneInfo, ZoneListPage, ZoneListing, ZoneS
 pub use nameserverset::{
     NameserverSet, NameserverSetCreate, NameserverSetType, NameserverSetUpdate,
 };
-pub use news::NewsItem;
+pub use news::{NewsDate, NewsItem};
 pub use nichandle::{NicHandle, NicHandleListPage, NicHandleListing, NicHandleQuery};
 pub use pagination::{
     Listing, Page, Pages, Pagination, DEFAULT_PAGE_SIZE, MAX_ITEMS, MAX_PAGES, MAX_PAGE_SIZE,

@@ -6,9 +6,9 @@ mod common;
 use inwx_client::{
     retry_after_from_header, ContactListing, ContactQuery, ContactRequest, ContactType,
     ContactUpdate, Credentials, DomainListQuery, DomainListing, DomainName, Hostname, HttpBody,
-    Listing, Pagination, Period, RecordId, RecordSpec, RecordType, RemoveClientHold, RpcResponse,
-    SetClientHold, ZoneListPage, ZoneListing, MAX_HTTP_BODY_CHARS, MAX_ITEMS, MAX_PAGES,
-    MAX_PAGE_SIZE, MAX_TTL,
+    Listing, NewsDate, Pagination, Period, RecordId, RecordSpec, RecordType, RemoveClientHold,
+    RpcResponse, SetClientHold, ZoneListPage, ZoneListing, MAX_HTTP_BODY_CHARS, MAX_ITEMS,
+    MAX_PAGES, MAX_PAGE_SIZE, MAX_TTL,
 };
 use proptest::prelude::*;
 use serde_json::Value;
@@ -1388,6 +1388,35 @@ proptest! {
             entry.occurred_at().is_some(),
             Timestamp::parse(&date).is_ok()
         );
+    }
+
+    /// News dates accept exactly the two documented layouts and render back in
+    /// the same shape they parsed.
+    #[test]
+    fn news_dates_round_trip_both_documented_layouts(
+        year in 1i32..=9999,
+        month in 1u8..=12,
+        day in 1u8..=31,
+        hour in 0u8..=23,
+        minute in 0u8..=59,
+        second in 0u8..=59,
+    ) {
+        let month = time::Month::try_from(month).unwrap();
+        let Ok(date) = time::Date::from_calendar_date(year, month, day) else {
+            return Ok(());
+        };
+        let day = date.to_string();
+        let day_date = NewsDate::parse(&day).unwrap();
+        prop_assert!(!day_date.has_time());
+        prop_assert_eq!(day_date.to_string(), day.clone());
+        prop_assert_eq!(serde_json::from_str::<NewsDate>(&format!("{day:?}")).unwrap(), day_date);
+
+        let at = format!("{day} {hour:02}:{minute:02}:{second:02}");
+        let at_date = NewsDate::parse(&at).unwrap();
+        prop_assert!(at_date.has_time());
+        prop_assert_eq!(at_date.to_string(), at.clone());
+        prop_assert_eq!(serde_json::from_str::<NewsDate>(&format!("{at:?}")).unwrap(), at_date);
+        prop_assert!(day_date < at_date);
     }
 }
 
