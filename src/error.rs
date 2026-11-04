@@ -128,6 +128,45 @@ pub enum Error {
         message: String,
     },
 
+    /// The API accepted a command, but it has not completed yet.
+    ///
+    /// INWX uses `1001` for asynchronous actions such as registration or
+    /// transfer, and `1300`/`1301` for message-queue outcomes. Returning those
+    /// as plain success would make a queued mutation indistinguishable from a
+    /// completed command that carried no payload. The original result code and
+    /// `svTRID` are kept so callers can poll or quote the transaction id.
+    ///
+    /// This is terminal for the client, not retryable: the command was accepted,
+    /// so replaying a non-idempotent request can duplicate the work.
+    ///
+    /// ```
+    /// use inwx_client::{Error, RpcResponse};
+    ///
+    /// let response = RpcResponse::parse(
+    ///     br#"{"code":1001,"msg":"action pending","svTRID":"trid-1"}"#,
+    /// )?;
+    /// let err = response.into_result().unwrap_err();
+    /// assert!(matches!(
+    ///     err,
+    ///     Error::Pending {
+    ///         code: 1001,
+    ///         sv_trid: Some(ref trid),
+    ///         ..
+    ///     } if trid == "trid-1"
+    /// ));
+    /// assert!(!err.is_retryable());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[error("INWX command pending (code {code}): {message}")]
+    Pending {
+        /// Numeric result code: `1001`, `1300` or `1301`.
+        code: i32,
+        /// The `msg` field, as sent by the API.
+        message: String,
+        /// Server transaction id, when the response carried one.
+        sv_trid: Option<String>,
+    },
+
     /// A body that arrived intact could not be decoded: it was not JSON, or a
     /// `resData` field had the wrong type. `serde_json`'s line/column
     /// information is kept as `source`.
@@ -196,7 +235,7 @@ pub enum Error {
     /// [`is_read_only_method`](crate::is_read_only_method).
     ///
     /// ```rust
-    /// use inwx_client::Error;
+    /// use inwx_client::{Error, RpcResponse};
     ///
     /// let err = Error::uncertain("timeout waiting for response");
     /// assert!(err.is_uncertain());
@@ -1128,10 +1167,11 @@ impl Error {
         }
     }
 
-    /// Result code of an [`Error::Api`], or `None` for every other variant.
+    /// Result code of an [`Error::Api`] or [`Error::Pending`], or `None` for
+    /// every other variant.
     ///
     /// ```
-    /// use inwx_client::Error;
+    /// use inwx_client::{Error, RpcResponse};
     ///
     /// let err = Error::Api {
     ///     code: 2302,
@@ -1141,11 +1181,15 @@ impl Error {
     ///     details: Vec::new(),
     /// };
     /// assert_eq!(err.code(), Some(2302));
+    ///
+    /// let response = RpcResponse::parse(br#"{"code":1001,"msg":"pending"}"#)?;
+    /// assert_eq!(response.into_result().unwrap_err().code(), Some(1001));
+    /// # Ok::<(), inwx_client::Error>(())
     /// ```
     #[must_use]
     pub fn code(&self) -> Option<i32> {
         match self {
-            Self::Api { code, .. } => Some(*code),
+            Self::Api { code, .. } | Self::Pending { code, .. } => Some(*code),
             _ => None,
         }
     }

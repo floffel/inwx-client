@@ -11,7 +11,7 @@ INWX is a German registrar and DNS provider. One endpoint
 speaks a small JSON-RPC dialect where **transport success is not command
 success**: every command answers HTTP 200 and reports failure in the body
 (`{"code": 2303, "msg": "Object does not exist"}`). This crate models that
-correctly — a non-success code is an `Error::Api`, not a parse problem.
+correctly — a rejected command is an `Error::Api`, not a parse problem.
 
 ```toml
 [dependencies]
@@ -177,9 +177,10 @@ Every method below is implemented against the published INWX API documentation
   scalars are accepted as numbers *or* strings, because INWX is not consistent
   between methods (record ids are `token255` and arrive as strings, `avail` is an
   int, `transferLock` shows up as `1`/`true`).
-* **Success is more than `1000`.** `1001` (action pending), `1300`, `1301` and
-  `1500` (session end) are successes too; treating only `1000` as success turns a
-  pending registration into an error.
+* **Success is more than `1000`, and not every non-error is complete.** `1000`
+  and `1500` (session end) complete successfully; `1001` (action pending) and
+  `1300`/`1301` (message queue) are accepted without being complete and surface
+  as `Error::Pending` with the `svTRID` when the API sent one.
 * **Sessions, not tokens.** `account.login` returns a cookie; the client replays
   it, and on `2200`/`2201`/`2202` (or HTTP 401/403) it logs in once more before
   giving up. The transition is single-flight: one login is on the wire at a time

@@ -29,9 +29,10 @@
 //! `domain.transfer`, `domain.trade` and `domain.restore` may charge the
 //! account; the answers carry `price` and `currency` whenever the API reports
 //! them. A transfer can also come back as `1001` (action pending), which this
-//! crate treats as success — see [`crate::rpc::is_success_code`]. If the registry
-//! instead reports `2300` (`Object pending transfer`) when a transfer is already
-//! in progress, [`InwxClient::transfer_domain`] returns
+//! crate returns as [`Error::Pending`] with the server transaction id — see
+//! [`crate::rpc::classify_code`]. If the registry instead reports `2300`
+//! (`Object pending transfer`) when a transfer is already in progress,
+//! [`InwxClient::transfer_domain`] returns
 //! [`Error::TransferPending`] after the single submission; it never resubmits
 //! the transfer. Poll `domain.info` or the request list for the outcome.
 

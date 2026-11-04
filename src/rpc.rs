@@ -3,8 +3,9 @@
 //! INWX speaks a small, unversioned dialect of JSON-RPC: a `method` plus a
 //! `params` object goes out, a `code` plus an optional `resData` comes back,
 //! and **transport success is not command success** — a rejected command is
-//! still HTTP 200 with a non-`1000` code. [`RpcResponse::into_result`] is the
-//! single place that distinction is made.
+//! still HTTP 200 with a non-`1000` code, and an asynchronous command can answer
+//! with `1001`/`1300`/`1301` before it has completed. [`RpcResponse::into_result`]
+//! is the single place that distinction is made.
 
 use std::fmt;
 
@@ -18,6 +19,53 @@ use crate::types::de;
 /// Result code for "command completed successfully".
 pub const CODE_SUCCESS: i32 = 1000;
 
+/// The documented outcome class of a command result code.
+///
+/// ```
+/// use inwx_client::rpc::{classify_code, ResultCode};
+///
+/// assert_eq!(classify_code(1000), Some(ResultCode::Success));
+/// assert_eq!(classify_code(1001), Some(ResultCode::Pending));
+/// assert_eq!(classify_code(1300), Some(ResultCode::Queued));
+/// assert_eq!(classify_code(2303), None);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResultCode {
+    /// The command completed. `1000` is the usual code, and `1500` closes a
+    /// session successfully.
+    Success,
+    /// The command has been accepted but not completed, such as an
+    /// asynchronous registration or transfer (`1001`).
+    Pending,
+    /// The command entered a message queue (`1300`, `1301`).
+    Queued,
+}
+
+/// Classifies an INWX numeric result code.
+///
+/// `None` means the code is not one of the documented non-error outcomes and
+/// therefore belongs in [`Error::Api`] unless the caller has
+/// another meaning for it.
+///
+/// ```
+/// use inwx_client::rpc::{classify_code, ResultCode};
+///
+/// assert_eq!(classify_code(1000), Some(ResultCode::Success));
+/// assert_eq!(classify_code(1001), Some(ResultCode::Pending));
+/// assert_eq!(classify_code(1301), Some(ResultCode::Queued));
+/// assert_eq!(classify_code(1500), Some(ResultCode::Success));
+/// assert_eq!(classify_code(1501), None);
+/// ```
+#[must_use]
+pub fn classify_code(code: i32) -> Option<ResultCode> {
+    match code {
+        1000 | 1500 => Some(ResultCode::Success),
+        1001 => Some(ResultCode::Pending),
+        1300 | 1301 => Some(ResultCode::Queued),
+        _ => None,
+    }
+}
+
 /// Codes the API uses for a command that did not fail outright.
 ///
 /// `1001` is "action pending" (asynchronous registration or transfer), `1300`
@@ -25,16 +73,20 @@ pub const CODE_SUCCESS: i32 = 1000;
 /// session successfully. Treating only `1000` as success — as a naive client
 /// does — turns a pending registration into an error.
 ///
+/// This predicate only says the code is not an API error. A caller that needs to
+/// know whether the command completed should use [`classify_code`].
+///
 /// ```
 /// use inwx_client::rpc;
 ///
 /// assert!(rpc::is_success_code(1000));
 /// assert!(rpc::is_success_code(1001));
+/// assert!(rpc::is_success_code(1300));
 /// assert!(!rpc::is_success_code(2303));
 /// ```
 #[must_use]
 pub fn is_success_code(code: i32) -> bool {
-    matches!(code, 1000 | 1001 | 1300 | 1301 | 1500)
+    classify_code(code).is_some()
 }
 
 /// One entry of the optional `details` array on an error response.
@@ -264,13 +316,22 @@ impl RpcResponse {
         })
     }
 
-    /// Whether the code is one of the documented success codes.
+    /// Whether the code is one of the documented non-error codes.
+    ///
+    /// This is deliberately wider than "completed": [`classify_code`] says
+    /// whether a code is [`ResultCode::Success`], [`ResultCode::Pending`] or
+    /// [`ResultCode::Queued`].
     ///
     /// ```
+    /// use inwx_client::rpc::{classify_code, ResultCode};
     /// use inwx_client::RpcResponse;
     ///
     /// let pending = RpcResponse::parse(br#"{"code":1001,"msg":"pending"}"#)?;
     /// assert!(pending.is_success());
+    /// assert_eq!(
+    ///     pending.code.and_then(classify_code),
+    ///     Some(ResultCode::Pending)
+    /// );
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     #[must_use]
@@ -322,6 +383,18 @@ impl RpcResponse {
     /// let response = RpcResponse::parse(br#"{"code":1000,"msg":"ok"}"#)?;
     /// assert!(response.into_result()?.is_null());
     ///
+    /// let pending = RpcResponse::parse(
+    ///     br#"{"code":1001,"msg":"action pending","svTRID":"trid-1"}"#,
+    /// )?;
+    /// assert!(matches!(
+    ///     pending.into_result(),
+    ///     Err(Error::Pending {
+    ///         code: 1001,
+    ///         sv_trid: Some(ref trid),
+    ///         ..
+    ///     }) if trid == "trid-1"
+    /// ));
+    ///
     /// let failure = RpcResponse::parse(br#"{"code":2200,"msg":"Authentication error"}"#)?;
     /// assert!(matches!(
     ///     failure.into_result(),
@@ -335,23 +408,30 @@ impl RpcResponse {
     ///
     /// # Errors
     ///
-    /// [`Error::Api`] for a non-success code, or [`Error::Uncertain`] when the
-    /// response does not carry a usable result code.
+    /// [`Error::Pending`] for an accepted but not completed command, carrying
+    /// the `svTRID` when the API sent one. [`Error::Api`] for a rejected
+    /// command, or [`Error::Uncertain`] when the response does not carry a
+    /// usable result code.
     pub fn into_result(self) -> Result<Value> {
-        if self.is_success() {
-            Ok(self.res_data.unwrap_or(Value::Null))
-        } else if let Some(code) = self.code {
-            Err(Error::Api {
-                code,
-                message: self.error_message(),
-                reason_code: self.reason_code,
-                reason: self.reason,
-                details: self.details,
-            })
-        } else {
-            Err(Error::uncertain(
+        match self.code {
+            Some(code) => match classify_code(code) {
+                Some(ResultCode::Success) => Ok(self.res_data.unwrap_or(Value::Null)),
+                Some(ResultCode::Pending | ResultCode::Queued) => Err(Error::Pending {
+                    code,
+                    message: self.error_message(),
+                    sv_trid: self.sv_trid,
+                }),
+                None => Err(Error::Api {
+                    code,
+                    message: self.error_message(),
+                    reason_code: self.reason_code,
+                    reason: self.reason,
+                    details: self.details,
+                }),
+            },
+            None => Err(Error::uncertain(
                 "response envelope carried no usable result code; the command may have been executed",
-            ))
+            )),
         }
     }
 }
@@ -666,12 +746,69 @@ mod tests {
     }
 
     #[test]
-    fn every_documented_success_code_is_success() {
+    fn every_documented_non_error_code_is_classified() {
         for code in [1000, 1001, 1300, 1301, 1500] {
             assert!(is_success_code(code), "{code}");
+            assert!(classify_code(code).is_some(), "{code}");
         }
         for code in [0, 1200, 2003, 2200, 2303] {
             assert!(!is_success_code(code), "{code}");
+            assert_eq!(classify_code(code), None, "{code}");
+        }
+
+        assert_eq!(classify_code(1000), Some(ResultCode::Success));
+        assert_eq!(classify_code(1500), Some(ResultCode::Success));
+        assert_eq!(classify_code(1001), Some(ResultCode::Pending));
+        assert_eq!(classify_code(1300), Some(ResultCode::Queued));
+        assert_eq!(classify_code(1301), Some(ResultCode::Queued));
+    }
+
+    #[test]
+    fn pending_and_queued_codes_are_typed_not_plain_success() {
+        for (code, expected_trid) in [(1001, "trid-1"), (1300, "trid-2"), (1301, "trid-3")] {
+            let body = format!(
+                r#"{{"code":{code},"msg":"accepted","reasonCode":"QUEUED","reason":"later","svTRID":"{expected_trid}","resData":{{"roId":42}}}}"#
+            );
+            let response = RpcResponse::parse(body.as_bytes()).unwrap();
+            assert!(response.is_success(), "{code}");
+
+            let error = response.into_result().unwrap_err();
+            assert!(matches!(
+                error,
+                Error::Pending {
+                    code: actual,
+                    sv_trid: Some(ref trid),
+                    ..
+                } if actual == code && trid == expected_trid
+            ));
+            assert_eq!(error.code(), Some(code));
+            assert!(!error.is_retryable());
+            assert!(!error.is_uncertain());
+            assert!(!error.is_authentication());
+        }
+    }
+
+    #[test]
+    fn completed_codes_still_return_payload_or_null() {
+        let with_payload =
+            RpcResponse::parse(br#"{"code":1000,"msg":"ok","resData":{"id":7},"svTRID":"trid-1"}"#)
+                .unwrap();
+        assert_eq!(with_payload.into_result().unwrap()["id"], 7);
+
+        let no_payload = RpcResponse::parse(br#"{"code":1500,"msg":"logout"}"#).unwrap();
+        assert!(no_payload.into_result().unwrap().is_null());
+    }
+
+    #[test]
+    fn codes_just_outside_the_pending_classes_are_api_errors() {
+        for code in [1002, 1299, 1302, 1501] {
+            let body = format!(r#"{{"code":{code},"msg":"boom"}}"#);
+            let response = RpcResponse::parse(body.as_bytes()).unwrap();
+            assert!(!response.is_success(), "{code}");
+            assert!(matches!(
+                response.into_result(),
+                Err(Error::Api { code: actual, .. }) if actual == code
+            ));
         }
     }
 

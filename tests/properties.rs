@@ -257,8 +257,14 @@ proptest! {
                 );
                 let code = response.code;
                 let result = response.into_result();
-                if code.is_some_and(inwx_client::rpc::is_success_code) {
+                if code.and_then(inwx_client::rpc::classify_code)
+                    == Some(inwx_client::rpc::ResultCode::Success)
+                {
                     prop_assert!(result.is_ok());
+                } else if code.and_then(inwx_client::rpc::classify_code).is_some() {
+                    let is_pending_error =
+                        matches!(result, Err(inwx_client::Error::Pending { .. }));
+                    prop_assert!(is_pending_error);
                 } else if code.is_none() {
                     let is_uncertain_error = matches!(
                         &result,
