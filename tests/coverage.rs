@@ -250,14 +250,17 @@ fn permissive_scalars_cover_their_fallbacks() {
 
 #[test]
 fn zone_error_branches() {
-    // A redirect type without a web target.
+    // A create redirect type without a web target is invalid; an update can
+    // patch only the redirect type and leave `web` absent.
     assert!(ZoneCreate::master(domain("a.de"))
         .unwrap()
         .with_redirect_type(UrlRedirectType::Header301)
         .is_err());
-    assert!(ZoneUpdate::new(domain("a.de"))
+    let type_only = ZoneUpdate::new(domain("a.de"))
         .with_redirect_type(UrlRedirectType::Header301)
-        .is_err());
+        .unwrap();
+    assert_eq!(type_only.params().unwrap()["urlRedirectType"], "HEADER301");
+    assert!(type_only.params().unwrap().get("web").is_none());
 
     // Frame metadata set first, then the type changed away from FRAME.
     let create = ZoneCreate::master(domain("a.de"))
@@ -283,10 +286,16 @@ fn zone_error_branches() {
         .unwrap();
     assert!(update.params().is_err());
 
-    // Frame metadata with no type at all.
-    assert!(ZoneUpdate::new(domain("a.de"))
+    // Frame metadata with no type at all targets the existing FRAME forwarding.
+    let frame_only = ZoneUpdate::new(domain("a.de"))
         .with_frame_title("x")
-        .is_err());
+        .unwrap();
+    assert_eq!(frame_only.params().unwrap()["urlRedirectTitle"], "x");
+    assert!(frame_only
+        .params()
+        .unwrap()
+        .get("urlRedirectType")
+        .is_none());
 
     // The remaining token setters, on the update builder.
     let update = ZoneUpdate::new(domain("a.de"))
