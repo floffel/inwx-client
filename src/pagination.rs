@@ -1,5 +1,5 @@
 //! Automatic pagination for the list commands (`domain.list`, `contact.list`,
-//! `nameserver.list`).
+//! `nameserver.list`, `application.list`).
 //!
 //! Every list command of the INWX API is paged: it takes `page` (1-based) and
 //! `pagelimit`, and answers with the objects of that page plus — usually — a
@@ -103,6 +103,28 @@ pub trait Page: DeserializeOwned + Sized {
     /// Number of objects on this page.
     fn len(&self) -> usize;
 
+    /// Number of rows received on this page, including rows the page could not
+    /// decode into [`Item`](Self::Item).
+    ///
+    /// Most pages have one row per item, so the default is [`Page::len`]. A page
+    /// type that keeps unusable rows in a side channel (see
+    /// [`ZoneListPage::unparsed`](crate::ZoneListPage::unparsed)) can override
+    /// this so the walker sees the full page and does not stop early.
+    ///
+    /// ```
+    /// use inwx_client::{Page, ZoneListPage};
+    ///
+    /// let page: ZoneListPage = serde_json::from_str(
+    ///     r#"{"domains":[{"domain":"a.de"},{"domain":"bad name"}]}"#,
+    /// )?;
+    /// assert_eq!(page.len(), 1);
+    /// assert_eq!(page.received_len(), 2);
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
+    fn received_len(&self) -> usize {
+        self.len()
+    }
+
     /// Whether the page carries nothing.
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -121,8 +143,9 @@ pub trait Page: DeserializeOwned + Sized {
 /// A paged list command: its method name, its filters and its page type.
 ///
 /// Implemented by [`DomainListing`](crate::DomainListing),
-/// [`ContactListing`](crate::ContactListing) and
-/// [`ZoneListing`](crate::ZoneListing).
+/// [`ContactListing`](crate::ContactListing),
+/// [`ZoneListing`](crate::ZoneListing) and
+/// [`ApplicationListing`](crate::ApplicationListing).
 ///
 /// ```
 /// use inwx_client::{ContactListing, ContactQuery, Listing};
@@ -334,10 +357,11 @@ impl Pagination {
 ///
 /// Built by [`InwxClient::list_all_domains`](crate::InwxClient::list_all_domains),
 /// [`InwxClient::list_all_contacts`](crate::InwxClient::list_all_contacts),
-/// [`InwxClient::list_all_zones`](crate::InwxClient::list_all_zones) or, for a
-/// listing of your own, [`Pages::new`]. It borrows the client, so it inherits
-/// the session, the retry policy and the `&self` thread-safety of the client;
-/// nothing is held across an await except the client borrow itself.
+/// [`InwxClient::list_all_zones`](crate::InwxClient::list_all_zones),
+/// [`InwxClient::list_all_applications`](crate::InwxClient::list_all_applications)
+/// or, for a listing of your own, [`Pages::new`]. It borrows the client, so it
+/// inherits the session, the retry policy and the `&self` thread-safety of the
+/// client; nothing is held across an await except the client borrow itself.
 ///
 /// The walk ends at the first of: a page shorter than requested, an empty page,
 /// the `count` the API reports, [`Pagination::with_max_items`],
@@ -496,7 +520,7 @@ impl<'a, T: Transport, L: Listing> Pages<'a, T, L> {
         self.requests_sent += 1;
         self.next_page_number = self.next_page_number.saturating_add(1);
 
-        let received = page.len();
+        let received = page.received_len();
         if let Some(max_items) = self.pagination.max_items {
             let room = max_items.saturating_sub(self.yielded);
             if received > room {

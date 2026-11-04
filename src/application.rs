@@ -29,10 +29,11 @@ use serde_json::{json, Map, Value};
 
 use crate::client::InwxClient;
 use crate::error::{Error, Result};
+use crate::pagination::{self, Listing, Page, Pages, Pagination};
 use crate::transport::Transport;
 use crate::types::{
-    de, parse_rows, validate_country_code, validate_id, validate_page_limit, validate_text,
-    validate_token, validate_upper_token, DomainName,
+    de, validate_country_code, validate_id, validate_page_limit, validate_text, validate_token,
+    validate_upper_token, DomainName,
 };
 
 /// Longest free-text comment this crate sends.
@@ -195,6 +196,114 @@ pub struct Application {
         deserialize_with = "de::opt_string"
     )]
     pub updated_at: Option<String>,
+}
+
+/// One page of `application.list`.
+///
+/// The answer carries the applications on this page plus, usually, a total for
+/// the whole query. Compare that total with the page length, or call
+/// [`ApplicationListPage::has_more`], to tell whether more rows exist than this
+/// page returned. [`InwxClient::list_all_applications`] walks every page.
+///
+/// ```
+/// use inwx_client::ApplicationListPage;
+///
+/// let page: ApplicationListPage = serde_json::from_str(
+///     r#"{"count":51,"application":[{"id":1},{"id":2}]}"#,
+/// )?;
+/// assert_eq!(page.applications.len(), 2);
+/// assert_eq!(page.count, Some(51));
+/// assert!(page.has_more());
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct ApplicationListPage {
+    /// Total number of applications matching the query, when the API reports one.
+    #[serde(default, alias = "total", deserialize_with = "de::opt_i64")]
+    pub count: Option<i64>,
+    /// The applications on this page.
+    #[serde(default, rename = "application", deserialize_with = "de::rows")]
+    pub applications: Vec<Application>,
+}
+
+impl ApplicationListPage {
+    /// Number of applications on this page.
+    ///
+    /// ```
+    /// use inwx_client::ApplicationListPage;
+    /// let page: ApplicationListPage = serde_json::from_str(r#"{"application":[]}"#)?;
+    /// assert_eq!(page.len(), 0);
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.applications.len()
+    }
+
+    /// Whether this page is empty.
+    ///
+    /// ```
+    /// use inwx_client::ApplicationListPage;
+    /// assert!(ApplicationListPage::default().is_empty());
+    /// ```
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.applications.is_empty()
+    }
+
+    /// Whether more pages exist according to this answer's total.
+    ///
+    /// When the API omits a usable `count` or `total`, this is `false`: the
+    /// page itself cannot prove more rows exist. Use
+    /// [`InwxClient::list_all_applications`] when the caller needs every row
+    /// rather than one page.
+    ///
+    /// ```
+    /// use inwx_client::ApplicationListPage;
+    ///
+    /// let page: ApplicationListPage = serde_json::from_str(
+    ///     r#"{"total":51,"application":[{"id":1},{"id":2}]}"#,
+    /// )?;
+    /// assert!(page.has_more());
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
+    #[must_use]
+    pub fn has_more(&self) -> bool {
+        self.count
+            .is_some_and(|count| i64::try_from(self.applications.len()).unwrap_or(i64::MAX) < count)
+    }
+}
+
+/// The page rules [`Pages`] needs to walk `application.list`.
+///
+/// ```
+/// use inwx_client::{ApplicationListPage, Page};
+///
+/// let page: ApplicationListPage = serde_json::from_str(
+///     r#"{"count":51,"application":[{"id":1},{"id":2}]}"#,
+/// )?;
+/// assert_eq!(page.total(), Some(51));
+/// assert_eq!(page.len(), 2);
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+impl Page for ApplicationListPage {
+    type Item = Application;
+
+    fn total(&self) -> Option<i64> {
+        self.count
+    }
+
+    fn len(&self) -> usize {
+        self.applications.len()
+    }
+
+    fn truncate_to(&mut self, len: usize) {
+        self.applications.truncate(len);
+    }
+
+    fn into_items(self) -> Vec<Application> {
+        self.applications
+    }
 }
 
 /// The `application.check` request: what would be filed, without filing it.
@@ -686,6 +795,11 @@ impl ApplicationQuery {
 
     /// The `application.list` parameters.
     ///
+    /// When paging is not set explicitly, this asks for page 1 with a page
+    /// size of 50; compare the returned page's `count` with its length, or use
+    /// [`InwxClient::list_all_applications`], before treating that page as the
+    /// whole listing.
+    ///
     /// # Errors
     ///
     /// Never fails today: every value is validated when it is set, so the
@@ -697,6 +811,10 @@ impl ApplicationQuery {
     /// assert!(ApplicationQuery::new().params().unwrap().is_object());
     /// ```
     pub fn params(&self) -> Result<Value> {
+        Ok(self.param_value())
+    }
+
+    fn param_value(&self) -> Value {
         let mut params = Map::new();
         if let Some(id) = self.application_id {
             params.insert("applicationId".to_owned(), json!(id));
@@ -712,7 +830,67 @@ impl ApplicationQuery {
         }
         params.insert("page".to_owned(), json!(self.page.unwrap_or(1)));
         params.insert("pagelimit".to_owned(), json!(self.limit.unwrap_or(50)));
-        Ok(Value::Object(params))
+        Value::Object(params)
+    }
+}
+
+/// The `application.list` command, ready to be walked page by page with
+/// [`Pages`].
+///
+/// The query's own `page`/`pagelimit` are overridden by the walker — a walk
+/// owns its cursor.
+///
+/// ```
+/// use inwx_client::{ApplicationListing, ApplicationQuery, Listing};
+///
+/// let listing = ApplicationListing::new(ApplicationQuery::new().with_status("pending")?);
+/// assert_eq!(<ApplicationListing as Listing>::METHOD, "application.list");
+/// let params = listing.params(2, 25);
+/// assert_eq!(params["status"], "PENDING");
+/// assert_eq!(params["page"], 2);
+/// assert_eq!(params["pagelimit"], 25);
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApplicationListing {
+    query: ApplicationQuery,
+}
+
+impl ApplicationListing {
+    /// The listing for one query.
+    ///
+    /// ```
+    /// use inwx_client::{ApplicationListing, ApplicationQuery};
+    ///
+    /// let query = ApplicationQuery::new().with_customer_number(123_456)?;
+    /// assert_eq!(ApplicationListing::new(query.clone()).query(), &query);
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn new(query: ApplicationQuery) -> Self {
+        Self { query }
+    }
+
+    /// The query the walk is using.
+    ///
+    /// ```
+    /// use inwx_client::{ApplicationListing, ApplicationQuery};
+    ///
+    /// assert_eq!(ApplicationListing::default().query(), &ApplicationQuery::new());
+    /// ```
+    #[must_use]
+    pub fn query(&self) -> &ApplicationQuery {
+        &self.query
+    }
+}
+
+impl Listing for ApplicationListing {
+    type Page = ApplicationListPage;
+
+    const METHOD: &'static str = "application.list";
+
+    fn params(&self, page: u32, page_size: u32) -> Value {
+        pagination::with_paging(self.query.param_value(), page, page_size)
     }
 }
 
@@ -1006,7 +1184,16 @@ impl<T: Transport> InwxClient<T> {
         serde_json::from_value(data).map_err(Error::from)
     }
 
-    /// Lists applications (`application.list`).
+    /// Lists one page of applications (`application.list`).
+    ///
+    /// The query defaults to page 1 and a 50-row page cap when it does not
+    /// specify paging explicitly. The returned [`ApplicationListPage`] carries
+    /// the applications on this page plus, usually, a `count` for the whole
+    /// query. Compare `count` with the page length, or call
+    /// [`ApplicationListPage::has_more`], to tell whether the query has more
+    /// rows than this page returned. For more than one page use
+    /// [`InwxClient::list_all_applications`], which walks every page until the
+    /// reported total is read.
     ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
@@ -1016,7 +1203,7 @@ impl<T: Transport> InwxClient<T> {
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
     /// let query = ApplicationQuery::new().with_page(1, 50)?;
-    /// for application in client.list_applications(&query).await? {
+    /// for application in client.list_applications(&query).await?.applications {
     ///     println!("{:?} {:?}", application.id, application.status);
     /// }
     /// # Ok(())
@@ -1025,12 +1212,73 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the query carries an invalid id or page size,
-    /// plus the usual transport and API errors.
-    pub async fn list_applications(&self, query: &ApplicationQuery) -> Result<Vec<Application>> {
+    /// The usual transport and API errors. A malformed filter or page size is
+    /// refused when it is set on [`ApplicationQuery`], before this method can
+    /// use the query.
+    pub async fn list_applications(&self, query: &ApplicationQuery) -> Result<ApplicationListPage> {
         let params = query.params()?;
         let data = self.call("application.list", params).await?;
-        Ok(parse_rows(&data, "application"))
+        serde_json::from_value(data).map_err(Error::from)
+    }
+
+    /// Walks every page of applications (`application.list`).
+    ///
+    /// [`InwxClient::list_applications`] answers one page; this is the cursor
+    /// for resellers with more applications than fit into one request. The bound
+    /// in `pagination` decides how far the walk goes, and it is checked before
+    /// the first request.
+    ///
+    /// ```
+    /// # use inwx_client::{
+    /// #     ApplicationQuery, InwxClient, Pagination, Result,
+    /// #     transport::{Request, Response, Transport},
+    /// # };
+    /// # use std::sync::{Arc, Mutex};
+    /// #[derive(Clone)]
+    /// struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+    ///
+    /// impl Transport for Scripted {
+    ///     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    ///         let body = self.0.lock().unwrap().remove(0);
+    ///         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    ///     }
+    /// }
+    ///
+    /// # async fn demo() -> Result<Vec<i64>> {
+    /// let transport = Scripted(Arc::new(Mutex::new(vec![
+    ///     r#"{"code":1000,"msg":"ok","resData":{"count":3,"application":[{"id":1},{"id":2}]}}"#,
+    ///     r#"{"code":1000,"msg":"ok","resData":{"application":[{"id":3}]}}"#,
+    /// ])));
+    /// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+    /// let applications = client
+    ///     .list_all_applications(
+    ///         &ApplicationQuery::new(),
+    ///         &Pagination::new().with_page_size(2)?,
+    ///     )
+    ///     .collect_all()
+    ///     .await?
+    ///     .iter()
+    ///     .filter_map(|application| application.id)
+    ///     .collect();
+    /// # Ok(applications)
+    /// # }
+    /// # assert_eq!(
+    /// #     tokio::runtime::Runtime::new().unwrap().block_on(demo()).unwrap(),
+    /// #     [1, 2, 3]
+    /// # );
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The bound is validated when it is built (see
+    /// [`Pagination::with_page_size`]); the walk itself reports the usual
+    /// transport and API errors.
+    pub fn list_all_applications(
+        &self,
+        query: &ApplicationQuery,
+        pagination: &Pagination,
+    ) -> Pages<'_, T, ApplicationListing> {
+        Pages::new(self, ApplicationListing::new(query.clone()), *pagination)
     }
 
     /// Changes an application (`application.update`).
@@ -1135,5 +1383,54 @@ mod tests {
                 .map(|application_type| application_type.to_string()),
             Some("BRAND_NEW".to_owned())
         );
+    }
+
+    #[test]
+    fn a_list_page_reads_count_and_total_permissively() {
+        let count: ApplicationListPage =
+            serde_json::from_str(r#"{"count":"51","application":[{"id":1}]}"#).unwrap();
+        assert_eq!(count.count, Some(51));
+        assert_eq!(count.len(), 1);
+        assert!(count.has_more());
+
+        let total: ApplicationListPage =
+            serde_json::from_str(r#"{"total":"1","application":[{"id":1}]}"#).unwrap();
+        assert_eq!(total.count, Some(1));
+        assert!(!total.has_more());
+
+        // Just inside and just outside the page length: one row is exactly the
+        // reported total, two rows against a total of one is not "more", and
+        // zero rows with a positive total is still a page with more to fetch.
+        let exactly: ApplicationListPage =
+            serde_json::from_str(r#"{"count":1,"application":[{"id":1},{"id":2}]}"#).unwrap();
+        assert!(!exactly.has_more());
+        let empty: ApplicationListPage =
+            serde_json::from_str(r#"{"count":1,"application":[]}"#).unwrap();
+        assert!(empty.has_more());
+    }
+
+    #[test]
+    fn a_list_page_tolerates_a_single_object_where_the_array_belongs() {
+        let single: ApplicationListPage =
+            serde_json::from_str(r#"{"count":1,"application":{"id":9}}"#).unwrap();
+        assert_eq!(single.len(), 1);
+        assert_eq!(single.applications[0].id, Some(9));
+
+        let null_rows: ApplicationListPage =
+            serde_json::from_str(r#"{"count":1,"application":null}"#).unwrap();
+        assert!(null_rows.is_empty());
+        assert!(null_rows.has_more());
+    }
+
+    #[test]
+    fn the_application_page_implements_the_page_rules() {
+        let mut page: ApplicationListPage =
+            serde_json::from_str(r#"{"count":3,"application":[{"id":1},{"id":2},{"id":3}]}"#)
+                .unwrap();
+        assert_eq!(page.total(), Some(3));
+        assert_eq!(page.len(), 3);
+        page.truncate_to(2);
+        assert_eq!(page.len(), 2);
+        assert_eq!(page.into_items()[1].id, Some(2));
     }
 }

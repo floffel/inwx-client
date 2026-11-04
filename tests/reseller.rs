@@ -10,11 +10,11 @@ mod common;
 
 use common::{client, MockTransport};
 use inwx_client::{
-    ApplicationCheck, ApplicationCreate, ApplicationQuery, ApplicationType, ApplicationUpdate,
-    AuthInfo2Order, ContactVerificationSettingsUpdate, CustomerDownloadQuery, CustomerUpdate,
-    DocumentFormat, DocumentKind, DocumentQuery, DocumentUpload, DocumentUploadOutcome, DomainName,
-    Error, HostCheck, HostCreate, HostQuery, HostUpdate, Hostname, MessageAck, NicHandleQuery,
-    Pagination, PdfRender,
+    ApplicationCheck, ApplicationCreate, ApplicationListPage, ApplicationQuery, ApplicationType,
+    ApplicationUpdate, AuthInfo2Order, ContactVerificationSettingsUpdate, CustomerDownloadQuery,
+    CustomerUpdate, DocumentFormat, DocumentKind, DocumentQuery, DocumentUpload,
+    DocumentUploadOutcome, DomainName, Error, HostCheck, HostCreate, HostQuery, HostUpdate,
+    Hostname, MessageAck, NicHandleQuery, Pagination, PdfRender,
 };
 use serde_json::json;
 
@@ -151,10 +151,11 @@ async fn list_applications_pages_and_reads_rows() {
         .with_page(2, 5)
         .unwrap();
 
-    let applications = client(transport.clone())
+    let page = client(transport.clone())
         .list_applications(&query)
         .await
         .unwrap();
+    let applications = page.applications;
 
     assert_eq!(applications.len(), 2);
     assert_eq!(
@@ -178,11 +179,102 @@ async fn an_empty_application_list_is_a_single_row() {
     let transport = MockTransport::new();
     transport.ok(json!({ "application": { "id": 9 } }));
 
-    let applications = client(transport.clone())
+    let page = client(transport.clone())
         .list_applications(&ApplicationQuery::new())
         .await
         .unwrap();
-    assert_eq!(applications.len(), 1);
+    assert_eq!(page.applications.len(), 1);
+}
+
+#[tokio::test]
+async fn list_applications_reports_truncation_with_count() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "count": 51,
+        "application": [
+            {"id": 1, "status": "PENDING"},
+            {"id": 2, "status": "PENDING"},
+        ],
+    }));
+
+    let page = client(transport.clone())
+        .list_applications(&ApplicationQuery::new().with_page(1, 2).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(page.count, Some(51));
+    assert_eq!(page.len(), 2);
+    assert!(page.has_more());
+    assert_eq!(page.applications[0].id, Some(1));
+}
+
+#[tokio::test]
+async fn an_application_page_without_count_is_not_more_by_itself() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "application": [
+            {"id": 1, "status": "PENDING"},
+            {"id": 2, "status": "PENDING"},
+        ],
+    }));
+
+    let page: ApplicationListPage = client(transport.clone())
+        .list_applications(&ApplicationQuery::new())
+        .await
+        .unwrap();
+
+    assert_eq!(page.count, None);
+    assert_eq!(page.len(), 2);
+    assert!(!page.has_more());
+}
+
+#[tokio::test]
+async fn list_all_applications_fetches_until_the_reported_total() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "count": 3,
+        "application": [
+            {"id": 1, "status": "DONE"},
+            {"id": 2, "status": "PENDING"},
+        ],
+    }));
+    transport.ok(json!({
+        "count": 3,
+        "application": [
+            {"id": 3, "status": "PENDING"},
+        ],
+    }));
+    transport.ok(json!({
+        "count": 3,
+        "application": [
+            {"id": 99, "status": "NEVER-REQUESTED"},
+        ],
+    }));
+
+    let pagination = Pagination::new().with_page_size(2).unwrap();
+    let applications = client(transport.clone())
+        .list_all_applications(
+            &ApplicationQuery::new()
+                .with_customer_number(123_456)
+                .unwrap(),
+            &pagination,
+        )
+        .collect_all()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        applications
+            .iter()
+            .filter_map(|application| application.id)
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].params["customerNumber"], 123_456);
+    assert_eq!(calls[0].params["page"], 1);
+    assert_eq!(calls[1].params["page"], 2);
 }
 
 #[tokio::test]
@@ -1034,6 +1126,34 @@ async fn list_news_pages() {
     assert_eq!(call.method, "news.list");
     assert_eq!(call.params["page"], 1);
     assert_eq!(call.params["pagelimit"], 20);
+}
+
+#[tokio::test]
+async fn an_unparseable_news_row_fails_the_page_instead_of_vanishing() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "news": [
+            { "id": 1, "title": "Maintenance" },
+            { "id": 2, "message": "short", "text": "long" }
+        ]
+    }));
+
+    let error = client(transport)
+        .list_news(2, 20)
+        .await
+        .expect_err("a duplicated alias must not be dropped");
+
+    assert!(matches!(
+        error,
+        Error::UnexpectedAnswer {
+            method: "news.list",
+            field: "news",
+            ..
+        }
+    ));
+    let message = error.to_string();
+    assert!(message.contains("page 2"), "{message}");
+    assert!(message.contains("entry 1"), "{message}");
 }
 
 #[tokio::test]

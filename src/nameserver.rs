@@ -7,7 +7,7 @@
 //! out of scope — see the README — but reachable through
 //! [`InwxClient::call`](crate::InwxClient::call).
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 
 use crate::client::InwxClient;
@@ -129,16 +129,71 @@ pub struct ZoneSummary {
 /// let mixed: ZoneListPage =
 ///     serde_json::from_str(r#"{"count":2,"domains":[{"domain":"example.com"},null]}"#)?;
 /// assert_eq!(mixed.len(), 1);
+/// assert_eq!(mixed.unparsed.len(), 1);
 /// # Ok::<(), serde_json::Error>(())
 /// ```
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ZoneListPage {
     /// Total number of zones matching the filter.
-    #[serde(default, deserialize_with = "de::opt_i64")]
     pub count: Option<i64>,
     /// The zones on this page.
-    #[serde(default, rename = "domains", deserialize_with = "de::rows")]
     pub zones: Vec<ZoneSummary>,
+    /// Raw rows from `domains` that could not be decoded as [`ZoneSummary`].
+    ///
+    /// The row type stays strict: a zone whose name fails [`DomainName`]
+    /// validation, or whose shape does not fit the model, is kept here while
+    /// every decodable zone remains in [`zones`](Self::zones). This is the
+    /// side channel that keeps one bad row from failing the whole page.
+    ///
+    /// ```
+    /// use inwx_client::ZoneListPage;
+    ///
+    /// let page: ZoneListPage = serde_json::from_str(
+    ///     r#"{"count":2,"domains":[{"domain":"bad name"},{"domain":"example.com"}]}"#,
+    /// )?;
+    /// assert_eq!(page.zones.len(), 1);
+    /// assert_eq!(page.unparsed.len(), 1);
+    /// assert_eq!(page.unparsed[0]["domain"], "bad name");
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
+    pub unparsed: Vec<Value>,
+}
+
+impl<'de> Deserialize<'de> for ZoneListPage {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut fields = crate::types::field_map(deserializer)?;
+        let count = fields
+            .remove("count")
+            .as_ref()
+            .and_then(crate::types::opt_i64_value);
+        let (zones, unparsed) = zone_rows(fields.remove("domains"));
+        Ok(Self {
+            count,
+            zones,
+            unparsed,
+        })
+    }
+}
+
+/// Splits a `nameserver.list` row field into decodable zones and raw failures.
+fn zone_rows(value: Option<Value>) -> (Vec<ZoneSummary>, Vec<Value>) {
+    let rows = match value {
+        Some(Value::Array(rows)) => rows,
+        Some(single @ Value::Object(_)) => vec![single],
+        _ => Vec::new(),
+    };
+    let mut zones = Vec::new();
+    let mut unparsed = Vec::new();
+    for row in rows {
+        match serde_json::from_value::<ZoneSummary>(row.clone()) {
+            Ok(zone) => zones.push(zone),
+            Err(_) => unparsed.push(row),
+        }
+    }
+    (zones, unparsed)
 }
 
 impl ZoneListPage {
@@ -218,8 +273,13 @@ impl Page for ZoneListPage {
         self.zones.len()
     }
 
+    fn received_len(&self) -> usize {
+        self.zones.len().saturating_add(self.unparsed.len())
+    }
+
     fn truncate_to(&mut self, len: usize) {
         self.zones.truncate(len);
+        self.unparsed.clear();
     }
 
     fn into_items(self) -> Vec<ZoneSummary> {

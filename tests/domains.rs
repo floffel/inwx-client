@@ -428,6 +428,31 @@ async fn an_uncertain_registry_hold_is_never_replayed() {
     assert_uncertain_after_one_attempt("remove_client_hold", &error, &transport);
 }
 
+/// A transient HTTP status on a hold is the status-side version of the same
+/// rule: the request was written, so the command may already have reached the
+/// registry. It must not be replayed, and the caller gets an uncertain outcome
+/// after exactly one attempt.
+#[tokio::test]
+async fn a_transient_http_status_on_a_registry_hold_is_never_replayed() {
+    let transport = MockTransport::new();
+    transport.status(503, "upstream failed");
+    transport.ok(json!({"roId": 42}));
+    let error = client(transport.clone())
+        .set_client_hold(&SetClientHold::new(domain("a.de")))
+        .await
+        .unwrap_err();
+    assert_uncertain_after_one_attempt("set_client_hold", &error, &transport);
+
+    let transport = MockTransport::new();
+    transport.status(503, "upstream failed");
+    transport.ok(json!({"roId": 42}));
+    let error = client(transport.clone())
+        .remove_client_hold(&RemoveClientHold::new(domain("a.de")))
+        .await
+        .unwrap_err();
+    assert_uncertain_after_one_attempt("remove_client_hold", &error, &transport);
+}
+
 /// The failure happened after the request was written, so exactly one attempt
 /// may have been made — and the scripted success behind it must stay unused.
 fn assert_uncertain_after_one_attempt(label: &str, error: &Error, transport: &MockTransport) {

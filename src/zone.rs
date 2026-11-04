@@ -764,7 +764,9 @@ impl ZoneCreate {
 /// Only the fields that were set are sent; the API leaves the rest alone. There
 /// is deliberately no record parameter: this request cannot delete a DNS
 /// record, and a zone with ten thousand records is not re-uploaded to change one
-/// nameserver.
+/// nameserver. A frame field set without `urlRedirectType` targets the zone's
+/// existing FRAME forwarding, so a title can be patched without reasserting the
+/// web target or redirect type.
 ///
 /// ```
 /// use inwx_client::{DomainName, Hostname, ZoneUpdate};
@@ -957,35 +959,37 @@ impl ZoneUpdate {
 
     /// Sets the web forward type (`urlRedirectType`).
     ///
+    /// The update does not require `web` in the same request: `nameserver.update`
+    /// patches the zone's current forwarding configuration.
+    ///
     /// ```
     /// use inwx_client::{DomainName, UrlRedirectType, ZoneUpdate};
     ///
     /// let update = ZoneUpdate::new(DomainName::parse("a.de")?)
-    ///     .with_web("https://example.net")?
     ///     .with_redirect_type(UrlRedirectType::Header302)?;
-    /// assert_eq!(update.params()?["urlRedirectType"], "HEADER302");
+    /// let params = update.params()?;
+    /// assert_eq!(params["urlRedirectType"], "HEADER302");
+    /// assert!(params.get("web").is_none());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when no web target has been set in this update.
+    /// This setter performs no extra validation; `nameserver.update` resolves the
+    /// redirect type against the zone's current configuration.
     pub fn with_redirect_type(mut self, redirect_type: UrlRedirectType) -> Result<Self> {
-        if self.web.is_none() {
-            return Err(Error::validation(
-                "zone.urlRedirectType",
-                "needs a `web` target in the same update (with_web)",
-            ));
-        }
         self.redirect_type = Some(redirect_type);
         Ok(self)
     }
 
     /// Sets the frame title (`urlRedirectTitle`).
     ///
+    /// When no redirect type is set in this update, this patches the existing
+    /// FRAME forwarding; when one is set, it must be [`UrlRedirectType::Frame`].
+    ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the redirect type is not `FRAME`.
+    /// [`Error::Validation`] when the value is unusable.
     ///
     /// ```
     /// use inwx_client::{DomainName, UrlRedirectType, ZoneUpdate};
@@ -999,7 +1003,6 @@ impl ZoneUpdate {
     /// ```
     pub fn with_frame_title(mut self, title: impl Into<String>) -> Result<Self> {
         let title = title.into();
-        self.require_frame("zone.urlRedirectTitle")?;
         validate_token("zone.urlRedirectTitle", &title)?;
         self.redirect_title = Some(title.trim().to_owned());
         Ok(self)
@@ -1007,9 +1010,12 @@ impl ZoneUpdate {
 
     /// Sets the frame description (`urlRedirectDescription`).
     ///
+    /// When no redirect type is set in this update, this patches the existing
+    /// FRAME forwarding; when one is set, it must be [`UrlRedirectType::Frame`].
+    ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the redirect type is not `FRAME`.
+    /// [`Error::Validation`] when the value is unusable.
     ///
     /// ```
     /// use inwx_client::{DomainName, UrlRedirectType, ZoneUpdate};
@@ -1023,7 +1029,6 @@ impl ZoneUpdate {
     /// ```
     pub fn with_frame_description(mut self, description: impl Into<String>) -> Result<Self> {
         let description = description.into();
-        self.require_frame("zone.urlRedirectDescription")?;
         validate_token("zone.urlRedirectDescription", &description)?;
         self.redirect_description = Some(description.trim().to_owned());
         Ok(self)
@@ -1031,9 +1036,12 @@ impl ZoneUpdate {
 
     /// Sets the frame favicon (`urlRedirectFavIcon`).
     ///
+    /// When no redirect type is set in this update, this patches the existing
+    /// FRAME forwarding; when one is set, it must be [`UrlRedirectType::Frame`].
+    ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the redirect type is not `FRAME`.
+    /// [`Error::Validation`] when the value is unusable.
     ///
     /// ```
     /// use inwx_client::{DomainName, UrlRedirectType, ZoneUpdate};
@@ -1047,7 +1055,6 @@ impl ZoneUpdate {
     /// ```
     pub fn with_frame_favicon(mut self, favicon: impl Into<String>) -> Result<Self> {
         let favicon = favicon.into();
-        self.require_frame("zone.urlRedirectFavIcon")?;
         validate_token("zone.urlRedirectFavIcon", &favicon)?;
         self.redirect_favicon = Some(favicon.trim().to_owned());
         Ok(self)
@@ -1055,9 +1062,12 @@ impl ZoneUpdate {
 
     /// Sets the frame keywords (`urlRedirectKeywords`).
     ///
+    /// When no redirect type is set in this update, this patches the existing
+    /// FRAME forwarding; when one is set, it must be [`UrlRedirectType::Frame`].
+    ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the redirect type is not `FRAME`.
+    /// [`Error::Validation`] when the value is unusable.
     ///
     /// ```
     /// use inwx_client::{DomainName, UrlRedirectType, ZoneUpdate};
@@ -1071,7 +1081,6 @@ impl ZoneUpdate {
     /// ```
     pub fn with_frame_keywords(mut self, keywords: impl Into<String>) -> Result<Self> {
         let keywords = keywords.into();
-        self.require_frame("zone.urlRedirectKeywords")?;
         validate_token("zone.urlRedirectKeywords", &keywords)?;
         self.redirect_keywords = Some(keywords.trim().to_owned());
         Ok(self)
@@ -1096,20 +1105,6 @@ impl ZoneUpdate {
     pub fn dry_run(mut self) -> Self {
         self.testing = true;
         self
-    }
-
-    fn require_frame(&self, field: &'static str) -> Result<()> {
-        match self.redirect_type {
-            Some(UrlRedirectType::Frame) => Ok(()),
-            Some(other) => Err(Error::validation(
-                field,
-                format!("is only used by a FRAME redirect, not {}", other.as_str()),
-            )),
-            None => Err(Error::validation(
-                field,
-                "needs a FRAME redirect type in the same update (with_redirect_type)",
-            )),
-        }
     }
 
     /// The fields this update sets, as `(parameter name, value)` pairs in the
@@ -1202,8 +1197,8 @@ impl ZoneUpdate {
     /// [`Error::Validation`] when nothing was set (an empty update is a
     /// guaranteed `2003`; `dry_run` alone does not count as a change), or when
     /// the update is internally inconsistent — an unknown zone type, a `SLAVE`
-    /// zone without `masterIp`, a `MASTER` zone with one, or a frame field
-    /// without a frame redirect.
+    /// zone without `masterIp`, a `MASTER` zone with one, or a frame field paired
+    /// with a non-FRAME redirect type.
     pub fn params(&self) -> Result<Value> {
         let fields = self.set_fields();
         if fields.is_empty() {
@@ -1237,13 +1232,13 @@ impl ZoneUpdate {
         if fields
             .iter()
             .any(|(name, _)| FRAME_METADATA_FIELDS.contains(name))
-            && !self
+            && self
                 .redirect_type
-                .is_some_and(UrlRedirectType::supports_frame_metadata)
+                .is_some_and(|kind| !kind.supports_frame_metadata())
         {
             return Err(Error::validation(
                 "zone.urlRedirectType",
-                "frame metadata needs a FRAME redirect type",
+                "frame metadata needs a FRAME redirect type or no urlRedirectType",
             ));
         }
         let mut params = Map::new();

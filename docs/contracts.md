@@ -30,24 +30,48 @@ settle. It is modelled as documented and flagged rather than guessed at.
 | Prices | `domain.getPrices`, `domain.getdomainprice` | ch02 §2.9 |
 | Envelope | `{"method":…,"params":…}` / `{"code":…,"resData":…}` | ch02 §1.2, §1.4; codes ch04 |
 
-## 0.2.0 — account (`src/client.rs`)
+## 0.2.0 — account object (`src/account.rs`) — issue #62
 
-Source: <https://account.inwx.com/en/help/apidoc/f/ch02s01.html>
+Source: <https://account.inwx.com/en/help/apidoc/f/ch02s01.html> (ch02 §2.1,
+Tables 2.1–2.17). This section covers the whole `account.*` namespace; the
+0.1.x session row above already covered `account.login`, `account.logout`,
+`account.info` and `account.unlock`.
 
 | Method | Wrapper | Input table | Output table |
 | --- | --- | --- | --- |
-| `account.changepassword` | `change_account_password` | unverified | — |
+| `account.check` | `account_check` → `AccountCheck` | — | §2.1, output `user` `text64` |
+| `account.update` | `AccountUpdate` → `update_account` | §2.1, `account.update` | — |
+| `account.changepassword` | `AccountPasswordChange` → `change_account_password` | §2.1, `account.changepassword` | — |
+| `account.unlock` | `AccountUnlockRequest` → `unlock_account` | §2.1, `account.unlock` | — |
+| `account.list` | `list_subaccounts` → `SubAccountList` | — | §2.1, `account.list` |
+| `account.create` | `SubAccountCreate` → `create_subaccount` | §2.1, `account.create` | §2.1, output `id` `int` |
+| `account.delete` | `delete_subaccounts` → `SubAccountsDeleted` | §2.1, `account.delete` | §2.1, output `countDeleted` `int` |
+| `account.getroles` | `account_roles` → `AccountRoleEntry` | §2.1, optional `accountId` | §2.1, output `roles` array |
+| `account.addrole` | `add_role` | §2.1, `accountId`, `roleId` | — |
+| `account.removerole` | `remove_role` | §2.1, `accountId`, `roleId` | — |
 
-The 0.1.x session row already covers `account.login`, `account.logout`,
-`account.check` and `account.info`; this section exists for the one account
-mutation. The current password is a plain `&str` that the client validates
-through `Password` before it is sent, the new one is a `Password`: a validated,
-redacted, zeroizing newtype with no `Deserialize`. Both secrets go in the
-request body, never in a URL or a header, and the locally cached session cookie
-is dropped afterwards because it was established with a password that no longer
-works. `account.unlock`, an `account.check` wrapper, `account.update`,
-sub-accounts and roles are deliberately out of scope here (issue #76, split of
-#71).
+`account.check` is a session liveness probe: cheap and read-only, so it may be
+replayed after an uncertain failure. `account.update` sends only the fields the
+builder was given and refuses an empty update, so a no-op cannot be sent by
+accident. Every value type validates before the request leaves the process.
+
+`account.changepassword` carries two secrets. Both go in the request body, never
+in a URL or a header. They are `Password` values: validated, redacted from
+`Debug`, zeroizing newtypes; the whole request also redacts itself. The locally
+cached session cookie is dropped after a successful change, because it was
+established with the old password.
+
+`account.list`/`account.create`/`account.delete` manage reseller sub-accounts.
+`SubAccountCreate` validates every documented required field before the wire.
+`account.getroles`/`account.addrole`/`account.removerole` use numeric role ids;
+an id this crate does not know is carried as `AccountRoleId::Other`, so a role
+INWX adds later still round-trips.
+
+Every mutation here is non-idempotent, so an uncertain failure (timeout, reset
+or a transient status after the request was written) surfaces as
+`Error::Uncertain` after a single attempt instead of being replayed. The reads
+(`account.check`, `account.getroles`, `account.list` and `account.info`) are in
+the read-only table and may be replayed.
 ## Pagination (`src/pagination.rs`) — issue #15
 
 The list commands are paged the same way. Sources: ch02 §2.9 (`domain.list`),
@@ -61,8 +85,9 @@ filtered variant; `nameserver.exportlist` is Tables 2.203/2.204):
 | `nameserver.list` | `page`, `pagelimit` | `count` | `domains` array |
 
 `Pages` turns one of those commands into a walk (`list_all_domains`,
-`list_all_contacts`, `list_all_zones`, `list_all_nichandles`, or `Pages::new`
-for a `Listing` of your own). Rules the crate enforces, with the reason:
+`list_all_contacts`, `list_all_zones`, `list_all_nichandles`,
+`list_all_applications`, or `Pages::new` for a `Listing` of your own). Rules the
+crate enforces, with the reason:
 
 - The walk owns the cursor: `page` and `pagelimit` are set by the walker, so a
   query that pins a page cannot fight it. Filters (`domain`, `search`, `status`,
@@ -89,6 +114,11 @@ for a `Listing` of your own). Rules the crate enforces, with the reason:
   page of one handle, and a row that does not fit `Contact` is skipped rather
   than failing the page (issue #114) — the same tolerance the other list answers
   get from `parse_rows`. `count` is read independently of the rows.
+- `nameserver.list` keeps the strict [`ZoneSummary`] row type but does not let
+  one row fail the page: decodable zones stay in `ZoneListPage::zones`, and raw
+  rows that fail [`DomainName`] validation or the row shape stay in
+  `ZoneListPage::unparsed` (issue #140). The page walker counts both sides when
+  deciding whether the answer was a full page.
 - A rejected page is terminal: `Error::Api` is returned as-is and the request is
   not repeated (a list command is idempotent, but retrying a rejected command is
   the client's business, not the walker's). A transport failure is returned too
@@ -457,7 +487,7 @@ Source: <https://account.inwx.com/en/help/apidoc/f/ch02s03.html>
 | `application.create` | `ApplicationCreate` → `create_application` | 2.38 (derived) | 2.39 (derived) |
 | `application.delete` | `delete_application` | 2.40 (derived) | — |
 | `application.info` | `application_info` | 2.41 (derived) | 2.42 (derived) |
-| `application.list` | `ApplicationQuery` → `list_applications` | 2.43 (derived) | 2.44 (derived) |
+| `application.list` | `ApplicationQuery` → `list_applications`; `ApplicationListing` → `list_all_applications` | 2.43 (derived) | 2.44 (derived) |
 | `application.update` | `ApplicationUpdate` → `update_application` | 2.45 (derived) | — |
 
 The section ends where `authinfo2` begins, which is where `certificate` starts
@@ -468,6 +498,13 @@ check needs at least one selector, an update needs at least one changed field,
 `pagelimit` ≥ 1. The application type is not a frozen vocabulary — the list is
 per-account — so it is a validated `[A-Z0-9_.-]` token (`ApplicationType`) that
 upper-cases on the way in and carries anything on the way out.
+
+`list_applications` answers one [`ApplicationListPage`] and reads the answer's
+`count` (or `total`) so the page can say whether it is the whole listing; the
+default query asks for page 1 with a 50-row cap. `list_all_applications` walks
+the pages with the same [`Pagination`] bound as the other list commands, so a
+reseller with more than 50 applications can reach every row instead of silently
+receiving the first page.
 
 ### `authinfo2.*` (`src/authinfo2.rs`)
 
@@ -637,29 +674,27 @@ answer carries a positive `documentId`; anything else on a real upload is
 `Error::Ambiguous` (uncertain, never retried, "list the documents before
 uploading again"), and a `with_testing(true)` request answers `DryRun`.
 
-## Account roles (issue #74, `src/account.rs`)
+## Account roles (`src/account.rs`)
 
-Chapter 2 §2.1 (`account.*`) also covers granting a role to a handle:
+The role methods are part of the `account.*` object and are recorded in the
+`0.2.0 — account object` section above (issue #62). Roles are identified by the
+numeric `roleId` from ch02 §2.1 (`account.getroles`/`addrole`/`removerole`):
 
-| Method | Wrapper | Input table | Output table |
-| --- | --- | --- | --- |
-| `account.getroles` | `account_roles` | not read | not read |
-| `account.addrole` | `add_role` | not read | — |
-| `account.removerole` | `remove_role` | not read | — |
+| Role id | Name |
+| --- | --- |
+| `20000` | Standard |
+| `20001` | Accounting |
+| `20002` | Domain |
+| `20003` | Hosting |
+| `20004` | DNS |
+| `20005` | Authcodes |
 
-**Provenance.** The page could not be fetched in the run that added these three
-methods — it had no network access — so, unlike the sections above, this one
-claims no `Table 2.NNN` number at all. The method names come from the issue; the
-request keys (`handle`, `role`) and the two possible answer keys (`roles`,
-`role`) are the spellings the rest of the API uses and are flagged below.
-
-Local checks: `handle` is a positive id, `role` a non-empty token of at most 255
-characters. The role vocabulary is not treated as frozen — `OWNER`, `ADMIN`,
-`TECH`, `BILLING`, `NONE` become variants and anything else is carried verbatim
-in `AccountRole::Other`, so a role INWX adds later still decodes. Reading is in
-the read-only table and may therefore be replayed after an uncertain failure;
-granting and revoking are not, because replaying them would duplicate a
-permission change, so such an outcome surfaces as `Error::Uncertain`.
+`AccountRoleId::Other` carries any id this crate does not know, so a role INWX
+adds later still round-trips; `AccountRole` remains as a permissive string
+fallback for older callers. Reading is in the read-only table and may be
+replayed after an uncertain failure; granting and revoking are not, because
+replaying them would duplicate a permission change, so such an outcome surfaces
+as `Error::Uncertain`.
 ## 0.2.0 — registry status (`src/domain.rs`)
 Source: <https://account.inwx.com/en/help/apidoc/f/ch02s09.html> — §2.9.16
 (`domain.setClientHold`) and §2.9.19 (`domain.removeClientHold`).
@@ -739,11 +774,9 @@ guess about an endpoint's existence.
 | What `domain.block` blocks | **unverified** | The command is documented as blocking the domain; which registry locks that maps to per TLD, and how it interacts with the `transferLock` flag of `domain.update`, is not stated on the page. The crate treats it as the broader, reversible control (it has `domain.unblock`) and therefore does not require an `Irreversible` acknowledgement for it. |
 | Table numbers of the transfer-lock section | **not read** | Added without network access; unlike the reseller numbers above these were not even derived, because the section covers four methods inside an object whose numbering was already in use (`domain.*` spans 2.120–2.142) and a derived guess would be indistinguishable from a read number. |
 | `extData` per-TLD keys | **documented, not enumerated** | ch03 §3.49 lists the generic keys and then a long TLD-specific list; `ExtData::set` carries any upper-case token. |
-| `account.getroles`/`addrole`/`removerole` tables | **not read** | ch02 §2.1 could not be fetched offline, so this section claims no table number; the method names come from the issue and must be confirmed against the page. |
-| Account role request and answer keys | **unverified** | The request sends `handle` and `role`; the answer is read under `roles` and, if that is absent, under `role`, and the customer field under `customer` or `username`. Every response field is `Option` and unknown keys are ignored, so a different spelling costs a `None`, not a failed parse — but the request keys must be checked against the live page. |
-| Account role vocabulary | **unverified** | `OWNER`/`ADMIN`/`TECH`/`BILLING`/`NONE` are the roles the product describes; the page was not read, so unknown values are carried in `AccountRole::Other` instead of being rejected. |
-| `account.unlock` request and answer | **derived, not read** | The public chapter does not settle the shape, so the request is `{"user": text64}` — the same key and datatype `account.login` uses for a login name — and every answer field (`username`, `state`) is `Option`, ignores unknown keys and accepts snake_case as well as camelCase. Network access was unavailable, so neither key was confirmed against a live page; a wrong response key costs a `None`, but the *request* key must be checked before unlocking is used in production. |
-| `account.changepassword` parameter keys | **unverified** | The account chapter (ch02 §2.1) was not reachable in the run that added the wrapper, so the request sends `password` (the current one) plus `newPassword` (the new one), the spelling `dyndns.changepassword` (Table 2.147) and `password`/`passwordConfirm` elsewhere in the API suggest. The alternative reading — that `password` alone carries the *new* value because the session already proves the old one — cannot be ruled out offline. Check both keys against the live page. A wrong key costs an API error (a change without a new password cannot succeed), never a silent no-op. |
+| `account.getroles`/`addrole`/`removerole` tables | read | ch02 §2.1, Tables 2.1–2.17; the request keys are `accountId` and `roleId`, the answer key is `roles`. |
+| Account role vocabulary | read | The role ids `20000`–`20005` are from ch02 §2.1; `AccountRoleId::Other` carries any id this crate does not know. |
+| `account.unlock` answer | **unverified** | `account.unlock` is documented as an acknowledgement. The crate treats `code == 1000` (with or without `resData`) as done and ignores `resData`; if the API does return data there, nothing is lost — `call` still exposes it. |
 | `account.changepassword` answer | **unverified** | Treated like every other mutation: `code == 1000` means done and `resData` is ignored. If the API does return data there, nothing is lost — `call` still exposes it. |
 
 ## Deliberately not modelled

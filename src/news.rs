@@ -15,12 +15,12 @@
 //! ```
 
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::client::InwxClient;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::transport::Transport;
-use crate::types::{de, parse_rows, validate_page_limit};
+use crate::types::{de, validate_page_limit};
 
 /// One news item.
 ///
@@ -95,18 +95,54 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// [`crate::Error::Validation`] when the page size is zero, plus the usual transport
-    /// and API errors.
+    /// [`crate::Error::Validation`] when the page size is zero,
+    /// [`crate::Error::UnexpectedAnswer`] when the answer carries no `news` list or a
+    /// row cannot be decoded, plus the usual transport and API errors.
     pub async fn list_news(&self, page: u32, limit: u32) -> Result<Vec<NewsItem>> {
         let limit = validate_page_limit(limit)?;
+        let page = page.max(1);
         let data = self
-            .call(
-                "news.list",
-                json!({ "page": page.max(1), "pagelimit": limit }),
-            )
+            .call("news.list", json!({ "page": page, "pagelimit": limit }))
             .await?;
-        Ok(parse_rows(&data, "news"))
+        parse_news_page(&data, page)
     }
+}
+
+/// Decodes one `news.list` page, failing closed on anything the caller must not
+/// confuse with an empty page.
+fn parse_news_page(data: &Value, page: u32) -> Result<Vec<NewsItem>> {
+    let Some(value) = data.get("news") else {
+        return Err(Error::unexpected_answer(
+            "news.list",
+            "news",
+            "expected an array of news items",
+        ));
+    };
+
+    let rows = match value {
+        Value::Array(rows) => rows.as_slice(),
+        single @ Value::Object(_) => std::slice::from_ref(single),
+        _ => {
+            return Err(Error::unexpected_answer(
+                "news.list",
+                "news",
+                "expected an array of news items",
+            ));
+        }
+    };
+
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            serde_json::from_value(row.clone()).map_err(|error| {
+                Error::unexpected_answer(
+                    "news.list",
+                    "news",
+                    format!("page {page}, entry {index} does not parse: {error}"),
+                )
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -124,5 +160,54 @@ mod tests {
         let message: NewsItem = serde_json::from_str(r#"{"id":1,"message":"a"}"#).unwrap();
         let text: NewsItem = serde_json::from_str(r#"{"id":1,"text":"a"}"#).unwrap();
         assert_eq!(message, text);
+    }
+
+    #[test]
+    fn a_news_row_that_does_not_parse_is_reported_with_page_and_index() {
+        let error = parse_news_page(
+            &json!({
+                "news": [
+                    { "id": 1, "title": "Maintenance" },
+                    { "id": 2, "message": "short", "text": "long" }
+                ]
+            }),
+            3,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::UnexpectedAnswer {
+                method: "news.list",
+                field: "news",
+                ..
+            }
+        ));
+        let message = error.to_string();
+        assert!(message.contains("page 3"), "{message}");
+        assert!(message.contains("entry 1"), "{message}");
+    }
+
+    #[test]
+    fn an_absent_or_non_list_news_value_is_reported_instead_of_empty() {
+        for data in [json!({ "count": 0 }), json!({ "news": null })] {
+            let error = parse_news_page(&data, 1).unwrap_err();
+            assert!(matches!(
+                error,
+                Error::UnexpectedAnswer {
+                    method: "news.list",
+                    field: "news",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn an_empty_news_array_is_an_empty_page() {
+        assert_eq!(
+            parse_news_page(&json!({ "news": [] }), 1).unwrap(),
+            Vec::<NewsItem>::new()
+        );
     }
 }
