@@ -378,7 +378,6 @@ async fn thirty_two_tasks_share_one_client_across_the_new_surface() {
                     ))
                     .unwrap()
                     .auth_code(AuthCode::new("aB3-xY9_42").unwrap())
-                    .unwrap()
                     .with_registrant(Handle::new(991).unwrap())
                     .scheduled_at(Timestamp::parse("2026-11-01T03:00:00").unwrap());
                     client.transfer_domain(&request).await.map(|_| ())

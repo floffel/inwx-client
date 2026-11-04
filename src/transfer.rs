@@ -12,7 +12,7 @@
 //!
 //! let intent = Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("example.com")?);
 //! let request = TransferRequest::new(intent)?
-//!     .auth_code(inwx_client::AuthCode::new("aB3-xY9_42")?)?
+//!     .auth_code(inwx_client::AuthCode::new("aB3-xY9_42")?)
 //!     .with_registrant(inwx_client::Handle::new(991)?);
 //! assert_eq!(request.params()?["domain"], "example.com");
 //! # Ok::<(), inwx_client::Error>(())
@@ -295,7 +295,7 @@ impl std::str::FromStr for TransferAnswer {
 /// use inwx_client::ExtData;
 ///
 /// let mut extra = ExtData::new();
-/// extra.no_domain_check(true)?;
+/// extra.no_domain_check(true);
 /// extra.birth_date("1990-05-23")?;
 /// extra.set("SPORTS-ORGANISATION", "sports club")?;
 ///
@@ -327,7 +327,7 @@ impl ExtData {
     /// ```
     /// use inwx_client::ExtData;
     /// let mut extra = ExtData::new();
-    /// extra.no_host_check(false).unwrap();
+    /// extra.no_host_check(false);
     /// assert!(!extra.is_empty());
     /// ```
     #[must_use]
@@ -337,39 +337,27 @@ impl ExtData {
 
     /// Skips the registry's domain check (`NO-DOMAIN-CHECK`).
     ///
-    /// # Errors
-    ///
-    /// Never today; the signature leaves room for per-TLD rules.
-    ///
     /// ```
     /// use inwx_client::ExtData;
     /// let mut extra = ExtData::new();
-    /// extra.no_domain_check(true)?;
+    /// extra.no_domain_check(true);
     /// assert_eq!(extra.params()["NO-DOMAIN-CHECK"], true);
-    /// # Ok::<(), inwx_client::Error>(())
     /// ```
-    pub fn no_domain_check(&mut self, skip: bool) -> Result<()> {
+    pub fn no_domain_check(&mut self, skip: bool) {
         self.entries
             .insert("NO-DOMAIN-CHECK".to_owned(), json!(skip));
-        Ok(())
     }
 
     /// Skips the registry's host check (`NO-HOST-CHECK`).
     ///
-    /// # Errors
-    ///
-    /// Never today; the signature leaves room for per-TLD rules.
-    ///
     /// ```
     /// use inwx_client::ExtData;
     /// let mut extra = ExtData::new();
-    /// extra.no_host_check(true)?;
+    /// extra.no_host_check(true);
     /// assert_eq!(extra.params()["NO-HOST-CHECK"], true);
-    /// # Ok::<(), inwx_client::Error>(())
     /// ```
-    pub fn no_host_check(&mut self, skip: bool) -> Result<()> {
+    pub fn no_host_check(&mut self, skip: bool) {
         self.entries.insert("NO-HOST-CHECK".to_owned(), json!(skip));
-        Ok(())
     }
 
     /// Sets the registrant's birth date (`BIRTH-DATE`, a `date`).
@@ -472,9 +460,8 @@ impl ExtData {
     /// ```
     /// use inwx_client::ExtData;
     /// let mut extra = ExtData::new();
-    /// extra.no_domain_check(true)?;
+    /// extra.no_domain_check(true);
     /// assert_eq!(extra.params().as_object().unwrap().len(), 1);
-    /// # Ok::<(), inwx_client::Error>(())
     /// ```
     #[must_use]
     pub fn params(&self) -> Value {
@@ -553,7 +540,7 @@ pub struct RestoreResult {
 ///     ActionKind::Transfer,
 ///     &DomainName::parse("example.com")?,
 /// ))?
-/// .auth_code(AuthCode::new("aB3-xY9_42")?)?
+/// .auth_code(AuthCode::new("aB3-xY9_42")?)
 /// .with_registrant(Handle::new(991)?)
 /// .with_transfer_lock(false)
 /// .with_period(inwx_client::Period::years(2)?);
@@ -647,23 +634,20 @@ impl TransferRequest {
 
     /// Sets the authorisation code (`authCode`).
     ///
-    /// # Errors
-    ///
-    /// [`Error::Validation`] from [`AuthCode::new`].
-    ///
     /// ```
     /// use inwx_client::{ActionKind, AuthCode, DomainName, Irreversible, TransferRequest};
     ///
     /// let request = TransferRequest::new(
     ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
     /// )?
-    /// .auth_code(AuthCode::new("code-42")?)?;
+    /// .auth_code(AuthCode::new("code-42")?);
     /// assert_eq!(request.params()?["authCode"], "code-42");
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
-    pub fn auth_code(mut self, code: AuthCode) -> Result<Self> {
+    #[must_use]
+    pub fn auth_code(mut self, code: AuthCode) -> Self {
         self.auth_code = Some(code);
-        Ok(self)
+        self
     }
 
     /// Sets the registrant handle for the transferred domain.
@@ -920,7 +904,7 @@ impl TransferRequest {
     /// use inwx_client::{ActionKind, DomainName, ExtData, Irreversible, TransferRequest};
     ///
     /// let mut extra = ExtData::new();
-    /// extra.no_domain_check(true)?;
+    /// extra.no_domain_check(true);
     /// let request = TransferRequest::new(
     ///     Irreversible::acknowledge(ActionKind::Transfer, &DomainName::parse("a.de")?),
     /// )?
@@ -1282,10 +1266,6 @@ impl TradeRequest {
 
     /// Sets the authorisation code some TLDs require for a trade.
     ///
-    /// # Errors
-    ///
-    /// [`Error::Validation`] from [`AuthCode::new`].
-    ///
     /// ```
     /// use inwx_client::{ActionKind, AuthCode, DomainName, Handle, Irreversible, TradeRequest};
     ///
@@ -1293,13 +1273,14 @@ impl TradeRequest {
     ///     Irreversible::acknowledge(ActionKind::Trade, &DomainName::parse("a.de")?),
     /// )?
     /// .with_registrant(Handle::new(1)?)
-    /// .auth_code(AuthCode::new("code-1")?)?;
+    /// .auth_code(AuthCode::new("code-1")?);
     /// assert_eq!(trade.params()?["authCode"], "code-1");
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
-    pub fn auth_code(mut self, code: AuthCode) -> Result<Self> {
+    #[must_use]
+    pub fn auth_code(mut self, code: AuthCode) -> Self {
         self.auth_code = Some(code);
-        Ok(self)
+        self
     }
 
     /// Sets the whois provider.
@@ -1826,7 +1807,7 @@ impl<T: Transport> InwxClient<T> {
     ///     ActionKind::Transfer,
     ///     &DomainName::parse("example.com")?,
     /// ))?
-    /// .auth_code(AuthCode::new("aB3-xY9_42")?)?;
+    /// .auth_code(AuthCode::new("aB3-xY9_42")?);
     /// let outcome = client.transfer_domain(&request).await?;
     /// println!("charged {:?} {}", outcome.price, outcome.currency.unwrap_or_default());
     /// # Ok(())

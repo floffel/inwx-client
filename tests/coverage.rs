@@ -573,7 +573,7 @@ fn transfer_branches() {
     // Extra data keys: too long, and a documented value.
     let mut extra = inwx_client::ExtData::new();
     assert!(extra.set(&"K".repeat(65), "x").is_err());
-    assert!(extra.no_domain_check(false).is_ok());
+    extra.no_domain_check(false);
     assert!(extra.birth_date("2026-02-28").is_ok());
 }
 

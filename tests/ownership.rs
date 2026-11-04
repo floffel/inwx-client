@@ -22,7 +22,6 @@ fn transfer() -> TransferRequest {
     TransferRequest::new(ack(ActionKind::Transfer))
         .unwrap_or_else(|error| panic!("{error}"))
         .auth_code(AuthCode::new("aB3-xY9_42").unwrap())
-        .unwrap()
         .with_registrant(Handle::new(991).unwrap())
         .with_admin(Handle::new(992).unwrap())
         .with_tech(Handle::new(993).unwrap())
@@ -84,8 +83,8 @@ async fn transfer_with_contact_takeover_and_ext_data() {
     transport.ok(json!({ "roId": 1 }));
 
     let mut extra = ExtData::new();
-    extra.no_domain_check(true).unwrap();
-    extra.no_host_check(true).unwrap();
+    extra.no_domain_check(true);
+    extra.no_host_check(true);
     extra.birth_date("1990-05-23").unwrap();
     extra.birth_city("Munich").unwrap();
     extra.set("TRADEMARK", "Example GmbH").unwrap();
@@ -136,7 +135,7 @@ async fn trade_sends_the_new_owner_and_optional_contacts() {
     transport.ok(json!({ "roId": 42, "notifications": ["TECH"] }));
 
     let mut extra = ExtData::new();
-    extra.no_domain_check(false).unwrap();
+    extra.no_domain_check(false);
 
     let request = TradeRequest::new(ack(ActionKind::Trade))
         .unwrap()
@@ -147,7 +146,6 @@ async fn trade_sends_the_new_owner_and_optional_contacts() {
         .with_nameservers(&[Hostname::parse("ns1.example.net").unwrap()])
         .unwrap()
         .auth_code(AuthCode::new("code-1").unwrap())
-        .unwrap()
         .with_whois_provider("Example")
         .unwrap()
         .with_whois_url("https://whois.example.net")
