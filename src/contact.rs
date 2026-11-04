@@ -993,15 +993,65 @@ impl<T: Transport> InwxClient<T> {
     /// # }
     /// ```
     ///
+    /// An answer that names no handle is an error, not an empty handle: every
+    /// field of [`Contact`] is optional, so reading a shape the answer does not
+    /// have would hand back a record with no id, no name and no email and still
+    /// report success.
+    ///
+    /// ```
+    /// # use inwx_client::{Error, InwxClient, Result, transport::{Request, Response, Transport}};
+    /// # use std::sync::{Arc, Mutex};
+    /// # #[derive(Clone)]
+    /// # struct Scripted(Arc<Mutex<Vec<&'static str>>>);
+    /// # impl Transport for Scripted {
+    /// #     async fn execute(&self, _request: Request<'_>) -> Result<Response> {
+    /// #         let body = self.0.lock().unwrap().remove(0);
+    /// #         Ok(Response::new(200, std::iter::empty(), body.as_bytes().to_vec()))
+    /// #     }
+    /// # }
+    /// # async fn demo() -> Result<()> {
+    /// let transport = Scripted(Arc::new(Mutex::new(vec![
+    ///     r#"{"code":1000,"msg":"ok","resData":{"contact":{"roId":991,"name":"Erika"}}}"#,
+    ///     r#"{"code":1000,"msg":"ok","resData":{}}"#,
+    /// ])));
+    /// let client = InwxClient::new(transport).with_session("domrobot=test")?;
+    /// assert_eq!(client.contact_info(991).await?.handle(), Some(991));
+    /// assert!(matches!(
+    ///     client.contact_info(991).await,
+    ///     Err(Error::MissingField { field: "resData.contact", .. })
+    /// ));
+    /// # Ok(())
+    /// # }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(demo()).unwrap();
+    /// ```
+    ///
     /// # Errors
     ///
-    /// The usual transport and API errors.
+    /// [`Error::MissingField`] when the answer names no handle — no `contact`
+    /// object and nothing usable in `resData` itself, or a handle that carries
+    /// neither `roId` nor `id` — plus the usual transport and API errors.
     pub async fn contact_info(&self, id: i64) -> Result<Contact> {
         let data = self
             .call("contact.info", json!({ "id": id, "wide": 0 }))
             .await?;
-        let contact = data.get("contact").cloned().unwrap_or(data);
-        serde_json::from_value(contact).map_err(Error::from)
+        // INWX nests the handle under `contact`, and an answer that carries it
+        // flat in `resData` is read the same way. The fallback therefore applies
+        // only when `contact` is absent or null, and either branch has to end in
+        // a handle with an id: `Contact` has no required field, so an empty or
+        // reshaped answer would otherwise deserialise into an all-`None` handle
+        // and the shape mismatch would be reported as success.
+        let (field, value) = match data.get("contact") {
+            Some(nested) if !nested.is_null() => ("resData.contact.id", nested.clone()),
+            _ => ("resData.contact", data),
+        };
+        let contact: Contact = serde_json::from_value(value).map_err(Error::from)?;
+        if contact.handle().is_none() {
+            return Err(Error::MissingField {
+                method: "contact.info",
+                field,
+            });
+        }
+        Ok(contact)
     }
 
     /// Lists one page of handles (`contact.list`).
