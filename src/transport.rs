@@ -14,7 +14,7 @@
 //! huge answer nor a header that lies about its size can make the process
 //! allocate without limit.
 
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 use serde_json::Value;
 
@@ -36,7 +36,7 @@ use crate::{Error, Result};
 /// assert_eq!(request.header("cookie"), Some("session=abc"));
 /// assert_eq!(request.timeout.unwrap().as_secs(), 5);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Request<'a> {
     /// Absolute URL of the JSON-RPC endpoint.
     pub url: &'a str,
@@ -46,6 +46,27 @@ pub struct Request<'a> {
     pub headers: Vec<(String, String)>,
     /// Per-request timeout; `None` leaves the transport default in place.
     pub timeout: Option<Duration>,
+}
+
+/// `Debug` prints only the destination, header names and body length; header
+/// values such as `Cookie` and the body of an `account.login` call never reach
+/// a log line.
+impl fmt::Debug for Request<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let header_names: Vec<&str> = self
+            .headers
+            .iter()
+            .map(|(name, _value)| name.as_str())
+            .collect();
+        formatter
+            .debug_struct("Request")
+            .field("method", &"POST")
+            .field("url", &self.url)
+            .field("header_names", &header_names)
+            .field("body_len", &self.body.len())
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 impl<'a> Request<'a> {
@@ -134,11 +155,29 @@ impl<'a> Request<'a> {
 /// assert_eq!(response.header("set-cookie"), Some("session=abc; Path=/"));
 /// assert_eq!(response.json().unwrap()["code"], 1000);
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Response {
     status: u16,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
+}
+
+/// `Debug` prints only the status, header names and body length; values such as
+/// `Set-Cookie` and response body bytes never reach a log line.
+impl fmt::Debug for Response {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let header_names: Vec<&str> = self
+            .headers
+            .iter()
+            .map(|(name, _value)| name.as_str())
+            .collect();
+        formatter
+            .debug_struct("Response")
+            .field("status", &self.status)
+            .field("header_names", &header_names)
+            .field("body_len", &self.body.len())
+            .finish()
+    }
 }
 
 impl Response {
