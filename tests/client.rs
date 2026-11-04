@@ -6,7 +6,7 @@ mod common;
 
 use common::{anonymous_client, client, client_without_retries, no_wait, MockTransport, Reply};
 use inwx_client::{
-    transport::{Response, Transport},
+    transport::{Request, Response, Transport},
     DomainListQuery, DomainName, Error, InwxClient, Password, RetryPolicy, UnlockAccount,
 };
 use serde_json::json;
@@ -1078,6 +1078,48 @@ async fn debug_output_hides_the_session_cookie() {
 
     assert!(rendered.contains("authenticated: true"));
     assert!(!rendered.contains("test-session"));
+}
+
+#[test]
+fn request_debug_output_hides_header_values_and_body_bytes() {
+    let body = br#"{"method":"account.login","params":{"pass":"hunter2"}}"#;
+    let request = Request::post_json("https://inwx.test/jsonrpc/", body)
+        .with_header("Cookie", "domrobot=test-session")
+        .with_header("Content-Type", "application/json");
+
+    let rendered = format!("{request:?}");
+
+    assert!(rendered.contains("POST"));
+    assert!(rendered.contains("https://inwx.test/jsonrpc/"));
+    assert!(rendered.contains("Cookie"));
+    assert!(rendered.contains("body_len"));
+    assert!(!rendered.contains("domrobot=test-session"));
+    assert!(!rendered.contains("hunter2"));
+}
+
+#[test]
+fn response_debug_output_hides_header_values_and_body_bytes() {
+    let response = Response::new(
+        200,
+        [
+            (
+                "Set-Cookie".to_owned(),
+                "domrobot=test-session; Path=/".to_owned(),
+            ),
+            ("X-Trace".to_owned(), "trace-secret".to_owned()),
+        ],
+        br#"{"code":1000,"msg":"ok","resData":{"token":"body-secret"}}"#.to_vec(),
+    );
+
+    let rendered = format!("{response:?}");
+
+    assert!(rendered.contains("status"));
+    assert!(rendered.contains("200"));
+    assert!(rendered.contains("set-cookie"));
+    assert!(rendered.contains("body_len"));
+    assert!(!rendered.contains("domrobot=test-session"));
+    assert!(!rendered.contains("trace-secret"));
+    assert!(!rendered.contains("body-secret"));
 }
 
 #[test]
