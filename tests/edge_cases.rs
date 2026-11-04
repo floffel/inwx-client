@@ -415,29 +415,39 @@ fn periods_cover_the_documented_set() {
 
 #[tokio::test]
 async fn a_long_error_body_is_truncated_in_the_http_error() {
-    let transport = MockTransport::new();
-    transport.status(400, &"x".repeat(2000));
+    let cap = inwx_client::MAX_HTTP_BODY_CHARS;
 
-    let client = client(transport);
-    let error = client
+    // Exactly the cap: nothing is dropped, so no marker.
+    let fitting = MockTransport::new();
+    fitting.status(400, &"x".repeat(cap));
+    let body = match client(fitting)
         .list_domains(&DomainListQuery::default())
         .await
-        .unwrap_err();
+        .unwrap_err()
+    {
+        Error::Http { body, .. } => body,
+        other => panic!("unexpected: {other}"),
+    };
+    assert_eq!(body.as_str().chars().count(), cap);
+    assert!(!body.as_str().ends_with("[truncated]"));
 
-    match error {
+    // One character more: cut at the cap, and the cut is visible.
+    let transport = MockTransport::new();
+    transport.status(400, &"x".repeat(cap + 1));
+    let body = match client(transport)
+        .list_domains(&DomainListQuery::default())
+        .await
+        .unwrap_err()
+    {
         Error::Http { status, body, .. } => {
             assert_eq!(status, 400);
-            assert_eq!(
-                body.as_str().chars().count(),
-                inwx_client::MAX_HTTP_BODY_CHARS + " [truncated]".len()
-            );
-            assert!(body
-                .as_str()
-                .starts_with(&"x".repeat(inwx_client::MAX_HTTP_BODY_CHARS)));
-            assert!(body.as_str().ends_with("[truncated]"));
+            body
         }
         other => panic!("unexpected: {other}"),
-    }
+    };
+    assert_eq!(body.as_str().chars().count(), cap + " [truncated]".len());
+    assert!(body.as_str().starts_with(&"x".repeat(cap)));
+    assert!(body.as_str().ends_with("[truncated]"));
 }
 
 /// A `200` with nothing readable in the body is an answer that arrived without

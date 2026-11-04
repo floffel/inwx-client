@@ -381,6 +381,12 @@ pub enum Error {
     /// a character boundary and redacts known secrets before the error ever
     /// exists — `Display` and `Debug` print that same safe text.
     ///
+    /// A body that could not be read as an envelope also keeps *why* it could
+    /// not: the parse failure is kept as the error's `source`, with the
+    /// `serde_json` error below it still carrying the line and column. That is
+    /// what tells "not JSON at all" (a proxy page, a truncated body) from "JSON
+    /// of a shape no envelope has" when the status alone says neither.
+    ///
     /// A transient status is often accompanied by a `Retry-After` header saying
     /// how long the endpoint wants to be left alone. That delay is kept in
     /// `retry_after` and read back through [`Error::retry_after`]: seeing it
@@ -422,9 +428,10 @@ pub enum Error {
         /// crate never sleeps on it, so a caller that waits should cap it
         /// against its own deadline.
         retry_after: Option<Duration>,
-        /// The failure behind the answer, when there was one — a decode or
-        /// framing error from a custom transport, say. `None` for a plain
-        /// non-2xx answer, whose detail is `body`. See [`Error::with_source`].
+        /// The failure behind the answer, when there was one — the parse error
+        /// of a body the client could not read as an envelope, or a decode or
+        /// framing error from a custom transport. `None` for a plain non-2xx
+        /// answer, whose detail is `body`. See [`Error::with_source`].
         #[source]
         source: Option<ErrorSource>,
     },
@@ -1084,6 +1091,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 ///
 /// Long enough for a gateway page or a short INWX complaint, short enough that
 /// a log line stays a log line.
+///
+/// The cut is not the only diagnostic left: the parse failure of the full body
+/// is kept as the error's cause, so where reading stopped is still reported even
+/// when the text kept here ends early.
 ///
 /// ```
 /// use inwx_client::{HttpBody, MAX_HTTP_BODY_CHARS};
