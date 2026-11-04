@@ -215,9 +215,10 @@ async fn restore_sends_the_renewal_mode() {
     let transport = MockTransport::new();
     transport.ok(json!({ "domain": "example.com", "domainAce": "example.com" }));
 
-    let request = RestoreRequest::new(ack(ActionKind::Restore))
-        .unwrap()
-        .with_renewal_mode(RenewalMode::AutoRenew);
+    let request = RestoreRequest::builder(ack(ActionKind::Restore))
+        .with_renewal_mode(RenewalMode::AutoRenew)
+        .build()
+        .unwrap();
     let restored = client(transport.clone())
         .restore_domain(&request)
         .await
@@ -290,7 +291,9 @@ fn a_builder_cannot_be_created_from_the_wrong_intent() {
     assert!(TransferRequest::new(ack(ActionKind::Push)).is_err());
     assert!(TradeRequest::new(ack(ActionKind::Transfer)).is_err());
     assert!(PushRequest::new(ack(ActionKind::Restore)).is_err());
-    assert!(RestoreRequest::new(ack(ActionKind::Push)).is_err());
+    assert!(RestoreRequest::builder(ack(ActionKind::Push))
+        .build()
+        .is_err());
 }
 
 #[test]

@@ -570,13 +570,24 @@ fn transfer_branches() {
     assert!(push.clone().with_target("").is_err());
     assert!(push.with_target("x".repeat(65)).is_err());
 
-    let restore = inwx_client::RestoreRequest::new(Irreversible::acknowledge(
+    let restore = inwx_client::RestoreRequest::builder(Irreversible::acknowledge(
         inwx_client::ActionKind::Restore,
         &domain("a.de"),
     ))
+    .build()
     .unwrap();
     assert_eq!(restore.domain().as_str(), "a.de");
-    assert_eq!(restore.dry_run().params()["testing"], true);
+    assert_eq!(
+        inwx_client::RestoreRequest::builder(Irreversible::acknowledge(
+            inwx_client::ActionKind::Restore,
+            &domain("a.de"),
+        ))
+        .dry_run()
+        .build()
+        .unwrap()
+        .params()["testing"],
+        true
+    );
 
     // Nameserver validation inside the ownership builders.
     assert!(transfer.clone().with_nameservers(&[]).is_err());
