@@ -11,9 +11,9 @@ use inwx_client::{
     AuthInfo2Order, AuthInfo2OrderResult, AuthInfo2PriceQuote, ClientHoldResult, Contact,
     ContactVerificationSettings, Customer, CustomerDownload, DataExport, DnsRecord, DocumentEntry,
     DomainCheck, DomainControlResult, DomainInfo, DomainLog, DomainLogEntry, DomainRule,
-    DomainStat, DomainStats, DownloadedDocument, HostCheckResult, HostRecord, Message, NewsItem,
-    NicHandle, PdfFile, PdfHandle, PolledMessage, RecordType, RpcResponse, TldGroup, TldGroupList,
-    TldRules, ZoneInfo,
+    DomainStat, DomainStats, DownloadedDocument, HostCheckResult, HostRecord, Message, NewsDate,
+    NewsItem, NicHandle, PdfFile, PdfHandle, PolledMessage, RecordType, RpcResponse, TldGroup,
+    TldGroupList, TldRules, ZoneInfo,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -42,6 +42,7 @@ fuzz_target!(|data: &[u8]| {
 
         // The reseller/partner objects (issue #22) decode the same way, and the
         // ones with a base64 body run their decoder too.
+        let _ = serde_json::from_value::<NewsDate>(payload.clone());
         let _ = serde_json::from_value::<Application>(payload.clone());
         let _ = serde_json::from_value::<Vec<Application>>(payload.clone());
         let _ = serde_json::from_value::<ApplicationCheckResult>(payload.clone());

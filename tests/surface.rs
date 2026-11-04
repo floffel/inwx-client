@@ -79,10 +79,9 @@ fn hostname_traits() {
 
 #[test]
 fn period_traits() {
-    assert_eq!(Period::OneMonth.to_string(), "1M");
-    assert_eq!(Period::ONE_MONTH, Period::OneMonth);
+    assert_eq!(Period::ONE_MONTH.to_string(), "1M");
     assert_eq!(Period::years(3).unwrap().to_string(), "3Y");
-    assert_eq!("10Y".parse::<Period>().unwrap(), Period::Years(10));
+    assert_eq!("10Y".parse::<Period>().unwrap(), Period::years(10).unwrap());
     assert!("1m".parse::<Period>().is_ok());
     assert_eq!(
         serde_json::to_string(&Period::years(2).unwrap()).unwrap(),
@@ -287,7 +286,7 @@ fn every_domain_update_setter() {
 
 #[test]
 fn domain_renew_params_and_query_paging() {
-    let renew = DomainRenew::new(domain("a.de"), Period::OneMonth, "2027-01-31").unwrap();
+    let renew = DomainRenew::new(domain("a.de"), Period::ONE_MONTH, "2027-01-31").unwrap();
     assert_eq!(renew.params()["period"], "1M");
 
     let query = DomainListQuery::new()

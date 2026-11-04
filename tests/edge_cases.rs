@@ -441,6 +441,8 @@ fn periods_cover_the_documented_set() {
             format!("{years}Y")
         );
     }
+    assert!(Period::years(0).is_err());
+    assert!(Period::years(1).is_ok());
     assert!(Period::years(11).is_err());
     assert!("12M".parse::<Period>().is_err());
     assert!("1.5Y".parse::<Period>().is_err());
