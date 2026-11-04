@@ -528,7 +528,7 @@ proptest! {
     }
 
     #[test]
-    fn handles_survive_serde(id in 1i64..i64::MAX) {
+    fn handles_survive_serde(id in 1i64..=i64::from(i32::MAX)) {
         let handle = Handle::new(id).unwrap();
         let encoded = serde_json::to_string(&handle).unwrap();
         prop_assert_eq!(&encoded, &id.to_string());
@@ -906,7 +906,8 @@ proptest! {
         prop_assert_eq!(created, (1..=MAX_HOST_ADDRESSES).contains(&count));
     }
 
-    /// Every reseller id parameter accepts exactly the positive numbers.
+    /// Every reseller id parameter accepts exactly the positive numbers in the
+    /// API's documented `int` range.
     #[test]
     fn reseller_ids_must_be_positive(id in i64::MIN..2i64) {
         prop_assert_eq!(MessageAck::new(id).is_ok(), id > 0);
@@ -922,6 +923,17 @@ proptest! {
             NicHandleQuery::new().with_customer_number(id).is_ok(),
             id > 0
         );
+    }
+
+    #[test]
+    fn reseller_ids_must_fit_the_documented_int_range(id in i64::from(i32::MAX) + 1..=i64::MAX) {
+        prop_assert!(MessageAck::new(id).is_err());
+        prop_assert!(HostUpdate::new(id).is_err());
+        prop_assert!(CustomerUpdate::new(id).is_err());
+        prop_assert!(CustomerDownloadQuery::new(id).is_err());
+        prop_assert!(PdfRender::new("invoice", id).is_err());
+        prop_assert!(ApplicationQuery::new().with_id(id).is_err());
+        prop_assert!(NicHandleQuery::new().with_customer_number(id).is_err());
     }
 
     /// The reseller list queries keep the paging contract: the page is
