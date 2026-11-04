@@ -308,6 +308,34 @@ add/rem" (Table 2.236), so the crate refuses the combination instead of letting 
 rename discard the lists. `add`/`rem` are `tagUpdateAdd`/`tagUpdateRem`, i.e.
 `{"domainId": [array_int]}` (ch03 §3.90, §3.91).
 
+## 0.2.0 — push requests (`src/request.rs`, issue #59)
+
+Source: **not read**. The public INWX chapter has no `request.*` page that this
+run could reach, so every shape below is derived from the rest of the API and
+from the push workflow (`domain.push` hands the domain over, the receiving
+account answers it).
+
+| Method | Wrapper | Input | Output |
+| --- | --- | --- | --- |
+| `request.list` | `RequestListing` → `list_requests` / `list_requests_page` / `list_all_requests` | `page`, `pagelimit` | `count`, `requests` array |
+| `request.info` | `request_info` | `id` `int` | one `request` object |
+| `request.accept` | `accept_request` | `id` `int` | one `request` object |
+| `request.deny` | `deny_request` | `id` `int` | one `request` object |
+| `request.cancel` | `cancel_request` | `id` `int` | one `request` object |
+
+State values modelled as `RequestState`: `PENDING`, `ACCEPTED`, `DENIED`,
+`CANCELED` (with `CANCELLED` accepted as a spelling); anything else is carried
+in `RequestState::Other`. Every field of [`RequestEntry`] is `Option`, the row
+reads both the camelCase and snake_case spellings of a renamed key, and a list
+row that does not fit is skipped rather than failing the page — so a wrong
+answer key costs a `None`, not a failed call. The **request** keys (`id`, `page`,
+`pagelimit`) are the same ones the other methods use, applied here; they must be
+checked against the live page before the mutations are used in production.
+
+`request.accept` / `deny` / `cancel` are non-idempotent: a 5xx or a transport
+failure after the request was written is `Error::Uncertain`, and a success whose
+answer carries no readable request is `Error::Ambiguous`. Neither is replayed.
+
 ## 0.2.0 — DynDNS (`src/dyndns.rs`)
 
 Source: <https://account.inwx.com/en/help/apidoc/f/ch02s10.html>

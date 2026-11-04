@@ -18,9 +18,10 @@ use inwx_client::{
     DomainLogEntry, DomainLogQuery, DomainName, DomainPriceQuote, DomainRenew, DomainRule,
     DomainStat, DomainStats, DomainUpdate, Error, ExtraDataRule, Hostname, InwxClient, Language,
     NameserverCheck, Period, PriceChange, PriceList, PriceType, PromoCode, RecordId, RecordSpec,
-    RecordType, RecordUpdate, RemoveClientHold, RenewalMode, RetryPolicy, SetClientHold, TldGroup,
-    TldGroupList, TldPrice, TldRules, TransferCodeUpdate, UnlockAccount, ZoneInfo, ZoneListPage,
-    ZoneSummary, MAX_SUBACCOUNT_USERNAME_LEN,
+    RecordType, RecordUpdate, RemoveClientHold, RenewalMode, RequestEntry, RequestListPage,
+    RequestListing, RequestState, RetryPolicy, SetClientHold, TldGroup, TldGroupList, TldPrice,
+    TldRules, TransferCodeUpdate, UnlockAccount, ZoneInfo, ZoneListPage, ZoneSummary,
+    MAX_SUBACCOUNT_USERNAME_LEN,
 };
 use serde_json::{json, Value};
 
@@ -545,6 +546,13 @@ fn error_helpers_cover_every_branch() {
     assert!(!is_read_only_method("domain.create"));
     assert!(!is_read_only_method(""));
     assert!(!is_read_only_method("   "));
+    // The request namespace sits on both sides of the line: listing and reading
+    // a push request only read, answering one mutates it.
+    assert!(is_read_only_method("request.list"));
+    assert!(is_read_only_method("REQUEST.INFO"));
+    assert!(!is_read_only_method("request.accept"));
+    assert!(!is_read_only_method("request.deny"));
+    assert!(!is_read_only_method("request.cancel"));
     // The transfer/lock controls are mutations and must never be replayed.
     for control in [
         "domain.setAuthInfo",
@@ -631,6 +639,76 @@ fn an_error_cause_survives_the_crate_boundary() {
     );
     assert!(!sized.is_retryable());
     assert!(!sized.is_uncertain());
+}
+
+#[test]
+fn request_namespace_traits_and_accessors() {
+    // RequestState: Display, FromStr, serde both ways, unknown carried.
+    for (text, expected) in [
+        ("PENDING", RequestState::Pending),
+        ("accepted", RequestState::Accepted),
+        ("Denied", RequestState::Denied),
+        ("CANCELLED", RequestState::Canceled),
+    ] {
+        assert_eq!(RequestState::from_str(text).unwrap(), expected);
+        assert_eq!(expected.to_string(), expected.as_str());
+    }
+    let custom = RequestState::Other("FUTURE".into());
+    assert_eq!(custom.as_str(), "FUTURE");
+    assert_eq!(serde_json::to_string(&custom).unwrap(), "\"FUTURE\"");
+    assert_eq!(
+        serde_json::from_str::<RequestState>("\"future\"").unwrap(),
+        custom
+    );
+    assert!(serde_json::from_str::<RequestState>("\"\"").is_err());
+    assert!(RequestState::parse("").is_err());
+
+    // RequestEntry: permissive, both spellings accepted, unknown ignored.
+    let entry: RequestEntry = serde_json::from_str(
+        r#"{"id":"7","domain_name":"example.com","state":"PENDING","type":"TRANSFER",
+            "created_at":"2026-01-01","updatedAt":"2026-01-02","message":"hi",
+            "from":"a","to":"b","unknown":1}"#,
+    )
+    .unwrap();
+    assert_eq!(entry.id, Some(7));
+    assert_eq!(entry.domain.as_deref(), Some("example.com"));
+    assert_eq!(entry.state, Some(RequestState::Pending));
+    assert_eq!(entry.request_type.as_deref(), Some("TRANSFER"));
+    assert_eq!(entry.created.as_deref(), Some("2026-01-01"));
+    assert_eq!(entry.updated.as_deref(), Some("2026-01-02"));
+    assert_eq!(entry.message.as_deref(), Some("hi"));
+    assert_eq!(entry.requester.as_deref(), Some("a"));
+    assert_eq!(entry.target.as_deref(), Some("b"));
+    assert_eq!(RequestEntry::default(), RequestEntry::default());
+
+    // RequestListPage: len/is_empty/has_more and the Page impl.
+    let page: RequestListPage =
+        serde_json::from_str(r#"{"count":2,"requests":{"id":7,"state":"ACCEPTED"}}"#).unwrap();
+    assert_eq!(page.len(), 1);
+    assert!(!page.is_empty());
+    assert!(page.has_more());
+    assert_eq!(inwx_client::Page::total(&page), Some(2));
+    assert_eq!(inwx_client::Page::len(&page), 1);
+    let mut truncated = page.clone();
+    inwx_client::Page::truncate_to(&mut truncated, 0);
+    assert!(truncated.is_empty());
+    assert_eq!(inwx_client::Page::into_items(page).len(), 1);
+
+    // A page without a count cannot claim more.
+    let singular: RequestListPage = serde_json::from_str(r#"{"requests":[{"id":1}]}"#).unwrap();
+    assert!(!singular.has_more());
+    assert!(RequestListPage::default().is_empty());
+
+    // RequestListing: constructor and the Listing contract.
+    assert_eq!(RequestListing::new(), RequestListing);
+    assert_eq!(
+        <RequestListing as inwx_client::Listing>::METHOD,
+        "request.list"
+    );
+    assert_eq!(
+        inwx_client::Listing::params(&RequestListing::new(), 3, 10),
+        serde_json::json!({"page": 3, "pagelimit": 10})
+    );
 }
 
 #[test]

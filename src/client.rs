@@ -1523,6 +1523,8 @@ const READ_ONLY_METHODS: &[&str] = &[
     "nameserver.list",
     "nameserverset.info",
     "nameserverset.list",
+    "request.info",
+    "request.list",
     "tag.info",
     "tag.list",
 ];
