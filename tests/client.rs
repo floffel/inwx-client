@@ -164,6 +164,26 @@ async fn login_without_a_cookie_is_an_authentication_error() {
     }
 }
 
+#[tokio::test]
+async fn login_with_a_non_utf8_cookie_is_an_uncertain_transport_error() {
+    let transport = MockTransport::new();
+    transport.push(Reply::Response(Response::from_header_bytes(
+        200,
+        [("Set-Cookie".to_owned(), vec![0xff, 0xfe])],
+        br#"{"code":1000,"msg":"Login successful"}"#.to_vec(),
+    )));
+
+    let client = anonymous_client(transport.clone());
+    let error = client.login().await.unwrap_err();
+
+    assert!(matches!(error, Error::Uncertain { .. }), "{error:?}");
+    assert!(error.is_uncertain());
+    assert!(!error.is_retryable());
+    assert!(error.to_string().contains("Set-Cookie"), "{error}");
+    assert_eq!(transport.call_count(), 1);
+    assert!(!client.is_authenticated());
+}
+
 /// A login is one transition of one session: a second login would invalidate
 /// the cookie the first one handed out, so an installed session is reused
 /// instead of replaced. Dropping it is what asks for a new one.
