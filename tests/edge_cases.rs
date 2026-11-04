@@ -7,7 +7,7 @@ use common::{client, MockTransport};
 use inwx_client::{
     rpc::RpcResponse, Contact, ContactQuery, ContactRequest, ContactType, Credentials,
     DomainListQuery, DomainName, Error, Hostname, InwxClient, Page, Pagination, Period, RecordId,
-    RecordSpec, RecordType, RecordUpdate, RpcRequest, MAX_TTL,
+    RecordSet, RecordSpec, RecordType, RecordUpdate, RpcRequest, MAX_TTL,
 };
 use serde_json::{json, Value};
 
@@ -216,6 +216,39 @@ fn record_names_cannot_contain_whitespace_or_control_characters() {
     assert!(RecordSpec::txt("with\ttab", "x").is_err());
     assert!(RecordSpec::txt("with\nnewline", "x").is_err());
     assert!(RecordSpec::txt("@", "control\u{0}char").is_err());
+}
+
+#[test]
+fn record_name_and_content_are_sent_as_their_trimmed_values() {
+    let spec = RecordSpec::txt("  www  ", "  v=spf1 -all  ").unwrap();
+    assert_eq!(spec.name(), "www");
+    assert_eq!(spec.content(), "v=spf1 -all");
+    assert_eq!(spec.params()["name"], "www");
+    assert_eq!(spec.params()["content"], "v=spf1 -all");
+
+    let update = RecordUpdate::new([RecordId::from_number(1)])
+        .name("  api  ")
+        .content("  v=spf1 -all  ");
+    let params = update.params().unwrap();
+    assert_eq!(params["name"], "api");
+    assert_eq!(params["content"], "v=spf1 -all");
+}
+
+#[test]
+fn record_trimming_happens_before_limits_and_duplicate_checks() {
+    let at_limit = format!("  {}  ", "x".repeat(1024));
+    let over_limit = format!("  {}  ", "x".repeat(1025));
+    assert!(RecordSpec::txt("@", at_limit).is_ok());
+    assert!(RecordSpec::txt("@", over_limit).is_err());
+
+    let mut set = RecordSet::new().unwrap();
+    set.push(RecordSpec::a("  www  ", " 203.0.113.7 ").unwrap())
+        .unwrap();
+    assert!(RecordSet::from_records(vec![
+        RecordSpec::a("  www  ", " 203.0.113.7 ").unwrap(),
+        RecordSpec::a("www", "203.0.113.7").unwrap(),
+    ])
+    .is_err());
 }
 
 #[test]
