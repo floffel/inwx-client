@@ -1117,7 +1117,7 @@ async fn debug_output_hides_the_session_cookie() {
 
 #[test]
 fn request_debug_output_hides_header_values_and_body_bytes() {
-    let body = br#"{"method":"account.login","params":{"pass":"hunter2"}}"#;
+    let body = br#"{"method":"account.login","params":{"pass":"hunter2"}}"#.to_vec();
     let request = Request::post_json("https://inwx.test/jsonrpc/", body)
         .with_header("Cookie", "domrobot=test-session")
         .with_header("Content-Type", "application/json");

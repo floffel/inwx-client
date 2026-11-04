@@ -403,8 +403,8 @@ fn contact_validation_covers_every_optional_length() {
 
 #[test]
 fn transport_request_accessors() {
-    let body = b"{}";
-    let request = Request::post_json("https://example.test/jsonrpc/", body)
+    let body = b"{}".to_vec();
+    let request = Request::post_json("https://example.test/jsonrpc/", body.clone())
         .with_header("Content-Type", "application/json")
         .with_header("Cookie", "a=b")
         .with_timeout(Some(std::time::Duration::from_secs(3)));

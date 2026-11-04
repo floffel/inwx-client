@@ -65,7 +65,7 @@
 //!
 //! impl Transport for Scripted {
 //!     async fn execute(&self, request: Request<'_>) -> Result<Response> {
-//!         let method = serde_json::from_slice::<Value>(request.body)
+//!         let method = serde_json::from_slice::<Value>(&request.body)
 //!             .ok()
 //!             .and_then(|body| body.get("method")?.as_str().map(str::to_owned));
 //!         let (headers, payload) = match method.as_deref() {

@@ -1202,7 +1202,7 @@ impl<T: Transport> InwxClient<T> {
         let body = RpcRequest::from_map(method, params).to_bytes()?;
 
         let cookie = self.session.cookie();
-        let mut request = Request::post_json(&self.base_url, &body)
+        let mut request = Request::post_json(&self.base_url, body)
             .with_header("Content-Type", "application/json")
             .with_header("Accept", "application/json")
             .with_header(
