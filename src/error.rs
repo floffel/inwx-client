@@ -290,6 +290,44 @@ pub enum Error {
         detail: String,
     },
 
+    /// A successful response described a different zone than the one that was
+    /// requested.
+    ///
+    /// The answer parsed, but it names another repository object than the one
+    /// the caller asked for. A misrouted or cached answer must not be reported
+    /// as the requested zone, because records read from it would otherwise drive
+    /// writes against the wrong zone.
+    ///
+    /// This is terminal, not retryable: replaying the same read would only make
+    /// the same mismatch visible again.
+    ///
+    /// ```
+    /// use inwx_client::Error;
+    ///
+    /// let err = Error::zone_mismatch(
+    ///     "nameserver.info",
+    ///     "domain",
+    ///     "example.com",
+    ///     "example.net",
+    /// );
+    /// assert!(matches!(err, Error::ZoneMismatch { .. }));
+    /// assert!(!err.is_retryable());
+    /// assert!(!err.is_uncertain());
+    /// ```
+    #[error(
+        "response for `{method}` has a mismatched `{field}`: expected `{expected}`, got `{actual}`"
+    )]
+    ZoneMismatch {
+        /// The method that was called.
+        method: &'static str,
+        /// The field that identified the object, for example `domain`.
+        field: &'static str,
+        /// The object the caller requested.
+        expected: String,
+        /// The object named by the answer.
+        actual: String,
+    },
+
     /// The command ran and its answer carried no error, yet the answer does not
     /// name the result the caller needs: a `document.upload` that came back
     /// without a usable `documentId`, for example.
@@ -617,6 +655,34 @@ impl Error {
             method,
             field,
             detail: detail.into(),
+        }
+    }
+
+    /// Builds an [`Error::ZoneMismatch`] for an answer that parsed into a
+    /// different zone than the caller requested.
+    ///
+    /// ```
+    /// use inwx_client::Error;
+    ///
+    /// let err = Error::zone_mismatch("nameserver.info", "domain", "a.de", "b.de");
+    /// assert_eq!(
+    ///     err.to_string(),
+    ///     "response for `nameserver.info` has a mismatched `domain`: expected `a.de`, got `b.de`",
+    /// );
+    /// assert!(!err.is_retryable());
+    /// ```
+    #[must_use]
+    pub fn zone_mismatch(
+        method: &'static str,
+        field: &'static str,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) -> Self {
+        Self::ZoneMismatch {
+            method,
+            field,
+            expected: expected.into(),
+            actual: actual.into(),
         }
     }
 
