@@ -10,6 +10,7 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
+use serde::de::DeserializeOwned;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{json, Map, Value};
@@ -1282,15 +1283,24 @@ impl<T: Transport> InwxClient<T> {
     /// request never completed, [`Error::Json`] for a payload that does not fit
     /// the model, [`Error::Undecodable`] for a `2xx` answer that cannot be read
     /// at all — that one is uncertain, the record may have been written.
+    ///
+    /// [`Error::UnexpectedAnswer`] when the answer carries no `record` array, a
+    /// `record` of another shape, or an entry that does not parse. A missing or
+    /// unreadable list is never reported as an empty zone: [`replace_record`]
+    /// built on that reading would delete nothing and leave the old record in
+    /// place.
+    ///
+    /// [`replace_record`]: InwxClient::replace_record
     pub async fn list_records(&self, zone: &DomainName) -> Result<Vec<DnsRecord>> {
         let data = self
             .call("nameserver.info", json!({ "domain": zone.as_str() }))
             .await?;
-        let records = data
-            .get("record")
-            .cloned()
-            .unwrap_or(Value::Array(Vec::new()));
-        Ok(serde_json::from_value(records).unwrap_or_default())
+        decode_answer_rows(
+            &data,
+            "nameserver.info",
+            "record",
+            "expected an array with one entry per record in the zone",
+        )
     }
 
     /// Creates one record via `nameserver.createRecord` and returns its id.
@@ -1492,6 +1502,43 @@ impl<T: Transport> InwxClient<T> {
         }
         self.create_record(zone, spec).await
     }
+}
+
+/// Decodes the rows of a `nameserver.info` answer, failing closed.
+///
+/// [`InwxClient::replace_record`] follows this read with
+/// [`InwxClient::delete_record`]: it deletes the records it sees and then writes
+/// the replacement. An answer that carried no list, or a list whose rows do not
+/// parse, therefore cannot be read as "no records" — that reading deletes
+/// nothing and leaves the record it was meant to replace in place.
+///
+/// So a missing or non-array `record` is [`Error::UnexpectedAnswer`] (the shape
+/// was renamed, or the answer carries nothing), and a row that does not parse
+/// fails the whole call naming its index instead of vanishing from the vector. A
+/// present but empty array stays `Ok`: an empty zone is a documented answer, and
+/// the caller can tell it apart from a broken one.
+fn decode_answer_rows<T: DeserializeOwned>(
+    data: &Value,
+    method: &'static str,
+    field: &'static str,
+    expected: &'static str,
+) -> Result<Vec<T>> {
+    let Some(Value::Array(entries)) = data.get(field) else {
+        return Err(Error::unexpected_answer(method, field, expected));
+    };
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            serde_json::from_value(entry.clone()).map_err(|error| {
+                Error::unexpected_answer(
+                    method,
+                    field,
+                    format!("entry {index} does not parse: {error}"),
+                )
+            })
+        })
+        .collect()
 }
 
 /// Adds the zone reference to an already built parameter object.
