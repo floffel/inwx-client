@@ -141,10 +141,11 @@ fn seed(
 /// `ContactType`, `PriceType`.
 ///
 /// Most rows are mechanical once two rules are understood: `RenewalMode` and
-/// `ContactType` carry unknown values verbatim (trimmed, ASCII-upper-cased), so
-/// they accept almost everything non-empty; `Period` and `PriceType` are closed
-/// sets and refuse the rest. That is exactly the asymmetry the fuzz target relies
-/// on to reach both paths with one input.
+/// `ContactType` carry unknown values as checked tokens (trimmed, ASCII-upper-
+/// cased, at most 255 characters, no control characters), so they accept
+/// everything safe and non-empty; `Period` and `PriceType` are closed sets and
+/// refuse the rest. That is exactly the asymmetry the fuzz target relies on to
+/// reach both paths with one input.
 fn seeds() -> Vec<Seed> {
     let mut seeds = degenerate_seeds();
     seeds.extend(period_tokens());
@@ -193,21 +194,22 @@ fn degenerate_seeds() -> Vec<Seed> {
             bad("contact.type"),
             bad("pricetype"),
         ),
-        // A zero width space is *not* whitespace: the carry types keep it.
+        // A zero width space is not whitespace, but it is not a valid token
+        // character either, so the carry types refuse it.
         seed(
             "zero_width_space.txt",
             "\u{200b}".as_bytes(),
             bad("period"),
-            ok("\u{200b}"),
-            ok("\u{200b}"),
+            bad("renewalMode"),
+            bad("contact.type"),
             bad("pricetype"),
         ),
         seed(
             "nul.txt",
             "\0".as_bytes(),
             bad("period"),
-            ok("\0"),
-            ok("\0"),
+            bad("renewalMode"),
+            bad("contact.type"),
             bad("pricetype"),
         ),
         // Not UTF-8; the fuzz target feeds the lossy conversion, U+FFFD A U+FFFD.
@@ -215,16 +217,16 @@ fn degenerate_seeds() -> Vec<Seed> {
             "invalid_utf8.bin",
             b"\xffA\xfe",
             bad("period"),
-            ok("\u{fffd}A\u{fffd}"),
-            ok("\u{fffd}A\u{fffd}"),
+            bad("renewalMode"),
+            bad("contact.type"),
             bad("pricetype"),
         ),
         seed(
             "replacement_char.txt",
             "\u{fffd}".as_bytes(),
             bad("period"),
-            ok("\u{fffd}"),
-            ok("\u{fffd}"),
+            bad("renewalMode"),
+            bad("contact.type"),
             bad("pricetype"),
         ),
     ]
@@ -339,8 +341,8 @@ fn period_out_of_range() -> Vec<Seed> {
             "period_plus_1Y.txt",
             b"+1Y",
             ok("1Y"),
-            ok("+1Y"),
-            ok("+1Y"),
+            bad("renewalMode"),
+            bad("contact.type"),
             bad("pricetype"),
         ),
         seed(
@@ -379,25 +381,26 @@ fn period_noise() -> Vec<Seed> {
             "period_inner_space.txt",
             b"1 Y",
             bad("period"),
-            ok("1 Y"),
-            ok("1 Y"),
+            bad("renewalMode"),
+            bad("contact.type"),
             bad("pricetype"),
         ),
         seed(
             "period_nul_inner.bin",
             b"1\x00Y",
             bad("period"),
-            ok("1\0Y"),
-            ok("1\0Y"),
+            bad("renewalMode"),
+            bad("contact.type"),
             bad("pricetype"),
         ),
-        // A fullwidth `Ｙ` is not the ASCII unit suffix, and is not trimmed.
+        // A fullwidth `Ｙ` is not the ASCII unit suffix, and is not a token
+        // character either.
         seed(
             "period_fullwidth_unit.txt",
             "1\u{ff39}".as_bytes(),
             bad("period"),
-            ok("1\u{ff39}"),
-            ok("1\u{ff39}"),
+            bad("renewalMode"),
+            bad("contact.type"),
             bad("pricetype"),
         ),
         seed(
@@ -421,8 +424,8 @@ fn period_noise() -> Vec<Seed> {
             "period_huge_digits.txt",
             huge_digits().as_bytes(),
             bad("period"),
-            ok(&huge_digits()),
-            ok(&huge_digits()),
+            bad("renewalMode"),
+            bad("contact.type"),
             bad("pricetype"),
         ),
     ]
@@ -476,27 +479,26 @@ fn renewal_modes() -> Vec<Seed> {
             "renewal_nul_inner.bin",
             b"AUTO\x00RENEW",
             bad("period"),
-            ok("AUTO\0RENEW"),
-            ok("AUTO\0RENEW"),
+            bad("renewalMode"),
+            bad("contact.type"),
             bad("pricetype"),
         ),
-        // Normalisation is ASCII-only: a soft hyphen survives, untouched.
+        // A soft hyphen is not a valid token character.
         seed(
             "renewal_soft_hyphen.txt",
             "auto\u{ad}renew".as_bytes(),
             bad("period"),
-            ok("AUTO\u{ad}RENEW"),
-            ok("AUTO\u{ad}RENEW"),
+            bad("renewalMode"),
+            bad("contact.type"),
             bad("pricetype"),
         ),
-        // No length cap on a carried value — pinned so a future limit is a
-        // deliberate change rather than a surprise.
+        // Checked unknowns have the same `token255` bound as other wire tokens.
         seed(
             "renewal_long_token.txt",
             &[b'R'; 1000],
             bad("period"),
-            ok(&"R".repeat(1000)),
-            ok(&"R".repeat(1000)),
+            bad("renewalMode"),
+            bad("contact.type"),
             bad("pricetype"),
         ),
     ]
@@ -537,13 +539,13 @@ fn contact_types() -> Vec<Seed> {
             ok("TRUSTEE"),
             bad("pricetype"),
         ),
-        // `ß` has no ASCII upper-case form, so it is carried as it stands.
+        // `ß` has no ASCII upper-case form, and is not a token character.
         seed(
             "contact_german_sharp_s.txt",
             "stra\u{df}e".as_bytes(),
             bad("period"),
-            ok("STRA\u{df}E"),
-            ok("STRA\u{df}E"),
+            bad("renewalMode"),
+            bad("contact.type"),
             bad("pricetype"),
         ),
     ]
@@ -614,8 +616,8 @@ fn price_types() -> Vec<Seed> {
             "price_reg_spaced.txt",
             b"R E G",
             bad("period"),
-            ok("R E G"),
-            ok("R E G"),
+            bad("renewalMode"),
+            bad("contact.type"),
             bad("pricetype"),
         ),
     ]
@@ -836,10 +838,9 @@ fn renewal_mode_boundary_pair() {
     }
     // The shortest accepted value is one character; the shortest refused one is
     // nothing but whitespace.
-    assert_eq!(
-        "x".parse::<RenewalMode>().unwrap(),
-        RenewalMode::Other("X".into())
-    );
+    let shortest = "x".parse::<RenewalMode>().unwrap();
+    assert!(matches!(shortest, RenewalMode::Other(_)));
+    assert_eq!(shortest.to_string(), "X");
     assert!("".parse::<RenewalMode>().is_err());
     assert!("  ".parse::<RenewalMode>().is_err());
     // NBSP counts as whitespace, so a lone NBSP is empty input.
@@ -858,16 +859,18 @@ fn contact_type_boundary_pair() {
     assert_eq!(ContactType::parse("OrG").unwrap(), ContactType::Org);
     assert_eq!(ContactType::parse("person").unwrap(), ContactType::Person);
     assert_eq!(ContactType::parse("\nrole\r\n").unwrap(), ContactType::Role);
+    let shortest = ContactType::parse("T").unwrap();
+    assert!(matches!(shortest, ContactType::Other(_)));
     assert_eq!(
-        ContactType::parse("T").unwrap(),
-        ContactType::Other("T".into()),
+        shortest.to_string(),
+        "T",
         "one character is the shortest accepted value"
     );
     assert!(ContactType::parse("").unwrap_err().is_validation());
     assert!(ContactType::parse(" ").is_err());
     assert_eq!(
         ContactType::parse(" trustee ").unwrap(),
-        ContactType::Other("TRUSTEE".into())
+        ContactType::parse("TRUSTEE").unwrap()
     );
     assert_eq!(
         "org".parse::<ContactType>().unwrap(),

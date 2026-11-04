@@ -46,8 +46,10 @@ fuzz_target!(|data: &[u8]| {
     }
     if let Ok(rules) = serde_json::from_value::<Vec<ExtraDataRule>>(payload.clone()) {
         for rule in rules {
-            let _ = rule.price_type();
-            let _ = rule.is_text();
+            let _ = rule.as_str();
+            let _ = rule.name();
+            let _ = rule.value();
+            let _ = rule.is_empty();
         }
     }
     for key in ["promo", "promos", "pricechange", "pricechanges"] {
@@ -58,13 +60,16 @@ fuzz_target!(|data: &[u8]| {
     }
     if let Ok(promos) = serde_json::from_value::<Vec<PromoCode>>(payload.clone()) {
         for promo in promos {
+            let _ = promo.normalised_tld();
             let _ = promo.price_type();
+            let _ = promo.period.as_deref();
         }
     }
     if let Ok(changes) = serde_json::from_value::<Vec<PriceChange>>(payload.clone()) {
         for change in changes {
-            let _ = change.price_type();
-            let _ = change.is_increase();
+            let _ = change.tld.as_deref();
+            let _ = change.change_date.as_deref();
+            let _ = change.is_past;
         }
     }
 });

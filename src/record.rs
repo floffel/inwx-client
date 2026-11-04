@@ -778,8 +778,8 @@ impl RecordSpec {
     }
 }
 
-/// Validates the content of a record against its type.
-fn validate_content(record_type: &RecordType, content: &str) -> Result<()> {
+/// Validates the content checks that do not depend on the record type.
+fn validate_content_base(content: &str) -> Result<&str> {
     let trimmed = content.trim();
     if trimmed.is_empty() {
         return Err(Error::validation("record.content", "must not be empty"));
@@ -791,6 +791,23 @@ fn validate_content(record_type: &RecordType, content: &str) -> Result<()> {
         ));
     }
     reject_control_chars("record.content", trimmed)?;
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        return Err(Error::validation(
+            "record.content",
+            "must not be wrapped in quotes (INWX stores the value verbatim)",
+        ));
+    }
+    Ok(trimmed)
+}
+
+/// Validates the content of a record against its type.
+fn validate_content(record_type: &RecordType, content: &str) -> Result<()> {
+    let trimmed = validate_content_base(content)?;
+    validate_content_type(record_type, trimmed)
+}
+
+/// Validates the content checks that depend on the record type.
+fn validate_content_type(record_type: &RecordType, trimmed: &str) -> Result<()> {
     match record_type {
         RecordType::A => trimmed.parse::<Ipv4Addr>().map(|_| ()).map_err(|_| {
             Error::validation(
@@ -804,18 +821,7 @@ fn validate_content(record_type: &RecordType, content: &str) -> Result<()> {
                 format!("{trimmed:?} is not an IPv6 address (an A record carries IPv4)"),
             )
         }),
-        RecordType::Txt => {
-            // INWX stores `content` verbatim; a value copied out of a zone file
-            // arrives wrapped in presentation quotes, and publishing those
-            // quotes breaks DKIM/SPF lookups in a way that is hard to see.
-            if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
-                return Err(Error::validation(
-                    "record.content",
-                    "must not be wrapped in quotes (INWX stores the value verbatim)",
-                ));
-            }
-            Ok(())
-        }
+        RecordType::Txt => Ok(()),
         other if other.requires_hostname() => {
             if trimmed.parse::<std::net::IpAddr>().is_ok() {
                 return Err(Error::validation(
@@ -1239,8 +1245,9 @@ impl RecordUpdate {
             );
         }
         if let Some(content) = &self.content {
+            let trimmed = validate_content_base(content)?;
             if let Some(record_type) = &self.record_type {
-                validate_content(record_type, content)?;
+                validate_content_type(record_type, trimmed)?;
             }
             params.insert("content".to_owned(), Value::String(content.clone()));
         }
@@ -1655,11 +1662,17 @@ mod tests {
     }
 
     #[test]
-    fn update_validates_content_only_with_a_type() {
-        let update = RecordUpdate::new([RecordId::from_number(1)])
+    fn update_validates_content_with_or_without_a_type() {
+        let with_type = RecordUpdate::new([RecordId::from_number(1)])
             .record_type(RecordType::A)
             .content("nope");
-        assert!(update.params().is_err());
+        assert!(with_type.params().is_err());
+
+        let without_type = RecordUpdate::new([RecordId::from_number(1)]).content("nope");
+        assert!(without_type.params().is_ok());
+
+        let quoted = RecordUpdate::new([RecordId::from_number(1)]).content("\"v=spf1 -all\"");
+        assert!(quoted.params().is_err());
     }
 
     #[test]

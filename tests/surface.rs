@@ -101,7 +101,7 @@ fn renewal_mode_traits() {
         assert_eq!(RenewalMode::from_str(text).unwrap(), expected);
         assert_eq!(expected.to_string(), expected.as_str());
     }
-    let custom = RenewalMode::Other("MANUAL".into());
+    let custom = "manual".parse::<RenewalMode>().unwrap();
     assert_eq!(custom.to_string(), "MANUAL");
     assert_eq!(serde_json::to_string(&custom).unwrap(), "\"MANUAL\"");
     let parsed: RenewalMode = serde_json::from_str("\"AUTODELETE\"").unwrap();
@@ -114,11 +114,14 @@ fn contact_type_traits() {
     assert_eq!(ContactType::Org.to_string(), "ORG");
     assert_eq!(ContactType::Role.to_string(), "ROLE");
     assert_eq!(ContactType::Person.to_string(), "PERSON");
-    assert_eq!(ContactType::Other("TRUSTEE".into()).to_string(), "TRUSTEE");
+    assert_eq!(
+        ContactType::parse("TRUSTEE").unwrap().to_string(),
+        "TRUSTEE"
+    );
     assert_eq!(ContactType::from_str("role").unwrap(), ContactType::Role);
     assert_eq!(serde_json::to_string(&ContactType::Org).unwrap(), "\"ORG\"");
     let parsed: ContactType = serde_json::from_str("\"trustee\"").unwrap();
-    assert_eq!(parsed, ContactType::Other("TRUSTEE".into()));
+    assert_eq!(parsed, ContactType::parse("TRUSTEE").unwrap());
     assert!(ContactType::parse("").is_err());
     assert!(serde_json::from_str::<ContactType>("\"\"").is_err());
 }
@@ -211,7 +214,7 @@ fn every_record_update_setter() {
     assert_eq!(params["prio"], 3);
     assert_eq!(params["id"], json!(["1", "2"]));
 
-    // A name-only change is enough; content is not re-validated without a type.
+    // A name-only change is enough.
     let rename = RecordUpdate::new([RecordId::from_number(1)]).name("api");
     assert!(rename.params().is_ok());
 
@@ -403,8 +406,8 @@ fn contact_validation_covers_every_optional_length() {
 
 #[test]
 fn transport_request_accessors() {
-    let body = b"{}";
-    let request = Request::post_json("https://example.test/jsonrpc/", body)
+    let body = b"{}".to_vec();
+    let request = Request::post_json("https://example.test/jsonrpc/", body.clone())
         .with_header("Content-Type", "application/json")
         .with_header("Cookie", "a=b")
         .with_timeout(Some(std::time::Duration::from_secs(3)));
@@ -823,18 +826,19 @@ fn response_payload_types_are_constructible_and_comparable() {
     assert!(quote.price.is_none());
 
     let rule = ExtraDataRule::default();
-    assert!(rule.key.is_none());
-    assert_eq!(rule.price_type(), None);
-    assert!(!rule.is_text());
+    assert_eq!(rule.as_str(), "");
+    assert!(rule.is_empty());
+    assert_eq!(rule.name(), None);
 
     let promo = PromoCode::default();
-    assert!(promo.code.is_none());
-    assert_eq!(promo.price_type(), None);
+    assert!(promo.tld.is_none());
+    assert!(promo.price.is_none());
+    assert_eq!(promo.normalised_tld(), None);
 
     let change = PriceChange::default();
     assert!(change.tld.is_none());
-    assert_eq!(change.price_type(), None);
-    assert_eq!(change.is_increase(), None);
+    assert!(change.change_date.is_none());
+    assert!(!change.is_past);
 
     let contact = Contact::default();
     assert!(contact.handle().is_none());

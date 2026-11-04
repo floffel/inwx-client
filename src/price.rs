@@ -1,6 +1,6 @@
 //! Prices: `domain.getPrices`, `domain.getalldomainprices`,
-//! `domain.getdomainprice`, `domain.getextradatarules`, `domain.getpromos` and
-//! `domain.pricechanges`.
+//! `domain.getdomainprice`, `domain.getextradatarules`, `domain.getPromos` and
+//! `domain.priceChanges`.
 //!
 //! Prices are `float` on the wire and are kept as `f64` here: they are quotes to
 //! display and compare, not amounts to sum. For anything that charges money, use
@@ -15,12 +15,11 @@
 
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use std::cmp::Ordering;
 
 use crate::client::InwxClient;
 use crate::error::{Error, Result};
 use crate::transport::Transport;
-use crate::types::{de, parse_rows, validate_page_limit, DomainName, Period, PriceType};
+use crate::types::{de, parse_rows, validate_text, DomainName, Period, PriceType};
 
 /// One TLD's price list, from `domain.getPrices` or
 /// `domain.getalldomainprices`.
@@ -41,7 +40,7 @@ use crate::types::{de, parse_rows, validate_page_limit, DomainName, Period, Pric
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct TldPrice {
     /// Top level domain, without the dot.
-    #[serde(default)]
+    #[serde(default, alias = "domain")]
     pub tld: String,
     /// Currency of every amount in this entry.
     #[serde(default, deserialize_with = "de::opt_string")]
@@ -51,6 +50,8 @@ pub struct TldPrice {
         default,
         rename = "createPrice",
         alias = "create_price",
+        alias = "regPrice",
+        alias = "reg_price",
         alias = "create",
         deserialize_with = "de::opt_f64"
     )]
@@ -127,6 +128,63 @@ pub struct TldPrice {
     /// Applied VAT rate, when `vat` was requested.
     #[serde(default, deserialize_with = "de::opt_f64")]
     pub vat: Option<f64>,
+    /// Monthly registration price.
+    #[serde(
+        default,
+        rename = "monthlyCreatePrice",
+        alias = "monthly_create_price",
+        deserialize_with = "de::opt_f64"
+    )]
+    pub monthly_create: Option<f64>,
+    /// Monthly renewal price.
+    #[serde(
+        default,
+        rename = "monthlyRenewalPrice",
+        alias = "monthly_renewal_price",
+        deserialize_with = "de::opt_f64"
+    )]
+    pub monthly_renewal: Option<f64>,
+    /// Monthly trustee price.
+    #[serde(
+        default,
+        rename = "monthlyTrusteePrice",
+        alias = "monthly_trustee_price",
+        deserialize_with = "de::opt_f64"
+    )]
+    pub monthly_trustee: Option<f64>,
+    /// Restore price.
+    #[serde(
+        default,
+        rename = "restorePrice",
+        alias = "restore_price",
+        deserialize_with = "de::opt_f64"
+    )]
+    pub restore: Option<f64>,
+    /// Whether the quoted price is a premium price.
+    #[serde(default, deserialize_with = "de::opt_bool")]
+    pub premium: Option<bool>,
+    /// Whether the quoted price is a promo price.
+    #[serde(default, deserialize_with = "de::opt_bool")]
+    pub promo: Option<bool>,
+    /// Promo price.
+    #[serde(
+        default,
+        rename = "promoPrice",
+        alias = "promo_price",
+        deserialize_with = "de::opt_f64"
+    )]
+    pub promo_price: Option<f64>,
+    /// Promo action type, as it arrived.
+    #[serde(
+        default,
+        rename = "promoType",
+        alias = "promo_type",
+        deserialize_with = "de::opt_string"
+    )]
+    pub promo_type: Option<String>,
+    /// Period the quoted price applies to.
+    #[serde(default, deserialize_with = "de::opt_string")]
+    pub period: Option<String>,
 }
 
 /// The price table, as returned by `domain.getPrices` and by
@@ -176,8 +234,7 @@ impl PriceList {
     }
 
     /// Whether the answer is only part of the table, comparing the number of
-    /// entries to `count`. Only `domain.getalldomainprices` pages, so only that
-    /// answer carries a `count` that can make this true.
+    /// entries to `count`, when the API reports one.
     ///
     /// ```
     /// use inwx_client::PriceList;
@@ -250,12 +307,6 @@ pub struct DomainPriceQuote {
     pub premium: Option<bool>,
 }
 
-/// The typed view of an order-type field: `None` for a value this crate does
-/// not know — which is why the raw text stays on the struct next to it.
-fn typed_order(raw: Option<&str>) -> Option<PriceType> {
-    raw.and_then(|raw| raw.parse().ok())
-}
-
 /// The TLD list as the API wants it: trimmed, without the leading dot,
 /// lower-cased, blanks dropped. An empty list means "everything" and is then
 /// left out of the request.
@@ -264,6 +315,11 @@ fn normalise_tlds(tlds: &[&str]) -> Vec<String> {
         .map(|tld| tld.trim().trim_start_matches('.').to_ascii_lowercase())
         .filter(|tld| !tld.is_empty())
         .collect()
+}
+
+/// One TLD as a normalized string: trimmed, without a leading dot, lower-cased.
+fn normalise_tld_value(tld: &str) -> String {
+    tld.trim().trim_start_matches('.').to_ascii_lowercase()
 }
 
 /// One optional TLD filter. Unlike the list, an empty filter is refused: the
@@ -280,244 +336,266 @@ fn normalise_tld(tld: Option<&str>) -> Result<Option<String>> {
     Ok(Some(tld))
 }
 
-/// Rows of a list answer whose key the documentation does not settle: the first
-/// candidate that carries rows wins, and an empty answer is empty under every
-/// spelling.
-fn parse_any_rows<T: serde::de::DeserializeOwned>(data: &Value, keys: &[&str]) -> Vec<T> {
-    keys.iter()
-        .find_map(|key| {
-            let rows = parse_rows::<T>(data, key);
-            if rows.is_empty() {
-                None
-            } else {
-                Some(rows)
-            }
-        })
-        .unwrap_or_default()
+/// A `textNN` request field that is optional: absent is fine, present has to be
+/// non-empty and within the documented length.
+fn normalise_optional_text<'a>(
+    field: &'static str,
+    value: Option<&'a str>,
+    max: usize,
+) -> Result<Option<&'a str>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    validate_text(field, trimmed, max)?;
+    Ok(Some(trimmed))
 }
 
-/// Extra data an order for a TLD has to carry
-/// (`domain.getextradatarules`).
-///
-/// These are the registry-specific fields — a membership number, a VAT ID, a
-/// trade register entry — that `domain.create` and `domain.update` must send
-/// besides the contact handles. [`ExtraDataRule::required`] says which of them
-/// the order is refused without.
-///
-/// ```
-/// use inwx_client::{ExtraDataRule, PriceType};
-///
-/// let rule: ExtraDataRule = serde_json::from_str(
-///     r#"{"tld":"de","key":"X_FN_INDUSTRY","label":"Industry","type":"select",
-///         "required":1,"orderType":"reg","values":["retail","craft"],"pattern":"^.{2,}$"}"#,
-/// )?;
-/// assert_eq!(rule.key.as_deref(), Some("X_FN_INDUSTRY"));
-/// assert_eq!(rule.required, Some(true));
-/// assert_eq!(rule.field_type.as_deref(), Some("select"));
-/// assert_eq!(rule.price_type(), Some(PriceType::Reg));
-/// # Ok::<(), serde_json::Error>(())
-/// ```
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-pub struct ExtraDataRule {
-    /// TLD the rule belongs to.
-    #[serde(default, deserialize_with = "de::opt_string")]
-    pub tld: Option<String>,
-    /// Field handle, exactly as `domain.create` must send it.
-    #[serde(default, deserialize_with = "de::opt_string")]
-    pub key: Option<String>,
-    /// Label to show the customer.
-    #[serde(default, deserialize_with = "de::opt_string")]
-    pub label: Option<String>,
-    /// Longer description of what the field is for.
-    #[serde(default, deserialize_with = "de::opt_string")]
-    pub description: Option<String>,
-    /// Whether the order fails without this field.
-    #[serde(default, deserialize_with = "de::opt_bool")]
-    pub required: Option<bool>,
-    /// Control type: `text`, `select`, `checkbox`, …
-    #[serde(
-        default,
-        rename = "type",
-        alias = "fieldType",
-        alias = "field_type",
-        deserialize_with = "de::opt_string"
-    )]
-    pub field_type: Option<String>,
-    /// Fixed values, for a `select` rule.
-    #[serde(default, deserialize_with = "de::vec_string")]
-    pub values: Vec<String>,
-    /// Pre-filled value, when the registry ships one.
-    #[serde(default, deserialize_with = "de::opt_string")]
-    pub default: Option<String>,
-    /// Regular expression the value has to match.
-    #[serde(default, deserialize_with = "de::opt_string")]
-    pub pattern: Option<String>,
-    /// Order the rule applies to, as it arrived; `reg`, `renewal`, … or a
-    /// spelling this crate does not know.
-    #[serde(
-        default,
-        rename = "orderType",
-        alias = "order_type",
-        alias = "order",
-        alias = "pricetype",
-        deserialize_with = "de::opt_string"
-    )]
-    pub order_type: Option<String>,
-    /// Billing period the rule is quoted for, in years.
-    #[serde(default, deserialize_with = "de::opt_i64")]
-    pub period: Option<i64>,
+/// The two parameters INWX uses for a [`Period`]: a number and `Y` or `M`.
+fn period_parts(period: Period) -> (u8, &'static str) {
+    match period {
+        Period::OneMonth => (1, "M"),
+        Period::Years(years) => (years, "Y"),
+    }
 }
+
+/// Extra-data rules are documented as `array_text255`: an array of strings, one
+/// string, or nothing.
+fn parse_rule_rows(data: &Value) -> Vec<ExtraDataRule> {
+    for key in ["rules", "extradata", "extradataRules"] {
+        match data.get(key) {
+            Some(Value::Array(rows)) => {
+                return rows
+                    .iter()
+                    .filter_map(|row| row.as_str().map(ExtraDataRule::from))
+                    .collect();
+            }
+            Some(Value::String(rule)) => return vec![ExtraDataRule::from(rule.clone())],
+            _ => {}
+        }
+    }
+    Vec::new()
+}
+
+/// The rows under a key, marking every row when it belongs to the past array.
+fn parse_price_changes(data: &Value, key: &str, is_past: bool) -> Vec<PriceChange> {
+    parse_rows::<PriceChange>(data, key)
+        .into_iter()
+        .map(|mut change| {
+            change.is_past = is_past;
+            change
+        })
+        .collect()
+}
+
+/// One extra-data rule returned by `domain.getextradatarules`.
+///
+/// INWX documents the answer as a list of `text255` rule strings, not as a
+/// structured rule object. The text is kept verbatim and also split into the
+/// `name`/`value` pair that the rule syntax uses when it has one.
+///
+/// ```
+/// use inwx_client::ExtraDataRule;
+///
+/// let rule = ExtraDataRule::from("X_FN_INDUSTRY=retail");
+/// assert_eq!(rule.as_str(), "X_FN_INDUSTRY=retail");
+/// assert_eq!(rule.name(), Some("X_FN_INDUSTRY"));
+/// assert_eq!(rule.value(), Some("retail"));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExtraDataRule(String);
 
 impl ExtraDataRule {
-    /// [`Self::order_type`] as a [`PriceType`], or `None` for a value this
-    /// crate does not know — the raw text stays in `order_type` either way.
-    ///
-    /// ```
-    /// use inwx_client::{ExtraDataRule, PriceType};
-    ///
-    /// let known: ExtraDataRule = serde_json::from_str(r#"{"orderType":"TRANSFER"}"#)?;
-    /// assert_eq!(known.price_type(), Some(PriceType::Transfer));
-    /// let unknown: ExtraDataRule = serde_json::from_str(r#"{"orderType":"refund"}"#)?;
-    /// assert_eq!(unknown.price_type(), None);
-    /// assert_eq!(unknown.order_type.as_deref(), Some("refund"));
-    /// # Ok::<(), serde_json::Error>(())
-    /// ```
-    #[must_use]
-    pub fn price_type(&self) -> Option<PriceType> {
-        typed_order(self.order_type.as_deref())
-    }
-
-    /// Whether the rule is one of the free-text kind, which is the common case
-    /// and the one that needs a `pattern` check before submitting.
+    /// The rule text exactly as the API returned it.
     ///
     /// ```
     /// use inwx_client::ExtraDataRule;
     ///
-    /// let text: ExtraDataRule = serde_json::from_str(r#"{"type":"text"}"#)?;
-    /// assert!(text.is_text());
-    /// let select: ExtraDataRule = serde_json::from_str(r#"{"type":"select"}"#)?;
-    /// assert!(!select.is_text());
-    /// # Ok::<(), serde_json::Error>(())
+    /// let rule = ExtraDataRule::from("X_FN_VAT");
+    /// assert_eq!(rule.as_str(), "X_FN_VAT");
     /// ```
     #[must_use]
-    pub fn is_text(&self) -> bool {
-        self.field_type
-            .as_deref()
-            .is_some_and(|kind| kind.eq_ignore_ascii_case("text"))
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The part before the first `=`, when the rule carries one.
+    ///
+    /// ```
+    /// use inwx_client::ExtraDataRule;
+    ///
+    /// assert_eq!(ExtraDataRule::from("X_FN_VAT=DE123").name(), Some("X_FN_VAT"));
+    /// assert_eq!(ExtraDataRule::from("REQUIRED").name(), None);
+    /// ```
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.0.trim().split_once('=').map(|(name, _)| name.trim())
+    }
+
+    /// The part after the first `=`, when the rule carries one.
+    ///
+    /// ```
+    /// use inwx_client::ExtraDataRule;
+    ///
+    /// assert_eq!(ExtraDataRule::from("X_FN_VAT=DE123").value(), Some("DE123"));
+    /// assert_eq!(ExtraDataRule::from("REQUIRED").value(), None);
+    /// ```
+    #[must_use]
+    pub fn value(&self) -> Option<&str> {
+        self.0.trim().split_once('=').map(|(_, value)| value.trim())
+    }
+
+    /// Whether the rule text is empty after trimming.
+    ///
+    /// ```
+    /// use inwx_client::ExtraDataRule;
+    ///
+    /// assert!(ExtraDataRule::from("  ").is_empty());
+    /// assert!(!ExtraDataRule::from("X_FN_VAT").is_empty());
+    /// ```
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.trim().is_empty()
     }
 }
 
-/// A promo or voucher code (`domain.getpromos`).
+impl From<&str> for ExtraDataRule {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+impl From<String> for ExtraDataRule {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl std::fmt::Display for ExtraDataRule {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for ExtraDataRule {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(Self(raw))
+    }
+}
+
+/// A promo price (`domain.getPromos`).
 ///
 /// ```
 /// use inwx_client::PromoCode;
 ///
 /// let promo: PromoCode = serde_json::from_str(
-///     r#"{"code":"SPRING26","description":".de for one euro","price":"1.00",
-///         "currency":"EUR","tld":["de","eu"],"validFrom":"2026-01-01",
-///         "validUntil":"2026-03-31","period":1}"#,
+///     r#"{"tld":"de","netPrice":"1.00","currency":"EUR",
+///         "endTime":"2026-03-31T23:59:59"}"#,
 /// )?;
-/// assert_eq!(promo.code.as_deref(), Some("SPRING26"));
+/// assert_eq!(promo.tld.as_deref(), Some("de"));
 /// assert_eq!(promo.price, Some(1.0));
-/// assert_eq!(promo.tlds.len(), 2);
-/// assert_eq!(promo.valid_until.as_deref(), Some("2026-03-31"));
+/// assert_eq!(promo.currency.as_deref(), Some("EUR"));
 /// # Ok::<(), serde_json::Error>(())
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct PromoCode {
-    /// The code, as it is passed to an order.
+    /// The TLD the promo applies to.
+    #[serde(default, deserialize_with = "de::opt_string")]
+    pub tld: Option<String>,
+    /// The promo code, when the API maps a code to the price.
+    #[serde(default, rename = "code", deserialize_with = "de::opt_string")]
+    pub code: Option<String>,
+    /// Net promotional price.
     #[serde(
         default,
-        rename = "promoCode",
-        alias = "promo_code",
-        alias = "code",
-        deserialize_with = "de::opt_string"
+        rename = "netPrice",
+        alias = "net_price",
+        alias = "price",
+        deserialize_with = "de::opt_f64"
     )]
-    pub code: Option<String>,
-    /// What the promo is worth, in words.
-    #[serde(default, deserialize_with = "de::opt_string")]
-    pub description: Option<String>,
-    /// Fixed price the code sets, when it sets one.
-    #[serde(default, deserialize_with = "de::opt_f64")]
     pub price: Option<f64>,
-    /// Discount share, when the code is a percentage instead.
-    #[serde(default, deserialize_with = "de::opt_f64")]
-    pub discount: Option<f64>,
-    /// Currency of `price`.
+    /// Currency of the net price.
     #[serde(default, deserialize_with = "de::opt_string")]
     pub currency: Option<String>,
-    /// TLDs the code can be spent on.
+    /// End time of the promo, as text.
     #[serde(
         default,
-        rename = "tld",
-        alias = "tlds",
-        deserialize_with = "de::vec_string"
-    )]
-    pub tlds: Vec<String>,
-    /// First day it is valid, as text.
-    #[serde(
-        default,
-        rename = "validFrom",
-        alias = "valid_from",
-        deserialize_with = "de::opt_string"
-    )]
-    pub valid_from: Option<String>,
-    /// Last day it is valid, as text.
-    #[serde(
-        default,
-        rename = "validUntil",
+        rename = "endTime",
+        alias = "end_time",
+        alias = "validUntil",
         alias = "valid_until",
         deserialize_with = "de::opt_string"
     )]
-    pub valid_until: Option<String>,
-    /// Order the code applies to, as it arrived.
+    pub end_time: Option<String>,
+    /// Order type the promo applies to, as it arrived.
     #[serde(
         default,
-        rename = "orderType",
+        rename = "promoType",
+        alias = "promo_type",
+        alias = "orderType",
         alias = "order_type",
         alias = "order",
-        alias = "pricetype",
         deserialize_with = "de::opt_string"
     )]
     pub order_type: Option<String>,
-    /// Number of years the code covers.
-    #[serde(default, deserialize_with = "de::opt_i64")]
-    pub period: Option<i64>,
+    /// Billing period the promo applies to, when reported.
+    #[serde(default, deserialize_with = "de::opt_string")]
+    pub period: Option<String>,
 }
 
 impl PromoCode {
-    /// [`Self::order_type`] as a [`PriceType`], or `None` for a value this
-    /// crate does not know.
+    /// The promo TLD without a leading dot, lower-cased.
+    ///
+    /// ```
+    /// use inwx_client::PromoCode;
+    ///
+    /// let promo: PromoCode = serde_json::from_str(r#"{"tld":".DE"}"#)?;
+    /// assert_eq!(promo.normalised_tld().as_deref(), Some("de"));
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
+    #[must_use]
+    pub fn normalised_tld(&self) -> Option<String> {
+        self.tld.as_deref().map(normalise_tld_value)
+    }
+
+    /// [`Self::order_type`] as a [`PriceType`], or `None` when absent or not
+    /// one of the documented order types.
     ///
     /// ```
     /// use inwx_client::{PriceType, PromoCode};
     ///
-    /// let promo: PromoCode = serde_json::from_str(r#"{"orderType":"renewal"}"#)?;
-    /// assert_eq!(promo.price_type(), Some(PriceType::Renewal));
+    /// let promo: PromoCode = serde_json::from_str(r#"{"promoType":"REG"}"#)?;
+    /// assert_eq!(promo.price_type(), Some(PriceType::Reg));
+    /// let unknown: PromoCode = serde_json::from_str(r#"{"promoType":"gift"}"#)?;
+    /// assert_eq!(unknown.price_type(), None);
+    /// assert_eq!(unknown.order_type.as_deref(), Some("gift"));
     /// # Ok::<(), serde_json::Error>(())
     /// ```
     #[must_use]
     pub fn price_type(&self) -> Option<PriceType> {
-        typed_order(self.order_type.as_deref())
+        self.order_type.as_deref().and_then(|raw| raw.parse().ok())
     }
 }
 
-/// A scheduled price change (`domain.pricechanges`).
+/// A scheduled price change (`domain.priceChanges`).
 ///
 /// A quote from `domain.getPrices` goes stale on the day in
-/// [`Self::effective`]; this is what tells a caller that it will.
+/// [`Self::change_date`]; this is what tells a caller that it will.
 ///
 /// ```
-/// use inwx_client::{PriceChange, PriceType};
+/// use inwx_client::PriceChange;
 ///
 /// let change: PriceChange = serde_json::from_str(
-///     r#"{"tld":"com","type":"renewal","period":1,"price":"13.90","oldPrice":12.5,
-///         "currency":"EUR","startDate":"2026-01-01"}"#,
+///     r#"{"tld":"com","affectsCustomer":true,"createPrice":"13.90",
+///         "renewalPrice":12.5,"currency":"EUR","changeDate":"2026-01-01"}"#,
 /// )?;
-/// assert_eq!(change.price, Some(13.9));
-/// assert_eq!(change.old_price, Some(12.5));
-/// assert_eq!(change.effective.as_deref(), Some("2026-01-01"));
-/// assert_eq!(change.price_type(), Some(PriceType::Renewal));
+/// assert_eq!(change.create, Some(13.9));
+/// assert_eq!(change.renewal, Some(12.5));
+/// assert_eq!(change.change_date.as_deref(), Some("2026-01-01"));
 /// # Ok::<(), serde_json::Error>(())
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -525,91 +603,114 @@ pub struct PriceChange {
     /// TLD whose price changes.
     #[serde(default, deserialize_with = "de::opt_string")]
     pub tld: Option<String>,
-    /// Order the change applies to, as it arrived.
+    /// Whether the customer has active domains for the TLD.
     #[serde(
         default,
-        rename = "type",
-        alias = "action",
-        alias = "orderType",
-        alias = "order_type",
-        alias = "pricetype",
-        deserialize_with = "de::opt_string"
+        rename = "affectsCustomer",
+        alias = "affects_customer",
+        deserialize_with = "de::opt_bool"
     )]
-    pub action: Option<String>,
-    /// Billing period in years.
-    #[serde(default, deserialize_with = "de::opt_i64")]
-    pub period: Option<i64>,
-    /// The new amount.
-    #[serde(default, deserialize_with = "de::opt_f64")]
-    pub price: Option<f64>,
-    /// The amount before the change.
-    #[serde(
-        default,
-        rename = "oldPrice",
-        alias = "old_price",
-        deserialize_with = "de::opt_f64"
-    )]
-    pub old_price: Option<f64>,
-    /// Currency of both amounts.
+    pub affects_customer: Option<bool>,
+    /// Currency of every amount in this change.
     #[serde(default, deserialize_with = "de::opt_string")]
     pub currency: Option<String>,
-    /// First day the new price is billed, as text.
+    /// Date the new prices take effect.
     #[serde(
         default,
-        rename = "effective",
+        rename = "changeDate",
+        alias = "change_date",
+        alias = "effective",
         alias = "date",
         alias = "startDate",
         alias = "start_date",
         deserialize_with = "de::opt_string"
     )]
-    pub effective: Option<String>,
-}
-
-impl PriceChange {
-    /// [`Self::action`] as a [`PriceType`], or `None` for a value this crate
-    /// does not know.
-    ///
-    /// ```
-    /// use inwx_client::{PriceChange, PriceType};
-    ///
-    /// let known: PriceChange = serde_json::from_str(r#"{"type":"trade"}"#)?;
-    /// assert_eq!(known.price_type(), Some(PriceType::Trade));
-    /// let unknown: PriceChange = serde_json::from_str(r#"{"type":"restoreFee"}"#)?;
-    /// assert_eq!(unknown.price_type(), None);
-    /// assert_eq!(unknown.action.as_deref(), Some("restoreFee"));
-    /// # Ok::<(), serde_json::Error>(())
-    /// ```
-    #[must_use]
-    pub fn price_type(&self) -> Option<PriceType> {
-        typed_order(self.action.as_deref())
-    }
-
-    /// Direction of the change, from the two amounts. `None` when either
-    /// amount is missing, when they are the same, or when one of them is not a
-    /// number at all.
-    ///
-    /// ```
-    /// use inwx_client::PriceChange;
-    ///
-    /// let up: PriceChange = serde_json::from_str(r#"{"price":13.9,"oldPrice":12.5}"#)?;
-    /// assert_eq!(up.is_increase(), Some(true));
-    /// let down: PriceChange = serde_json::from_str(r#"{"price":"11.00","oldPrice":12.5}"#)?;
-    /// assert_eq!(down.is_increase(), Some(false));
-    /// let unclear: PriceChange = serde_json::from_str(r#"{"price":13.9}"#)?;
-    /// assert_eq!(unclear.is_increase(), None);
-    /// # Ok::<(), serde_json::Error>(())
-    /// ```
-    #[must_use]
-    pub fn is_increase(&self) -> Option<bool> {
-        let (Some(price), Some(old)) = (self.price, self.old_price) else {
-            return None;
-        };
-        match price.partial_cmp(&old) {
-            Some(Ordering::Greater) => Some(true),
-            Some(Ordering::Less) => Some(false),
-            Some(Ordering::Equal) | None => None,
-        }
-    }
+    pub change_date: Option<String>,
+    /// Registration price per year.
+    #[serde(
+        default,
+        rename = "createPrice",
+        alias = "create_price",
+        alias = "regPrice",
+        alias = "reg_price",
+        deserialize_with = "de::opt_f64"
+    )]
+    pub create: Option<f64>,
+    /// Registration price per month.
+    #[serde(
+        default,
+        rename = "monthlyCreatePrice",
+        alias = "monthly_create_price",
+        deserialize_with = "de::opt_f64"
+    )]
+    pub monthly_create: Option<f64>,
+    /// Transfer price per year.
+    #[serde(
+        default,
+        rename = "transferPrice",
+        alias = "transfer_price",
+        deserialize_with = "de::opt_f64"
+    )]
+    pub transfer: Option<f64>,
+    /// Renewal price per year.
+    #[serde(
+        default,
+        rename = "renewalPrice",
+        alias = "renewal_price",
+        deserialize_with = "de::opt_f64"
+    )]
+    pub renewal: Option<f64>,
+    /// Renewal price per month.
+    #[serde(
+        default,
+        rename = "monthlyRenewalPrice",
+        alias = "monthly_renewal_price",
+        deserialize_with = "de::opt_f64"
+    )]
+    pub monthly_renewal: Option<f64>,
+    /// Update price.
+    #[serde(
+        default,
+        rename = "updatePrice",
+        alias = "update_price",
+        deserialize_with = "de::opt_f64"
+    )]
+    pub update: Option<f64>,
+    /// Trade price.
+    #[serde(
+        default,
+        rename = "tradePrice",
+        alias = "trade_price",
+        deserialize_with = "de::opt_f64"
+    )]
+    pub trade: Option<f64>,
+    /// Trustee service price per year.
+    #[serde(
+        default,
+        rename = "trusteePrice",
+        alias = "trustee_price",
+        deserialize_with = "de::opt_f64"
+    )]
+    pub trustee: Option<f64>,
+    /// Trustee service price per month.
+    #[serde(
+        default,
+        rename = "monthlyTrusteePrice",
+        alias = "monthly_trustee_price",
+        deserialize_with = "de::opt_f64"
+    )]
+    pub monthly_trustee: Option<f64>,
+    /// Restore price.
+    #[serde(
+        default,
+        rename = "restorePrice",
+        alias = "restore_price",
+        deserialize_with = "de::opt_f64"
+    )]
+    pub restore: Option<f64>,
+    /// Whether this row came from the documented `pastChanges` list.
+    #[serde(skip)]
+    pub is_past: bool,
 }
 
 impl<T: Transport> InwxClient<T> {
@@ -645,12 +746,11 @@ impl<T: Transport> InwxClient<T> {
         serde_json::from_value(data).map_err(Error::from)
     }
 
-    /// The whole TLD price table in one call (`domain.getalldomainprices`).
+    /// The current prices for one or more domains
+    /// (`domain.getalldomainprices`).
     ///
-    /// Unlike [`InwxClient::tld_prices`] this is paged: `count` in the answer is
-    /// the size of the entire table, so [`PriceList::has_more`] says whether
-    /// another page has to be asked for. Passing no TLDs asks for every TLD the
-    /// account can order.
+    /// INWX documents `page` and `pagelimit` on `domain.getPrices`; this method
+    /// takes a domain list and an optional period instead.
     ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
@@ -659,35 +759,36 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
-    /// let mut page = 1;
-    /// loop {
-    ///     let prices = client.all_domain_prices(&[".de", ".com"], page, 250).await?;
-    ///     println!("{} entries on this page", prices.len());
-    ///     if !prices.has_more() {
-    ///         break;
-    ///     }
-    ///     page += 1;
-    /// }
+    /// use inwx_client::Period;
+    /// let prices = client
+    ///     .all_domain_prices(&["example.de", "example.com"], Some(Period::years(1)?))
+    ///     .await?;
+    /// println!("{} entries", prices.len());
     /// # Ok(())
     /// # }
     /// ```
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the page size is zero or above [`MAX_PAGE_SIZE`](crate::MAX_PAGE_SIZE), plus the usual transport and API errors.
+    /// [`Error::Validation`] when no non-blank domain is given, plus the usual
+    /// transport and API errors.
     pub async fn all_domain_prices(
         &self,
-        tlds: &[&str],
-        page: u32,
-        limit: u32,
+        domains: &[&str],
+        period: Option<Period>,
     ) -> Result<PriceList> {
-        let limit = validate_page_limit(limit)?;
+        let domains: Vec<&str> = domains
+            .iter()
+            .map(|domain| domain.trim())
+            .filter(|domain| !domain.is_empty())
+            .collect();
+        if domains.is_empty() {
+            return Err(Error::validation("domain", "must not be empty"));
+        }
         let mut params = Map::new();
-        params.insert("page".to_owned(), json!(page.max(1)));
-        params.insert("pagelimit".to_owned(), json!(limit));
-        let tlds = normalise_tlds(tlds);
-        if !tlds.is_empty() {
-            params.insert("tld".to_owned(), json!(tlds));
+        params.insert("domain".to_owned(), json!(domains));
+        if let Some(period) = period {
+            params.insert("period".to_owned(), json!(period));
         }
         let data = self
             .call("domain.getalldomainprices", Value::Object(params))
@@ -747,23 +848,20 @@ impl<T: Transport> InwxClient<T> {
     /// The extra data an order for a TLD has to carry
     /// (`domain.getextradatarules`).
     ///
-    /// These are the registry-specific fields (`domain.create` sends them
-    /// besides the contact handles); pass the TLD you are about to order.
-    /// `tld: None` asks for every rule the account has, `order` narrows the
-    /// answer to one order type.
+    /// These are the registry-specific rules (`domain.create` sends the extra
+    /// data besides the contact handles); pass the TLD you are about to order.
+    /// `tld: None` asks for every rule the account has.
     ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
     /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
-    /// use inwx_client::{InwxClient, PriceType, ReqwestTransport};
+    /// use inwx_client::{InwxClient, ReqwestTransport};
     ///
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
-    /// let rules = client
-    ///         .extra_data_rules(Some(".de"), Some(PriceType::Reg))
-    ///         .await?;
-    /// for rule in rules.iter().filter(|rule| rule.required == Some(true)) {
-    ///     println!("{} ({:?})", rule.key.clone().unwrap_or_default(), rule.pattern);
+    /// let rules = client.extra_data_rules(Some(".de")).await?;
+    /// for rule in &rules {
+    ///     println!("{rule}");
     /// }
     /// # Ok(())
     /// # }
@@ -773,28 +871,18 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// [`Error::Validation`] when `tld` is `Some` but blank, plus the usual
     /// transport and API errors.
-    pub async fn extra_data_rules(
-        &self,
-        tld: Option<&str>,
-        order: Option<PriceType>,
-    ) -> Result<Vec<ExtraDataRule>> {
+    pub async fn extra_data_rules(&self, tld: Option<&str>) -> Result<Vec<ExtraDataRule>> {
         let mut params = Map::new();
         if let Some(tld) = normalise_tld(tld)? {
             params.insert("tld".to_owned(), json!(tld));
         }
-        if let Some(order) = order {
-            params.insert("pricetype".to_owned(), json!(order.as_str()));
-        }
         let data = self
             .call("domain.getextradatarules", Value::Object(params))
             .await?;
-        Ok(parse_any_rows(
-            &data,
-            &["extradata", "extradataRules", "rules"],
-        ))
+        Ok(parse_rule_rows(&data))
     }
 
-    /// The promo and voucher codes the account can spend (`domain.getpromos`).
+    /// The promo prices for one or more TLDs (`domain.getPromos`).
     ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
@@ -803,10 +891,14 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
-    /// for promo in client.promo_codes(Some("de"), 1, 50).await? {
+    /// use inwx_client::{Period, PriceType};
+    /// for promo in client
+    ///     .promo_prices(&["de"], Some(PriceType::Reg), Some(Period::years(1)?), None)
+    ///     .await?
+    /// {
     ///     println!(
-    ///         "{}: {:?} {}",
-    ///         promo.code.clone().unwrap_or_default(),
+    ///         "{:?}: {:?} {}",
+    ///         promo.tld,
     ///         promo.price,
     ///         promo.currency.clone().unwrap_or_default()
     ///     );
@@ -817,29 +909,43 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the page size is zero or above [`MAX_PAGE_SIZE`](crate::MAX_PAGE_SIZE), or `tld` is `Some` but blank, plus the usual transport and API errors.
-    pub async fn promo_codes(
+    /// [`Error::Validation`] when a TLD or voucher is present but blank, plus
+    /// the usual transport and API errors.
+    pub async fn promo_prices(
         &self,
-        tld: Option<&str>,
-        page: u32,
-        limit: u32,
+        tlds: &[&str],
+        promo_type: Option<PriceType>,
+        period: Option<Period>,
+        voucher: Option<&str>,
     ) -> Result<Vec<PromoCode>> {
-        let limit = validate_page_limit(limit)?;
         let mut params = Map::new();
-        params.insert("page".to_owned(), json!(page.max(1)));
-        params.insert("pagelimit".to_owned(), json!(limit));
-        if let Some(tld) = normalise_tld(tld)? {
-            params.insert("tld".to_owned(), json!(tld));
+        let tlds = normalise_tlds(tlds);
+        if !tlds.is_empty() {
+            params.insert("tlds".to_owned(), json!(tlds));
         }
-        let data = self.call("domain.getpromos", Value::Object(params)).await?;
-        Ok(parse_any_rows(&data, &["promo", "promos"]))
+        if let Some(promo_type) = promo_type {
+            params.insert(
+                "promoType".to_owned(),
+                json!(promo_type.as_str().to_ascii_uppercase()),
+            );
+        }
+        if let Some(period) = period {
+            let (length, unit) = period_parts(period);
+            params.insert("period".to_owned(), json!(length));
+            params.insert("periodUnit".to_owned(), json!(unit));
+        }
+        if let Some(voucher) = normalise_optional_text("voucher", voucher, 64)? {
+            params.insert("voucher".to_owned(), json!(voucher));
+        }
+        let data = self.call("domain.getPromos", Value::Object(params)).await?;
+        Ok(parse_rows::<PromoCode>(&data, "promos"))
     }
 
     /// The price changes that are already scheduled
-    /// (`domain.pricechanges`).
+    /// (`domain.priceChanges`).
     ///
     /// A quote from [`InwxClient::tld_prices`] is only trustworthy until the
-    /// `effective` date of a change for the same TLD and order.
+    /// `change_date` of a change for the same TLD.
     ///
     /// ```no_run
     /// # #[cfg(feature = "http")]
@@ -848,10 +954,8 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
-    /// for change in client.price_changes(Some("com"), 1, 50).await? {
-    ///     if change.is_increase() == Some(true) {
-    ///         println!("{:?} rises on {:?}", change.tld, change.effective);
-    ///     }
+    /// for change in client.price_changes().await? {
+    ///     println!("{:?} changes on {:?}", change.tld, change.change_date);
     /// }
     /// # Ok(())
     /// # }
@@ -859,24 +963,14 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when the page size is zero or above [`MAX_PAGE_SIZE`](crate::MAX_PAGE_SIZE), or `tld` is `Some` but blank, plus the usual transport and API errors.
-    pub async fn price_changes(
-        &self,
-        tld: Option<&str>,
-        page: u32,
-        limit: u32,
-    ) -> Result<Vec<PriceChange>> {
-        let limit = validate_page_limit(limit)?;
-        let mut params = Map::new();
-        params.insert("page".to_owned(), json!(page.max(1)));
-        params.insert("pagelimit".to_owned(), json!(limit));
-        if let Some(tld) = normalise_tld(tld)? {
-            params.insert("tld".to_owned(), json!(tld));
-        }
+    /// The usual transport and API errors.
+    pub async fn price_changes(&self) -> Result<Vec<PriceChange>> {
         let data = self
-            .call("domain.pricechanges", Value::Object(params))
+            .call("domain.priceChanges", Value::Object(Map::new()))
             .await?;
-        Ok(parse_any_rows(&data, &["pricechange", "pricechanges"]))
+        let mut changes = parse_price_changes(&data, "futureChanges", false);
+        changes.extend(parse_price_changes(&data, "pastChanges", true));
+        Ok(changes)
     }
 }
 
@@ -900,17 +994,6 @@ mod tests {
         let price: TldPrice = serde_json::from_str(r#"{"tld":"com"}"#).unwrap();
         assert!(price.create.is_none());
         assert!(price.currency.is_none());
-    }
-
-    #[test]
-    fn a_page_size_of_one_is_the_last_valid_one() {
-        assert_eq!(validate_page_limit(1).unwrap(), 1);
-        assert_eq!(
-            validate_page_limit(crate::MAX_PAGE_SIZE).unwrap(),
-            crate::MAX_PAGE_SIZE
-        );
-        assert!(validate_page_limit(crate::MAX_PAGE_SIZE + 1).is_err());
-        assert!(validate_page_limit(0).is_err());
     }
 
     #[test]
@@ -966,68 +1049,80 @@ mod tests {
         assert_eq!(bad.create, None);
         assert_eq!(bad.tld, "de");
         let wrong_type: PriceChange =
-            serde_json::from_str(r#"{"price":[1,2],"oldPrice":{"a":1}}"#).unwrap();
-        assert_eq!(wrong_type.price, None);
-        assert_eq!(wrong_type.old_price, None);
+            serde_json::from_str(r#"{"createPrice":[1,2],"renewalPrice":{"a":1}}"#).unwrap();
+        assert_eq!(wrong_type.create, None);
+        assert_eq!(wrong_type.renewal, None);
     }
 
     #[test]
     fn unknown_fields_are_ignored_by_every_price_row() {
         let extra = r#","registryInternal":{"uuid":"x","flag":true}"#;
         assert!(serde_json::from_str::<TldPrice>(&format!(r#"{{"tld":"de"{extra}}}"#)).is_ok());
-        assert!(
-            serde_json::from_str::<ExtraDataRule>(&format!(r#"{{"key":"X_A"{extra}}}"#)).is_ok()
-        );
+        assert!(serde_json::from_str::<ExtraDataRule>(r#""X_A=1""#).is_ok());
         assert!(serde_json::from_str::<PromoCode>(&format!(r#"{{"code":"X"{extra}}}"#)).is_ok());
         assert!(serde_json::from_str::<PriceChange>(&format!(r#"{{"tld":"de"{extra}}}"#)).is_ok());
     }
 
     #[test]
-    fn an_unknown_order_type_is_carried_not_rejected() {
-        let rule: ExtraDataRule = serde_json::from_str(r#"{"orderType":"refund"}"#).unwrap();
-        assert_eq!(rule.order_type.as_deref(), Some("refund"));
-        assert_eq!(rule.price_type(), None);
-        let change: PriceChange = serde_json::from_str(r#"{"action":"RESTORE"}"#).unwrap();
-        assert_eq!(change.price_type(), Some(PriceType::Restore));
-        let promo: PromoCode = serde_json::from_str(r#"{"order":"renewal"}"#).unwrap();
-        assert_eq!(promo.price_type(), Some(PriceType::Renewal));
+    fn unknown_text_fields_are_carried_not_rejected() {
+        let rule: ExtraDataRule = serde_json::from_str(r#""X_UNKNOWN=value""#).unwrap();
+        assert_eq!(rule.name(), Some("X_UNKNOWN"));
+        assert_eq!(rule.value(), Some("value"));
+        let change: PriceChange =
+            serde_json::from_str(r#"{"affectsCustomer":"yes","changeDate":"2026-01-01"}"#).unwrap();
+        assert_eq!(change.affects_customer, Some(true));
+        assert_eq!(change.change_date.as_deref(), Some("2026-01-01"));
+        let promo: PromoCode = serde_json::from_str(r#"{"tld":".DE","netPrice":"1.00"}"#).unwrap();
+        assert_eq!(promo.normalised_tld().as_deref(), Some("de"));
+        assert_eq!(promo.price, Some(1.0));
     }
 
     #[test]
-    fn a_single_object_answer_counts_as_one_row() {
-        let single = json!({"extradata": {"key": "X_A", "required": "1"}});
-        let rows: Vec<ExtraDataRule> = parse_any_rows(&single, &["extradata", "rules"]);
+    fn a_single_rule_string_counts_as_one_row() {
+        let single = json!({"rules": "X_A=1"});
+        let rows = parse_rule_rows(&single);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].required, Some(true));
+        assert_eq!(rows[0].name(), Some("X_A"));
+        assert_eq!(rows[0].value(), Some("1"));
     }
 
     #[test]
     fn an_empty_answer_is_no_rows_under_every_spelling() {
-        let empty = json!({"promo": [], "promos": []});
-        let rows: Vec<PromoCode> = parse_any_rows(&empty, &["promo", "promos"]);
+        let empty = json!({"promos": []});
+        let rows: Vec<PromoCode> = parse_rows(&empty, "promos");
         assert_eq!(rows, Vec::<PromoCode>::new());
         let absent = json!({"somethingElse": 1});
-        let rows: Vec<PriceChange> = parse_any_rows(&absent, &["pricechange", "pricechanges"]);
+        let rows: Vec<PriceChange> = parse_rows(&absent, "futureChanges");
         assert_eq!(rows, Vec::<PriceChange>::new());
     }
 
     #[test]
-    fn a_scheduled_change_compares_its_two_amounts() {
-        let up: PriceChange = serde_json::from_str(r#"{"price":"13.90","oldPrice":12.5}"#).unwrap();
-        assert_eq!(up.is_increase(), Some(true));
-        let flat: PriceChange =
-            serde_json::from_str(r#"{"price":12.5,"oldPrice":"12.50"}"#).unwrap();
-        assert_eq!(flat.is_increase(), None);
-        assert_eq!(PriceChange::default().is_increase(), None);
+    fn a_price_change_carries_all_documented_amounts() {
+        let change: PriceChange = serde_json::from_str(
+            r#"{"createPrice":"13.90","monthlyCreatePrice":"1.16","transferPrice":12.5,
+                "renewalPrice":"12.00","monthlyRenewalPrice":1.0,"updatePrice":0,
+                "tradePrice":1,"trusteePrice":2,"monthlyTrusteePrice":"0.17",
+                "restorePrice":100}"#,
+        )
+        .unwrap();
+        assert_eq!(change.create, Some(13.9));
+        assert_eq!(change.monthly_create, Some(1.16));
+        assert_eq!(change.transfer, Some(12.5));
+        assert_eq!(change.renewal, Some(12.0));
+        assert_eq!(change.monthly_renewal, Some(1.0));
+        assert_eq!(change.update, Some(0.0));
+        assert_eq!(change.trade, Some(1.0));
+        assert_eq!(change.trustee, Some(2.0));
+        assert_eq!(change.monthly_trustee, Some(0.17));
+        assert_eq!(change.restore, Some(100.0));
     }
 
     #[test]
-    fn a_text_rule_is_only_text_when_the_api_says_so() {
-        let text: ExtraDataRule = serde_json::from_str(r#"{"fieldType":"TEXT"}"#).unwrap();
-        assert!(text.is_text());
-        let select: ExtraDataRule =
-            serde_json::from_str(r#"{"type":"select","values":"retail"}"#).unwrap();
-        assert!(!select.is_text());
-        assert_eq!(select.values, ["retail"]);
+    fn extra_data_rules_keep_their_raw_text() {
+        let text = ExtraDataRule::from(" X_FN_VAT=DE123 ");
+        assert_eq!(text.as_str(), " X_FN_VAT=DE123 ");
+        assert_eq!(text.name(), Some("X_FN_VAT"));
+        assert_eq!(text.value(), Some("DE123"));
+        assert!(ExtraDataRule::from("  ").is_empty());
     }
 }

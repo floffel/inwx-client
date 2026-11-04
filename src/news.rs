@@ -14,13 +14,20 @@
 //! # Ok::<(), serde_json::Error>(())
 //! ```
 
-use serde::Deserialize;
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 
 use crate::client::InwxClient;
 use crate::error::{Error, Result};
 use crate::transport::Transport;
 use crate::types::{de, validate_page_limit};
+
+/// Longest text accepted for a news title or body.
+///
+/// News text is prose, not an opaque payload, so this keeps a malformed or
+/// hostile row from making the crate store an effectively unbounded string.
+const MAX_NEWS_TEXT_CHARS: usize = 16_384;
 
 /// One news item.
 ///
@@ -43,20 +50,61 @@ pub struct NewsItem {
     /// Date, as text.
     #[serde(default, deserialize_with = "de::opt_string")]
     pub date: Option<String>,
-    /// Subject line.
-    #[serde(default, deserialize_with = "de::opt_string")]
+    /// Subject line. Strings and numbers are accepted; longer than 16 384
+    /// characters is refused.
+    #[serde(default, deserialize_with = "opt_news_text")]
     pub title: Option<String>,
-    /// Body text.
+    /// Body text. Strings and numbers are accepted; longer than 16 384
+    /// characters is refused.
     #[serde(
         default,
         rename = "message",
         alias = "text",
-        deserialize_with = "de::opt_string"
+        deserialize_with = "opt_news_text"
     )]
     pub body: Option<String>,
     /// Whether the account has read it.
     #[serde(default, rename = "read", deserialize_with = "de::opt_bool")]
     pub read: Option<bool>,
+}
+
+/// Decodes prose fields on a news row without turning structured JSON into
+/// text or accepting unbounded values.
+fn opt_news_text<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    let text = match value {
+        Value::String(text) => Some(text),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Null => None,
+        Value::Bool(_) => {
+            return Err(D::Error::custom(
+                "news text must be a string or number, got boolean",
+            ));
+        }
+        Value::Array(_) => {
+            return Err(D::Error::custom(
+                "news text must be a string or number, got array",
+            ));
+        }
+        Value::Object(_) => {
+            return Err(D::Error::custom(
+                "news text must be a string or number, got object",
+            ));
+        }
+    };
+
+    if let Some(text) = &text {
+        let len = text.chars().count();
+        if len > MAX_NEWS_TEXT_CHARS {
+            return Err(D::Error::custom(format!(
+                "news text must be at most {MAX_NEWS_TEXT_CHARS} characters, got {len}"
+            )));
+        }
+    }
+
+    Ok(text)
 }
 
 impl NewsItem {
@@ -259,6 +307,46 @@ mod tests {
         let message: NewsItem = serde_json::from_str(r#"{"id":1,"message":"a"}"#).unwrap();
         let text: NewsItem = serde_json::from_str(r#"{"id":1,"text":"a"}"#).unwrap();
         assert_eq!(message, text);
+    }
+
+    #[test]
+    fn news_text_accepts_strings_and_numbers_only() {
+        let item: NewsItem = serde_json::from_value(json!({"title": 42, "message": 3.5})).unwrap();
+        assert_eq!(item.title.as_deref(), Some("42"));
+        assert_eq!(item.body.as_deref(), Some("3.5"));
+
+        for payload in [
+            json!({"title": true}),
+            json!({"title": ["Maintenance"]}),
+            json!({"title": {"text": "Maintenance"}}),
+            json!({"message": false}),
+            json!({"message": ["Maintenance"]}),
+            json!({"message": {"text": "Maintenance"}}),
+        ] {
+            let error = serde_json::from_value::<NewsItem>(payload).unwrap_err();
+            assert!(error.to_string().contains("string or number"), "{error}");
+        }
+    }
+
+    #[test]
+    fn news_text_length_has_inside_and_outside_boundaries() {
+        let just_inside = "x".repeat(MAX_NEWS_TEXT_CHARS - 1);
+        let at_limit = "x".repeat(MAX_NEWS_TEXT_CHARS);
+        let over_limit = "x".repeat(MAX_NEWS_TEXT_CHARS + 1);
+
+        let title: NewsItem = serde_json::from_value(json!({"title": just_inside})).unwrap();
+        assert_eq!(title.title.as_deref(), Some(just_inside.as_str()));
+        let title: NewsItem = serde_json::from_value(json!({"title": at_limit})).unwrap();
+        assert_eq!(title.title.as_deref(), Some(at_limit.as_str()));
+        let error = serde_json::from_value::<NewsItem>(json!({"title": over_limit})).unwrap_err();
+        assert!(error.to_string().contains("at most"), "{error}");
+
+        let body: NewsItem = serde_json::from_value(json!({"message": just_inside})).unwrap();
+        assert_eq!(body.body.as_deref(), Some(just_inside.as_str()));
+        let body: NewsItem = serde_json::from_value(json!({"message": at_limit})).unwrap();
+        assert_eq!(body.body.as_deref(), Some(at_limit.as_str()));
+        let error = serde_json::from_value::<NewsItem>(json!({"message": over_limit})).unwrap_err();
+        assert!(error.to_string().contains("at most"), "{error}");
     }
 
     #[test]
