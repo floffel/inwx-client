@@ -5,9 +5,9 @@ mod common;
 
 use common::{client, MockTransport};
 use inwx_client::{
-    rpc::RpcResponse, ContactRequest, ContactType, Credentials, DomainListQuery, DomainName, Error,
-    Hostname, InwxClient, Period, RecordId, RecordSpec, RecordType, RecordUpdate, RpcRequest,
-    MAX_TTL,
+    rpc::RpcResponse, Contact, ContactQuery, ContactRequest, ContactType, Credentials,
+    DomainListQuery, DomainName, Error, Hostname, InwxClient, Page, Pagination, Period, RecordId,
+    RecordSpec, RecordType, RecordUpdate, RpcRequest, MAX_TTL,
 };
 use serde_json::{json, Value};
 
@@ -275,6 +275,96 @@ fn contact_validation_covers_email_and_country() {
     assert!(base().with_remarks("x".repeat(256)).validate().is_err());
     assert!(ContactRequest::new(ContactType::Person, "", "a@b.test").is_err());
     assert!(ContactRequest::new(ContactType::Person, "A", "no-at-sign").is_err());
+}
+
+#[tokio::test]
+async fn contact_list_reads_a_single_handle_and_skips_unusable_rows() {
+    let transport = MockTransport::new();
+
+    // The documented shape first: an array of handles with a numeric total.
+    transport.ok(json!({"count": 2, "contact": [{"roId": 991}, {"roId": 992}]}));
+    // A single object where the array belongs is a page of one.
+    transport.ok(json!({"count": 1, "contact": {"roId": 991}}));
+    // One row that does not fit a handle costs that row, not the page — on
+    // both sides of the array.
+    transport.ok(json!({"count": 3, "contact": [null, {"roId": 991}, "nope"]}));
+    // Neither an array nor an object: an empty page, not a failed call, and a
+    // numeric-string total still counts.
+    transport.ok(json!({"count": "12", "contact": 7}));
+    // A count that is an object leaves the total unset instead of failing.
+    transport.ok(json!({"count": {"total": 4}, "contact": {"roId": 1}}));
+    // An answer without either key is simply empty.
+    transport.ok(json!({}));
+
+    let client = client(transport.clone());
+    let query = ContactQuery::new();
+
+    let page = client.list_contacts(&query).await.unwrap();
+    assert_eq!(
+        page.contacts
+            .iter()
+            .filter_map(Contact::handle)
+            .collect::<Vec<_>>(),
+        [991, 992]
+    );
+    assert_eq!(page.count, Some(2));
+
+    let page = client.list_contacts(&query).await.unwrap();
+    assert_eq!(page.contacts.len(), 1);
+    assert_eq!(page.contacts[0].handle(), Some(991));
+    assert_eq!(page.count, Some(1));
+
+    let page = client.list_contacts(&query).await.unwrap();
+    assert_eq!(
+        page.contacts
+            .iter()
+            .filter_map(Contact::handle)
+            .collect::<Vec<_>>(),
+        [991]
+    );
+    assert_eq!(
+        page.count,
+        Some(3),
+        "the total is read independently of the rows"
+    );
+
+    let page = client.list_contacts(&query).await.unwrap();
+    assert!(page.contacts.is_empty());
+    assert_eq!(page.count, Some(12));
+
+    let page = client.list_contacts(&query).await.unwrap();
+    assert_eq!(page.contacts[0].handle(), Some(1));
+    assert_eq!(page.count, None);
+
+    let page = client.list_contacts(&query).await.unwrap();
+    assert!(page.is_empty());
+    assert_eq!(page.total(), None);
+
+    assert_eq!(transport.call_count(), 6);
+    assert_eq!(transport.calls()[0].method, "contact.list");
+}
+
+#[tokio::test]
+async fn a_contact_walk_reads_the_same_permissive_page() {
+    let transport = MockTransport::new();
+    // One handle as a single object: the walker decodes pages through the same
+    // type, so it must not fail on the shape `list_contacts` accepts.
+    transport.ok(json!({"count": 1, "contact": {"roId": 991}}));
+
+    let client = client(transport.clone());
+    let handles = client
+        .list_all_contacts(&ContactQuery::new(), &Pagination::new())
+        .collect_all()
+        .await
+        .unwrap();
+    assert_eq!(
+        handles
+            .iter()
+            .filter_map(Contact::handle)
+            .collect::<Vec<_>>(),
+        [991]
+    );
+    assert_eq!(transport.call_count(), 1);
 }
 
 // ------------------------------------------------------------ rpc framing

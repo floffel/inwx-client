@@ -1766,6 +1766,31 @@ pub(crate) mod de {
             _ => Vec::new(),
         })
     }
+
+    /// The rows of a list field that is either an array or a single object,
+    /// skipping the rows the model cannot decode.
+    ///
+    /// The serde-side counterpart of [`parse_rows`](super::parse_rows): it is
+    /// meant for a struct that owns the field rather than for an answer read by
+    /// key, so a page type can be permissive on its own. A single object where
+    /// the array belongs is a one-row list, `null` or an absent value is empty,
+    /// and one unusable row costs that row — not the page.
+    pub(crate) fn rows<'de, T, D>(deserializer: D) -> std::result::Result<Vec<T>, D::Error>
+    where
+        T: serde::de::DeserializeOwned,
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let rows = match value {
+            Value::Array(rows) => rows,
+            single @ Value::Object(_) => vec![single],
+            _ => Vec::new(),
+        };
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| serde_json::from_value(row).ok())
+            .collect())
+    }
 }
 
 #[cfg(test)]
