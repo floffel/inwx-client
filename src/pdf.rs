@@ -16,6 +16,8 @@
 //! # Ok::<(), inwx_client::Error>(())
 //! ```
 
+use std::fmt;
+
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
@@ -252,6 +254,11 @@ pub struct PdfHandle {
 
 /// The rendered document (`pdf.get`).
 ///
+/// The body is deliberately not printed: `Debug` shows the file name, the MIME
+/// type and the encoded length of `content`, never the base64 text itself. That
+/// text carries a customer's invoice, contract or account statement, and a
+/// derived `Debug` used to dump megabytes of it into every log line.
+///
 /// ```
 /// use inwx_client::PdfFile;
 ///
@@ -262,7 +269,7 @@ pub struct PdfHandle {
 /// assert_eq!(file.mime_type.as_deref(), Some("application/pdf"));
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct PdfFile {
     /// File name, when the API sends one.
     #[serde(default, deserialize_with = "de::opt_string")]
@@ -283,6 +290,25 @@ pub struct PdfFile {
         deserialize_with = "de::opt_string"
     )]
     pub mime_type: Option<String>,
+}
+
+/// `Debug` without the body: a document is often a person's invoice or account
+/// statement, so only the encoded length of `content` is printed.
+impl fmt::Debug for PdfFile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PdfFile")
+            .field("filename", &self.filename)
+            .field(
+                "content",
+                &format_args!(
+                    "{} encoded bytes",
+                    self.content.as_deref().map_or(0, str::len)
+                ),
+            )
+            .field("mime_type", &self.mime_type)
+            .finish()
+    }
 }
 
 impl PdfFile {
@@ -455,5 +481,26 @@ mod tests {
         assert!(check_pdf_size(MAX_ENCODED_LEN).is_ok());
         assert!(check_pdf_size(MAX_ENCODED_LEN + 1).is_err());
         assert!(check_pdf_size(0).is_ok());
+    }
+
+    #[test]
+    fn debug_never_prints_the_document_body() {
+        let body = "JVBERi0xLjQK";
+        let file = PdfFile {
+            filename: Some("invoice.pdf".to_owned()),
+            content: Some(body.to_owned()),
+            mime_type: Some("application/pdf".to_owned()),
+        };
+        let debug = format!("{file:?}");
+        assert!(!debug.contains(body));
+        assert!(!debug.contains("JVBERi0x"));
+        assert!(debug.contains("invoice.pdf"));
+        assert!(debug.contains("application/pdf"));
+        assert!(debug.contains(&format!("{} encoded bytes", body.len())));
+    }
+
+    #[test]
+    fn debug_of_an_empty_body_reports_zero_encoded_bytes() {
+        assert!(format!("{:?}", PdfFile::default()).contains("0 encoded bytes"));
     }
 }
