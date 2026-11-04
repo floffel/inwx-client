@@ -322,6 +322,10 @@ fn handles_and_ext_data_are_validated() {
     assert!(extra.set("lower", "x").is_err());
     assert!(extra.set("WITH SPACE", "x").is_err());
     assert!(extra.set("OK", "").is_err());
+    assert!(extra.set("NO-DOMAIN-CHECK", "false").is_err());
+    assert!(extra.set("NO-HOST-CHECK", "false").is_err());
+    assert!(extra.set("BIRTH-DATE", "23.05.1990").is_err());
+    assert!(extra.set("BIRTH-CITY", "").is_err());
     assert!(extra.birth_date("1990-02-30").is_err());
     assert!(extra.birth_city(&"x".repeat(65)).is_err());
     assert_eq!(extra.params().as_object().unwrap().len(), 0);
