@@ -15,7 +15,7 @@ use crate::error::{Error, Result};
 use crate::pagination::{self, Listing, Page, Pages, Pagination};
 use crate::transport::Transport;
 use crate::types::{
-    de, reject_control_chars, validate_country_code, validate_email_field, ContactType,
+    de, pick_i64, reject_control_chars, validate_country_code, validate_email_field, ContactType,
 };
 
 /// A contact handle to create (`contact.create`).
@@ -892,18 +892,29 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] from [`ContactRequest::params`],
-    /// [`Error::MissingField`] when the answer carries no `id`, plus the usual
-    /// transport and API errors.
+    /// [`Error::Validation`] from [`ContactRequest::params`], the usual
+    /// transport and API errors, and [`Error::Ambiguous`] when the call was
+    /// answered without a readable id: the handle exists by then, so the answer
+    /// names no result rather than failing — listing the contacts beats
+    /// creating the handle a second time.
     pub async fn create_contact(&self, request: &ContactRequest) -> Result<i64> {
         request.validate()?;
         let data = self.call("contact.create", request.params()).await?;
-        data.get("id")
-            .and_then(Value::as_i64)
-            .ok_or(Error::MissingField {
-                method: "contact.create",
-                field: "resData.id",
-            })
+        // The registrar has created the handle as soon as this call returned.
+        // An id that cannot be read therefore says nothing about the remote
+        // state, so it must not surface as the terminal `MissingField`: a
+        // caller that retried on that would leave a duplicate handle behind.
+        // `pick_i64` accepts a number or a numeric string and falls back to the
+        // `roId` spelling, which INWX sends next to `id`.
+        let empty = Map::new();
+        let fields = data.as_object().unwrap_or(&empty);
+        pick_i64(fields, &["id", "roId"]).ok_or_else(|| {
+            Error::ambiguous(
+                "contact.create",
+                "the answer carries no usable handle id, so the contact was most \
+                 likely created; list the contacts before creating it again",
+            )
+        })
     }
 
     /// Reads a handle (`contact.info`).
