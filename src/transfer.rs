@@ -1626,11 +1626,12 @@ impl PushRequest {
 /// ```
 /// use inwx_client::{ActionKind, DomainName, Irreversible, RenewalMode, RestoreRequest};
 ///
-/// let restore = RestoreRequest::new(Irreversible::acknowledge(
+/// let restore = RestoreRequest::builder(Irreversible::acknowledge(
 ///     ActionKind::Restore,
 ///     &DomainName::parse("example.com")?,
-/// ))?
-/// .with_renewal_mode(RenewalMode::AutoRenew);
+/// ))
+/// .with_renewal_mode(RenewalMode::AutoRenew)
+/// .build()?;
 ///
 /// assert_eq!(restore.params()["renewalMode"], "AUTORENEW");
 /// # Ok::<(), inwx_client::Error>(())
@@ -1642,27 +1643,62 @@ pub struct RestoreRequest {
     testing: bool,
 }
 
+#[bon]
 impl RestoreRequest {
     /// Starts a restore for the domain named in `intent`.
     ///
     /// # Errors
     ///
     /// [`Error::Validation`] unless `intent` acknowledges
-    /// [`ActionKind::Restore`].
+    /// [`ActionKind::Restore`]. The acknowledgement is checked by
+    /// [`build`](RestoreRequestBuilder::build).
     ///
     /// ```
     /// use inwx_client::{ActionKind, DomainName, Irreversible, RestoreRequest};
     ///
     /// let wrong = Irreversible::acknowledge(ActionKind::Push, &DomainName::parse("a.de")?);
-    /// assert!(RestoreRequest::new(wrong).is_err());
+    /// assert!(RestoreRequest::builder(wrong).build().is_err());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
-    pub fn new(intent: Irreversible) -> Result<Self> {
+    #[builder]
+    pub fn new(
+        #[builder(start_fn)] intent: Irreversible,
+        /// What happens at expiry after the restore (`renewalMode`).
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, DomainName, Irreversible, RenewalMode, RestoreRequest};
+        ///
+        /// let restore = RestoreRequest::builder(
+        ///     Irreversible::acknowledge(ActionKind::Restore, &DomainName::parse("a.de")?),
+        /// )
+        /// .with_renewal_mode(RenewalMode::AutoDelete)
+        /// .build()?;
+        /// assert_eq!(restore.params()["renewalMode"], "AUTODELETE");
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(setters(name = with_renewal_mode))]
+        renewal_mode: Option<RenewalMode>,
+        /// Runs the command in testing mode (`testing=true`).
+        ///
+        /// ```
+        /// use inwx_client::{ActionKind, DomainName, Irreversible, RestoreRequest};
+        ///
+        /// let restore = RestoreRequest::builder(
+        ///     Irreversible::acknowledge(ActionKind::Restore, &DomainName::parse("a.de")?),
+        /// )
+        /// .dry_run()
+        /// .build()?;
+        /// assert_eq!(restore.params()["testing"], true);
+        /// # Ok::<(), inwx_client::Error>(())
+        /// ```
+        #[builder(default, setters(name = dry_run), with = || true)]
+        testing: bool,
+    ) -> Result<Self> {
         let domain = intent.into_domain(ActionKind::Restore)?;
         Ok(Self {
             domain,
-            renewal_mode: None,
-            testing: false,
+            renewal_mode,
+            testing,
         })
     }
 
@@ -1671,9 +1707,10 @@ impl RestoreRequest {
     /// ```
     /// use inwx_client::{ActionKind, DomainName, Irreversible, RestoreRequest};
     ///
-    /// let restore = RestoreRequest::new(
+    /// let restore = RestoreRequest::builder(
     ///     Irreversible::acknowledge(ActionKind::Restore, &DomainName::parse("a.de")?),
-    /// )?;
+    /// )
+    /// .build()?;
     /// assert_eq!(restore.domain().as_str(), "a.de");
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
@@ -1682,52 +1719,18 @@ impl RestoreRequest {
         &self.domain
     }
 
-    /// Sets what happens at expiry after the restore.
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, RenewalMode, RestoreRequest};
-    ///
-    /// let restore = RestoreRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Restore, &DomainName::parse("a.de")?),
-    /// )?
-    /// .with_renewal_mode(RenewalMode::AutoDelete);
-    /// assert_eq!(restore.params()["renewalMode"], "AUTODELETE");
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn with_renewal_mode(mut self, mode: RenewalMode) -> Self {
-        self.renewal_mode = Some(mode);
-        self
-    }
-
-    /// Runs the command in testing mode (`testing=true`).
-    ///
-    /// ```
-    /// use inwx_client::{ActionKind, DomainName, Irreversible, RestoreRequest};
-    ///
-    /// let restore = RestoreRequest::new(
-    ///     Irreversible::acknowledge(ActionKind::Restore, &DomainName::parse("a.de")?),
-    /// )?
-    /// .dry_run();
-    /// assert_eq!(restore.params()["testing"], true);
-    /// # Ok::<(), inwx_client::Error>(())
-    /// ```
-    #[must_use]
-    pub fn dry_run(mut self) -> Self {
-        self.testing = true;
-        self
-    }
-
     /// The `domain.restore` parameters.
     ///
     /// ```
     /// use inwx_client::{ActionKind, DomainName, Irreversible, RestoreRequest};
     ///
-    /// let params = RestoreRequest::new(
+    /// let params = RestoreRequest::builder(
     ///     Irreversible::acknowledge(ActionKind::Restore, &DomainName::parse("a.de")?),
-    /// )?
+    /// )
+    /// .build()?
     /// .params();
     /// assert_eq!(params["domain"], "a.de");
+    /// assert!(params.get("renewalMode").is_none());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     #[must_use]
@@ -2107,10 +2110,11 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
-    /// let restore = RestoreRequest::new(Irreversible::acknowledge(
+    /// let restore = RestoreRequest::builder(Irreversible::acknowledge(
     ///     ActionKind::Restore,
     ///     &DomainName::parse("example.com")?,
-    /// ))?;
+    /// ))
+    /// .build()?;
     /// let restored = client.restore_domain(&restore).await?;
     /// println!("{:?}", restored.domain_ace);
     /// # Ok(())
@@ -2244,6 +2248,36 @@ mod tests {
         ))
         .unwrap();
         assert!(trade.params().is_err());
+    }
+
+    #[test]
+    fn restore_builder_keeps_the_wire_shape() {
+        let restore = RestoreRequest::builder(Irreversible::acknowledge(
+            ActionKind::Restore,
+            &domain("a.de"),
+        ))
+        .with_renewal_mode(RenewalMode::AutoRenew)
+        .dry_run()
+        .build()
+        .unwrap();
+        assert_eq!(
+            restore.params(),
+            json!({
+                "domain": "a.de",
+                "renewalMode": "AUTORENEW",
+                "testing": true,
+            })
+        );
+    }
+
+    #[test]
+    fn restore_builder_requires_the_restore_acknowledgement() {
+        assert!(RestoreRequest::builder(Irreversible::acknowledge(
+            ActionKind::Push,
+            &domain("a.de")
+        ))
+        .build()
+        .is_err());
     }
 
     #[test]
