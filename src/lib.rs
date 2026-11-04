@@ -142,8 +142,9 @@
 //! | `AuthInfo2` | `authinfo2.create`, `authinfo2.getprice` |
 //!
 //! The list commands are walked by [`Pagination`] and the per-command listing types
-//! ([`DomainListing`], [`ContactListing`], [`ZoneListing`]); they are client-side helpers,
-//! not additional API methods, so they are not part of the table above.
+//! ([`DomainListing`], [`ContactListing`], [`ZoneListing`], [`NicHandleListing`]);
+//! they are client-side helpers, not additional API methods, so they are not part
+//! of the table above.
 //!
 //! Every name in the table is a command the crate really sends; a count such as
 //! `certificate.* (13 methods)` covers exactly the commands implemented in
@@ -171,11 +172,11 @@
 //!   numbers or strings —
 //!   INWX is inconsistent between methods.
 //! * **Walk the whole list.** [`InwxClient::list_all_domains`],
-//!   [`InwxClient::list_all_contacts`] and [`InwxClient::list_all_zones`] return a
-//!   [`Pages`] walk instead of one page: page size and bound are validated where
-//!   they are set, the last page is cut at the bound, and
-//!   [`Pages::bound_reached`] says whether the listing ended or the walk stopped
-//!   early.
+//!   [`InwxClient::list_all_contacts`], [`InwxClient::list_all_zones`] and
+//!   [`InwxClient::list_all_nichandles`] return a [`Pages`] walk instead of one
+//!   page: page size and bound are validated where they are set, the last page
+//!   is cut at the bound, and [`Pages::bound_reached`] says whether the listing
+//!   ended or the walk stopped early.
 //! * **No socket needed.** The HTTP layer sits behind [`Transport`]; the
 //!   quickstart above runs end to end against an inline scripted transport in
 //!   every feature configuration, and the integration tests in `tests/` drive
@@ -396,7 +397,7 @@ pub use nameserverset::{
     NameserverSet, NameserverSetCreate, NameserverSetType, NameserverSetUpdate,
 };
 pub use news::NewsItem;
-pub use nichandle::{NicHandle, NicHandleQuery};
+pub use nichandle::{NicHandle, NicHandleListPage, NicHandleListing, NicHandleQuery};
 pub use pagination::{
     Listing, Page, Pages, Pagination, DEFAULT_PAGE_SIZE, MAX_ITEMS, MAX_PAGES, MAX_PAGE_SIZE,
 };

@@ -13,7 +13,8 @@ use inwx_client::{
     ApplicationCheck, ApplicationCreate, ApplicationQuery, ApplicationType, ApplicationUpdate,
     AuthInfo2Order, ContactVerificationSettingsUpdate, CustomerDownloadQuery, CustomerUpdate,
     DocumentKind, DocumentQuery, DocumentUpload, DocumentUploadOutcome, DomainName, Error,
-    HostCheck, HostCreate, HostQuery, HostUpdate, Hostname, MessageAck, NicHandleQuery, PdfRender,
+    HostCheck, HostCreate, HostQuery, HostUpdate, Hostname, MessageAck, NicHandleQuery, Pagination,
+    PdfRender,
 };
 use serde_json::json;
 
@@ -1055,17 +1056,178 @@ async fn list_nichandles_filters_the_handle_tree() {
         .with_page(1, 5)
         .unwrap();
 
-    let handles = client(transport.clone())
+    let page = client(transport.clone())
         .list_nichandles(&query)
         .await
         .unwrap();
-    assert_eq!(handles[0].handle.as_deref(), Some("ACME-1"));
+    assert_eq!(page.handles[0].handle.as_deref(), Some("ACME-1"));
+    assert!(page.count.is_none());
 
     let call = transport.only_call();
     assert_eq!(call.method, "nichandle.list");
     assert_eq!(call.params["handle"], "ACME-1");
     assert_eq!(call.params["type"], "PERSON");
     assert_eq!(call.params["pagelimit"], 5);
+}
+
+#[tokio::test]
+async fn list_nichandles_reports_truncation_with_count() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "count": 51,
+        "nichandle": [
+            { "nicId": 1, "handle": "ACME-1" },
+            { "nicId": 2, "handle": "ACME-2" },
+        ],
+    }));
+
+    let page = client(transport.clone())
+        .list_nichandles(&NicHandleQuery::new().with_page(1, 2).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(page.count, Some(51));
+    assert_eq!(page.len(), 2);
+    assert!(page.has_more());
+}
+
+#[tokio::test]
+async fn list_all_nichandles_reads_a_single_short_page() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "count": 2,
+        "nichandle": [
+            { "nicId": 1, "handle": "ACME-1" },
+            { "nicId": 2, "handle": "ACME-2" },
+        ],
+    }));
+
+    let pagination = Pagination::new().with_page_size(50).unwrap();
+    let handles = client(transport.clone())
+        .list_all_nichandles(&NicHandleQuery::new(), &pagination)
+        .collect_all()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        handles
+            .iter()
+            .filter_map(|handle| handle.id)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
+async fn list_all_nichandles_fetches_until_the_reported_total() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "count": 3,
+        "nichandle": [
+            { "nicId": 1, "handle": "ACME-1" },
+            { "nicId": 2, "handle": "ACME-2" },
+        ],
+    }));
+    transport.ok(json!({
+        "count": 3,
+        "nichandle": [
+            { "nicId": 3, "handle": "ACME-3" },
+        ],
+    }));
+    transport.ok(json!({
+        "count": 3,
+        "nichandle": [
+            { "nicId": 99, "handle": "NEVER-REQUESTED" },
+        ],
+    }));
+
+    let pagination = Pagination::new().with_page_size(2).unwrap();
+    let handles = client(transport.clone())
+        .list_all_nichandles(
+            &NicHandleQuery::new().with_customer_number(123_456).unwrap(),
+            &pagination,
+        )
+        .collect_all()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        handles
+            .iter()
+            .filter_map(|handle| handle.id)
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].params["customerNumber"], 123_456);
+    assert_eq!(calls[0].params["page"], 1);
+    assert_eq!(calls[1].params["page"], 2);
+}
+
+#[tokio::test]
+async fn list_all_nichandles_stops_on_an_exactly_complete_page() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "count": 2,
+        "nichandle": [
+            { "nicId": 1, "handle": "ACME-1" },
+            { "nicId": 2, "handle": "ACME-2" },
+        ],
+    }));
+    transport.ok(json!({
+        "count": 2,
+        "nichandle": [
+            { "nicId": 99, "handle": "NEVER-REQUESTED" },
+        ],
+    }));
+
+    let pagination = Pagination::new().with_page_size(2).unwrap();
+    let handles = client(transport.clone())
+        .list_all_nichandles(&NicHandleQuery::new(), &pagination)
+        .collect_all()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        handles
+            .iter()
+            .filter_map(|handle| handle.id)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
+async fn list_all_nichandles_does_not_treat_a_full_page_without_count_as_complete() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "nichandle": [
+            { "nicId": 1, "handle": "ACME-1" },
+            { "nicId": 2, "handle": "ACME-2" },
+        ],
+    }));
+    transport.ok(json!({
+        "nichandle": [],
+    }));
+
+    let pagination = Pagination::new().with_page_size(2).unwrap();
+    let handles = client(transport.clone())
+        .list_all_nichandles(&NicHandleQuery::new(), &pagination)
+        .collect_all()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        handles
+            .iter()
+            .filter_map(|handle| handle.id)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(transport.call_count(), 2);
 }
 
 // ---------------------------------------------------------------------- pdf --

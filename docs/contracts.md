@@ -61,8 +61,8 @@ filtered variant; `nameserver.exportlist` is Tables 2.203/2.204):
 | `nameserver.list` | `page`, `pagelimit` | `count` | `domains` array |
 
 `Pages` turns one of those commands into a walk (`list_all_domains`,
-`list_all_contacts`, `list_all_zones`, or `Pages::new` for a `Listing` of your
-own). Rules the crate enforces, with the reason:
+`list_all_contacts`, `list_all_zones`, `list_all_nichandles`, or `Pages::new`
+for a `Listing` of your own). Rules the crate enforces, with the reason:
 
 - The walk owns the cursor: `page` and `pagelimit` are set by the walker, so a
   query that pins a page cannot fight it. Filters (`domain`, `search`, `status`,
@@ -576,7 +576,7 @@ Source: <https://account.inwx.com/en/help/apidoc/f/ch02s18.html>
 
 | Method | Wrapper | Input table | Output table |
 | --- | --- | --- | --- |
-| `nichandle.list` | `NicHandleQuery` → `list_nichandles` | 2.223 (derived) | 2.224 (derived) |
+| `nichandle.list` | `NicHandleQuery` → `list_nichandles`; `NicHandleListing` → `list_all_nichandles` | 2.223 (derived) | 2.224 (derived) |
 
 ### `pdf.*` (`src/pdf.rs`)
 

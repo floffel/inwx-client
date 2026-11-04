@@ -779,7 +779,6 @@ fn listing_helpers_report_empty_and_full_pages() {
     let page: inwx_client::DomainListPage =
         serde_json::from_str(r#"{"count":0,"domain":[]}"#).unwrap();
     assert_eq!(page.len(), 0);
-    assert_eq!(page.len(), 0);
     assert!(!page.has_more());
 
     let full: inwx_client::DomainListPage =
@@ -787,6 +786,12 @@ fn listing_helpers_report_empty_and_full_pages() {
             .unwrap();
     assert_eq!(full.len(), 2);
     assert!(full.has_more());
+
+    let handles: inwx_client::NicHandleListPage =
+        serde_json::from_str(r#"{"count":40,"nichandle":[{"nicId":1},{"nicId":2}]}"#).unwrap();
+    assert_eq!(handles.len(), 2);
+    assert!(!handles.is_empty());
+    assert!(handles.has_more());
 }
 
 #[tokio::test]
