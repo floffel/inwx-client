@@ -147,7 +147,7 @@ Every method below is implemented against the published INWX API documentation
 | Accounting | `accounting.accountBalance`, `creditLogById`, `getInvoice`, `getPreviewInvoice`, `getReceipt`, `getstatement`, `listInvoices`, `lockedFunds`, `log`, `refund`, `sendbypost` | PDFs decoded from base64 (`Document::pdf_bytes`); `refund` needs the acknowledgement |
 | Contacts | `contact.create`, `contact.info`, `contact.list`, `contact.update`, `contact.delete` | documented field lengths and country codes enforced |
 | Diagnostics | `domain.log`, `domain.stats`, `domain.getRules`, `domain.getTldGroups` | read-only: why an action was rejected and what a `TLD` requires |
-| Prices | `domain.getPrices`, `domain.getdomainprice` | `f64` quotes, not amounts to sum |
+| Prices | `domain.getPrices`, `domain.getdomainprice`, `domain.getalldomainprices`, `domain.getextradatarules`, `domain.getPromos`, `domain.priceChanges` | `f64` quotes, not amounts to sum; promo rows and scheduled changes are read from their documented containers |
 | Pagination | `Pagination`, `Pages`, `DomainListing`, `ContactListing`, `ZoneListing`, `NicHandleListing`, `ApplicationListing` | `list_all_domains`, `list_all_contacts`, `list_all_zones`, `list_all_nichandles`, `list_all_applications` walk every page with a bound that is validated before the wire |
 | Reseller: applications | `application.check`, `create`, `delete`, `info`, `list`, `update` | types are validated tokens, not a frozen enum; a check needs a selector, an update needs a change; `list_applications` answers an `ApplicationListPage` and `list_all_applications` walks every page |
 | Reseller: customers | `customer.info`, `update`, `delete`, `contactverificationsettingsinfo`, `contactverificationsettingsupdate`, `listdownloads`, `requestdataexport` | e-mail, country code and address lengths checked; the data export is what copies personal data out |
@@ -274,6 +274,7 @@ documentation does not state:
 | `nameserver.info` returning the record array | documented (Table 2.208) and implemented; that it *also* serves as the record listing (there is no `nameserver.listRecords`) is an inference from the documented method list. |
 | Prices as `float` | documented; parsed as `f64` and accepted from strings. Display-only: use the amount returned by `create`/`renew` for accounting. |
 | `domain.getdomainprice` response shape | documented as `resData.domain[]`; older flat shapes are tolerated by the parser. |
+| `domain.getPromos` / `domain.priceChanges` casing | documented with that exact method casing; `is_read_only_method` folds case, so the lowercase spellings also classify correctly. |
 | `nameserver.create` with `type=MASTER` and no `ns` | **unverified** — `ns` is optional in the docs; what INWX assigns in that case is not stated. Sent as documented. |
 | `dyndns.updateRecord` account selection | **unverified** — Table 2.159 lists only `ipAddress` and `ipAddressV6`; no account selector is documented. Sent exactly as documented. |
 | `hosting.getPrices` price fields | **unverified** — Table 2.181 lists only `id` and `product`, so no price is modelled. |

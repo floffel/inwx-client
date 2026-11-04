@@ -1152,7 +1152,7 @@ impl DocumentQuery {
     /// # Errors
     ///
     /// [`Error::Validation`] when `page` is `0` (INWX pages start at `1`), or
-    /// when the page size is zero.
+    /// when the page size is zero or above [`crate::MAX_PAGE_SIZE`].
     ///
     /// ```
     /// use inwx_client::DocumentQuery;
@@ -1406,7 +1406,12 @@ mod tests {
         assert!(DocumentQuery::new().with_page(1, 0).is_err());
         assert!(DocumentQuery::new().with_page(0, 1).is_err());
         assert!(DocumentQuery::new().with_page(1, 1).is_ok());
-        assert!(DocumentQuery::new().with_page(u32::MAX, 1).is_ok());
+        assert!(DocumentQuery::new()
+            .with_page(1, crate::MAX_PAGE_SIZE)
+            .is_ok());
+        assert!(DocumentQuery::new()
+            .with_page(1, crate::MAX_PAGE_SIZE + 1)
+            .is_err());
     }
 
     #[test]

@@ -561,22 +561,44 @@ fn transfer_branches() {
     .unwrap();
     assert_eq!(trade.domain().as_str(), "a.de");
 
-    let push = inwx_client::PushRequest::new(Irreversible::acknowledge(
+    let push = inwx_client::PushRequest::builder(Irreversible::acknowledge(
         inwx_client::ActionKind::Push,
         &domain("a.de"),
     ))
+    .build()
     .unwrap();
     assert_eq!(push.domain().as_str(), "a.de");
-    assert!(push.clone().with_target("").is_err());
-    assert!(push.with_target("x".repeat(65)).is_err());
+    assert!(inwx_client::PushRequest::builder(Irreversible::acknowledge(
+        inwx_client::ActionKind::Push,
+        &domain("a.de"),
+    ))
+    .with_target("")
+    .is_err());
+    assert!(inwx_client::PushRequest::builder(Irreversible::acknowledge(
+        inwx_client::ActionKind::Push,
+        &domain("a.de"),
+    ))
+    .with_target("x".repeat(65))
+    .is_err());
 
-    let restore = inwx_client::RestoreRequest::new(Irreversible::acknowledge(
+    let restore = inwx_client::RestoreRequest::builder(Irreversible::acknowledge(
         inwx_client::ActionKind::Restore,
         &domain("a.de"),
     ))
+    .build()
     .unwrap();
     assert_eq!(restore.domain().as_str(), "a.de");
-    assert_eq!(restore.dry_run().params()["testing"], true);
+    assert_eq!(
+        inwx_client::RestoreRequest::builder(Irreversible::acknowledge(
+            inwx_client::ActionKind::Restore,
+            &domain("a.de"),
+        ))
+        .dry_run()
+        .build()
+        .unwrap()
+        .params()["testing"],
+        true
+    );
 
     let cancel = TransferCancelRequest::new(Irreversible::acknowledge(
         inwx_client::ActionKind::TransferCancel,

@@ -65,7 +65,7 @@
 //!
 //! impl Transport for Scripted {
 //!     async fn execute(&self, request: Request<'_>) -> Result<Response> {
-//!         let method = serde_json::from_slice::<Value>(request.body)
+//!         let method = serde_json::from_slice::<Value>(&request.body)
 //!             .ok()
 //!             .and_then(|body| body.get("method")?.as_str().map(str::to_owned));
 //!         let (headers, payload) = match method.as_deref() {
@@ -136,7 +136,7 @@
 //! | Account roles | `account.getroles`, `account.addrole`, `account.removerole` |
 //! | Contacts | `contact.create`, `contact.info`, `contact.list`, `contact.update`, `contact.delete` |
 //! | Diagnostics | `domain.log`, `domain.stats`, `domain.getRules`, `domain.getTldGroups` |
-//! | Prices | `domain.getPrices`, `domain.getdomainprice`, `domain.getalldomainprices`, `domain.getextradatarules`, `domain.getpromos`, `domain.pricechanges` |
+//! | Prices | `domain.getPrices`, `domain.getdomainprice`, `domain.getalldomainprices`, `domain.getextradatarules`, `domain.getPromos`, `domain.priceChanges` |
 //! | Applications | `application.check`, `create`, `delete`, `info`, `list`, `update` |
 //! | Customers | `customer.info`, `update`, `delete`, `contactverificationsettingsinfo`, `contactverificationsettingsupdate`, `listdownloads`, `requestdataexport` |
 //! | Hosts (glue records) | `host.check`, `create`, `delete`, `info`, `list`, `update` |
@@ -172,8 +172,7 @@
 //! * **Parse permissively.** Unknown fields are ignored, unknown enum values are
 //!   carried ([`RecordType::Other`], [`RenewalMode::Other`],
 //!   [`ContactType::Other`], [`AccountRole::Other`]), and scalars are accepted as
-//!   numbers or strings —
-//!   INWX is inconsistent between methods.
+//!   numbers or strings — INWX is inconsistent between methods.
 //! * **Walk the whole list.** [`InwxClient::list_all_domains`],
 //!   [`InwxClient::list_all_contacts`], [`InwxClient::list_all_zones`],
 //!   [`InwxClient::list_all_nichandles`] and
@@ -404,7 +403,7 @@ pub use nameserver::{NameserverCheck, ZoneInfo, ZoneListPage, ZoneListing, ZoneS
 pub use nameserverset::{
     NameserverSet, NameserverSetCreate, NameserverSetType, NameserverSetUpdate,
 };
-pub use news::{NewsItem, NewsQuery};
+pub use news::{NewsItem, NewsPage, NewsQuery};
 pub use nichandle::{NicHandle, NicHandleListPage, NicHandleListing, NicHandleQuery};
 pub use pagination::{
     Listing, Page, Pages, Pagination, DEFAULT_PAGE_SIZE, MAX_ITEMS, MAX_PAGES, MAX_PAGE_SIZE,
@@ -427,8 +426,8 @@ pub use transport::{
     read_capped_body, ChunkSource, Response, Transport, TransportStage, DEFAULT_MAX_RESPONSE_BYTES,
 };
 pub use types::{
-    parse_ip, AuthCode, ContactType, DocumentFormat, DomainName, Email, Handle, Hostname, Password,
-    Period, PriceType, RenewalMode, Timestamp, MAX_AUTH_CODE_LEN, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
-    MAX_PASSWORD_LEN,
+    parse_ip, AuthCode, ContactType, ContactTypeUnknown, DocumentFormat, DomainName, Email, Handle,
+    Hostname, Password, Period, PriceType, RenewalMode, RenewalModeUnknown, Timestamp,
+    MAX_AUTH_CODE_LEN, MAX_DOMAIN_LEN, MAX_LABEL_LEN, MAX_PASSWORD_LEN,
 };
 pub use zone::{RecordExport, UrlRedirectType, ZoneCreate, ZoneExport, ZoneType, ZoneUpdate};
