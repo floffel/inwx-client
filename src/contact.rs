@@ -3,7 +3,9 @@
 //! INWX wants handles, not inline addresses: you create a handle once, then
 //! attach it to a domain as registrant, admin, tech or billing. Validation here
 //! mirrors the documented field types (`text64` street, `text10` postcode,
-//! two-letter country) so a rejected handle is a local error.
+//! `email`, two-letter country) so a rejected handle is a local error: the
+//! country is looked up in the `celes` ISO 3166-1 table and the address is
+//! checked against `garde`'s RFC 5321 shape, never against a local guess.
 
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -12,7 +14,9 @@ use crate::client::InwxClient;
 use crate::error::{Error, Result};
 use crate::pagination::{self, Listing, Page, Pages, Pagination};
 use crate::transport::Transport;
-use crate::types::{de, reject_control_chars, ContactType};
+use crate::types::{
+    de, reject_control_chars, validate_country_code, validate_email_field, ContactType,
+};
 
 /// A contact handle to create (`contact.create`).
 ///
@@ -76,7 +80,7 @@ impl ContactRequest {
             ));
         }
         reject_control_chars("contact.name", &name)?;
-        validate_email(&email)?;
+        let email = validate_email_field("contact.email", &email)?;
         Ok(Self {
             contact_type,
             name,
@@ -168,18 +172,27 @@ impl ContactRequest {
         self
     }
 
-    /// Sets the two-letter ISO country code.
+    /// Sets the two-letter ISO 3166-1 country code.
+    ///
+    /// The code is upper-cased here, so the value that is checked is the value
+    /// that is sent; whether it is a country at all is decided by
+    /// [`ContactRequest::validate`] against the ISO table, which knows that
+    /// `ZZ` is not one.
     ///
     /// ```
     /// use inwx_client::{ContactRequest, ContactType};
     ///
     /// let request = ContactRequest::new(ContactType::Person, "A", "a@b.test")?.with_country("at");
     /// assert_eq!(request.params()["cc"], "AT");
+    ///
+    /// let unknown = ContactRequest::new(ContactType::Person, "A", "a@b.test")?.with_country("ZZ");
+    /// assert!(unknown.validate().is_err());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     #[must_use]
     pub fn with_country(mut self, country: impl Into<String>) -> Self {
-        self.country = Some(country.into());
+        let country = country.into();
+        self.country = Some(country.trim().to_ascii_uppercase());
         self
     }
 
@@ -265,7 +278,7 @@ impl ContactRequest {
             }
         }
         if let Some(country) = &self.country {
-            params.insert("cc".to_owned(), json!(country.to_ascii_uppercase()));
+            params.insert("cc".to_owned(), json!(country));
         }
         Value::Object(params)
     }
@@ -313,7 +326,7 @@ impl ContactRequest {
             .as_deref()
             .ok_or_else(|| Error::validation("contact.voice", "is required"))?;
 
-        check_country(country)?;
+        validate_country_code("contact.cc", country)?;
         check_len("contact.street", street, 64)?;
         check_len("contact.city", city, 64)?;
         check_len("contact.pc", postcode, 10)?;
@@ -456,11 +469,14 @@ impl ContactUpdate {
     /// ```
     /// use inwx_client::ContactUpdate;
     /// assert_eq!(ContactUpdate::new(1)?.with_country("de").params()?["cc"], "DE");
+    /// assert!(ContactUpdate::new(1)?.with_country("ZZ").params().is_err());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     #[must_use]
     pub fn with_country(mut self, country: impl Into<String>) -> Self {
-        self.changes.insert("cc".to_owned(), json!(country.into()));
+        let country = country.into();
+        self.changes
+            .insert("cc".to_owned(), json!(country.trim().to_ascii_uppercase()));
         self
     }
 
@@ -519,6 +535,9 @@ impl ContactUpdate {
 
     /// The `contact.update` parameters.
     ///
+    /// The address and the country code are sent in the exact form they were
+    /// validated in, trimmed and upper-cased respectively.
+    ///
     /// # Errors
     ///
     /// [`Error::Validation`] when nothing was changed, or when a changed email
@@ -530,17 +549,16 @@ impl ContactUpdate {
                 "an update needs at least one changed field",
             ));
         }
+        let mut params = self.changes.clone();
         if let Some(Value::String(email)) = self.changes.get("email") {
-            validate_email(email)?;
+            let email = validate_email_field("contact.email", email)?;
+            params.insert("email".to_owned(), json!(email));
         }
         if let Some(Value::String(country)) = self.changes.get("cc") {
-            check_country(country)?;
+            let country = validate_country_code("contact.cc", country)?;
+            params.insert("cc".to_owned(), json!(country));
         }
-        let mut params = self.changes.clone();
         params.insert("id".to_owned(), json!(self.id));
-        if let Some(Value::String(country)) = params.get_mut("cc") {
-            *country = country.to_ascii_uppercase();
-        }
         Ok(Value::Object(params))
     }
 }
@@ -839,56 +857,6 @@ where
         .map_err(serde::de::Error::custom)
 }
 
-/// Validates the two-letter country code the API expects.
-fn check_country(country: &str) -> Result<()> {
-    let trimmed = country.trim();
-    if trimmed.len() != 2 || !trimmed.chars().all(|c| c.is_ascii_alphabetic()) {
-        return Err(Error::validation(
-            "contact.cc",
-            format!("{country:?} is not a two-letter ISO country code"),
-        ));
-    }
-    Ok(())
-}
-
-/// Rejects empty, whitespace-carrying or `@`-less addresses; the registrar's
-/// own check is authoritative.
-fn validate_email(email: &str) -> Result<()> {
-    let trimmed = email.trim();
-    if trimmed.len() < 3 || trimmed.len() > 255 {
-        return Err(Error::validation(
-            "contact.email",
-            "must be 3 to 255 characters",
-        ));
-    }
-    let Some((local, domain)) = trimmed.split_once('@') else {
-        return Err(Error::validation(
-            "contact.email",
-            format!("{email:?} is missing `@`"),
-        ));
-    };
-    if local.is_empty() || domain.is_empty() || domain.contains('@') {
-        return Err(Error::validation(
-            "contact.email",
-            format!("{email:?} is not a valid email address"),
-        ));
-    }
-    if trimmed.chars().any(char::is_whitespace) {
-        return Err(Error::validation(
-            "contact.email",
-            "must not contain whitespace",
-        ));
-    }
-    reject_control_chars("contact.email", trimmed)?;
-    if !domain.contains('.') {
-        return Err(Error::validation(
-            "contact.email",
-            format!("{email:?} has no top level domain"),
-        ));
-    }
-    Ok(())
-}
-
 /// Enforces a documented maximum length.
 fn check_len(field: &'static str, value: &str, max: usize) -> Result<()> {
     if value.chars().count() > max {
@@ -1134,23 +1102,58 @@ mod tests {
     }
 
     #[test]
-    fn country_code_must_be_two_letters() {
-        let bad = complete().with_country("DEU");
-        assert!(bad.validate().is_err());
-        let bad = complete().with_country("D1");
-        assert!(bad.validate().is_err());
+    fn an_unknown_country_code_is_not_a_country() {
+        // Two ASCII letters are not enough: `ZZ` and `QQ` have the shape and are
+        // not countries, so the ISO table decides.
+        for bad in ["ZZ", "QQ", "zz", "DEU", "D1", "", "  "] {
+            assert!(complete().with_country(bad).validate().is_err(), "{bad:?}");
+        }
+        // Just inside the boundary, in either case and with padding: the code is
+        // normalised, checked against the table and sent in that one form.
+        for good in ["DE", "de", " DE "] {
+            let request = complete().with_country(good);
+            assert!(request.validate().is_ok(), "{good:?}");
+            assert_eq!(request.params()["cc"], "DE", "{good:?}");
+        }
     }
 
     #[test]
     fn email_validation() {
-        assert!(validate_email("a@b.test").is_ok());
-        assert!(validate_email("a@b").is_err());
-        assert!(validate_email("@b.test").is_err());
-        assert!(validate_email("a@").is_err());
-        assert!(validate_email("a b@c.test").is_err());
-        assert!(validate_email("a@@b.test").is_err());
-        assert!(validate_email("ab").is_err());
-        assert!(validate_email(&format!("{}@b.test", "x".repeat(300))).is_err());
+        let check = |email: &str| validate_email_field("contact.email", email);
+        assert!(check("a@b.test").is_ok());
+        assert!(check("a@b").is_err());
+        assert!(check("@b.test").is_err());
+        assert!(check("a@").is_err());
+        assert!(check("a b@c.test").is_err());
+        assert!(check("a@@b.test").is_err());
+        assert!(check("ab").is_err());
+        assert!(check(&format!("{}@b.test", "x".repeat(300))).is_err());
+        // 255 bytes are the last accepted length, 256 are rejected.
+        let long_domain = |last: usize| {
+            format!(
+                "a@{}.{}.{}.{}",
+                "b".repeat(63),
+                "c".repeat(63),
+                "d".repeat(63),
+                "e".repeat(last)
+            )
+        };
+        assert_eq!(long_domain(61).len(), 255);
+        assert!(check(&long_domain(61)).is_ok());
+        assert!(check(&long_domain(62)).is_err());
+    }
+
+    #[test]
+    fn the_address_that_is_checked_is_the_address_that_is_sent() {
+        // #112: the trimmed value was validated while the untrimmed one went out.
+        assert_eq!(
+            validate_email_field("contact.email", "  a@b.test  ").unwrap(),
+            "a@b.test"
+        );
+        let request = ContactRequest::new(ContactType::Person, "A", "  a@b.test  ").unwrap();
+        assert_eq!(request.params()["email"], "a@b.test");
+        let update = ContactUpdate::new(1).unwrap().with_email(" a@b.test ");
+        assert_eq!(update.params().unwrap()["email"], "a@b.test");
     }
 
     #[test]

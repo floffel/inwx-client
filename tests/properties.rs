@@ -1546,3 +1546,80 @@ proptest! {
         prop_assert!(empty.message_id().is_err());
     }
 }
+
+// --------------------------------------------- 0.2.0 contact field validators
+
+mod contact_fields {
+    use inwx_client::{ContactRequest, ContactType, ContactUpdate, Email};
+    use proptest::prelude::*;
+
+    /// A complete handle with the country and the address under test.
+    fn handle(address: &str, country: &str) -> ContactRequest {
+        ContactRequest::new(ContactType::Person, "Erika", address)
+            .expect("the fixed address is valid")
+            .with_street("Weg 2")
+            .with_city("Berlin")
+            .with_postcode("10115")
+            .with_country(country)
+            .with_voice("+49.891")
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// The address that is checked is the address that is sent: whatever
+        /// padding surrounds the value never reaches the payload.
+        #[test]
+        fn a_contact_address_is_sent_trimmed(
+            local in "[A-Za-z0-9._%+-]{1,20}",
+            label in "[a-z0-9]([a-z0-9-]{0,20}[a-z0-9])?",
+            pad_left in " {0,3}",
+            pad_right in " {0,3}",
+        ) {
+            let address = format!("{local}@{label}.example.com");
+            let padded = format!("{pad_left}{address}{pad_right}");
+            let request = handle(&padded, "DE");
+            let params = request.params();
+            prop_assert_eq!(params["email"].as_str(), Some(address.as_str()));
+            prop_assert!(request.validate().is_ok());
+
+            let update = ContactUpdate::new(1)
+                .expect("a positive handle id")
+                .with_email(padded);
+            let updated = update.params().expect("a changed field");
+            prop_assert_eq!(updated["email"].as_str(), Some(address.as_str()));
+        }
+
+        /// `Email` and the contact field agree, and both are fixed points: an
+        /// accepted value is accepted again unchanged.
+        #[test]
+        fn an_accepted_address_survives_a_second_pass(address in "\\PC{0,40}") {
+            let Ok(email) = Email::parse(&address) else {
+                return Ok(());
+            };
+            prop_assert_eq!(email.as_str(), address.trim());
+            let reparsed = Email::parse(email.as_str());
+            prop_assert!(reparsed.is_ok());
+            if let Ok(reparsed) = reparsed {
+                prop_assert_eq!(reparsed.as_str(), email.as_str());
+            }
+            prop_assert!(handle(email.as_str(), "DE").validate().is_ok());
+        }
+
+        /// The country is an ISO 3166-1 lookup: the same code in either case is
+        /// the same country, and an accepted code travels upper-cased.
+        #[test]
+        fn a_country_code_is_a_table_lookup(code in "[A-Za-z]{2}") {
+            let upper = handle("erika@example.com", &code.to_uppercase());
+            let lower = handle("erika@example.com", &code.to_lowercase());
+            prop_assert_eq!(upper.validate().is_ok(), lower.validate().is_ok());
+            if upper.validate().is_ok() {
+                let expected = code.to_uppercase();
+                let upper_params = upper.params();
+                let lower_params = lower.params();
+                prop_assert_eq!(upper_params["cc"].as_str(), Some(expected.as_str()));
+                prop_assert_eq!(upper_params["cc"].as_str(), lower_params["cc"].as_str());
+            }
+        }
+    }
+}

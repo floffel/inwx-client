@@ -17,6 +17,9 @@ use zeroize::Zeroize as _;
 
 use idna::uts46::{AsciiDenyList, DnsLength, Hyphens, Uts46};
 
+use celes::Country;
+use garde::rules::email::parse_email;
+
 use crate::{Error, Result};
 
 /// Longest legal DNS name in presentation form, without the trailing root dot.
@@ -866,10 +869,12 @@ impl<'de> Deserialize<'de> for Handle {
 /// An email address, validated to the shape every INWX `email` parameter asks
 /// for (`soaEmail`, `hostmaster`, `validationEmail`).
 ///
-/// The check is deliberately structural — one `@`, a non-empty local part using
-/// `[A-Za-z0-9._%+-]`, and a domain that passes [`Hostname`] validation. It
-/// cannot prove the mailbox exists; it only keeps obviously malformed values
-/// from being charged for.
+/// The shape check is `garde`'s (`rules::email::parse_email`): one `@`, a local
+/// part of at most 64 `atext` characters, a domain of at most 255. On top of it
+/// the domain has to pass [`Hostname`] and carry a dot, because a contact
+/// address that cannot be resolved is a handle the registrar answers with a
+/// generic error. It cannot prove the mailbox exists; it only keeps obviously
+/// malformed values from being charged for.
 ///
 /// ```
 /// use inwx_client::Email;
@@ -886,52 +891,15 @@ pub struct Email(String);
 impl Email {
     /// Validates an address.
     ///
+    /// The stored value is the trimmed address, so what was checked is exactly
+    /// what [`Email::as_str`] hands to the wire.
+    ///
     /// # Errors
     ///
     /// [`Error::Validation`] when the address is empty, longer than 255
     /// characters, has no single `@`, or either side is unusable.
     pub fn parse(input: &str) -> Result<Self> {
-        let trimmed = input.trim();
-        if trimmed.is_empty() {
-            return Err(Error::validation("email", "must not be empty"));
-        }
-        if trimmed.len() > 255 {
-            return Err(Error::validation("email", "must be at most 255 characters"));
-        }
-        reject_control_chars("email", trimmed)?;
-        let (local, domain) = trimmed
-            .split_once('@')
-            .ok_or_else(|| Error::validation("email", format!("{trimmed:?} has no `@`")))?;
-        if local.is_empty() {
-            return Err(Error::validation("email", "must have a local part"));
-        }
-        if local.len() > 64 {
-            return Err(Error::validation(
-                "email",
-                "local part must be at most 64 characters",
-            ));
-        }
-        if !local
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "._%+-".contains(c))
-        {
-            return Err(Error::validation(
-                "email",
-                "local part may only contain letters, digits and ._%+-",
-            ));
-        }
-        if domain.contains('@') {
-            return Err(Error::validation("email", "must have exactly one `@`"));
-        }
-        Hostname::parse(domain)
-            .map_err(|_| Error::validation("email", format!("{domain:?} is not a valid domain")))?;
-        if !domain.contains('.') {
-            return Err(Error::validation(
-                "email",
-                "domain must contain a dot (a TLD)",
-            ));
-        }
-        Ok(Self(trimmed.to_owned()))
+        Ok(Self(validate_email_field("email", input)?))
     }
 
     /// The address as sent on the wire.
@@ -1532,16 +1500,58 @@ pub(crate) fn validate_filename(field: &'static str, value: &str) -> Result<Stri
     Ok(trimmed.to_owned())
 }
 
-/// A two-letter ISO-3166 country code, upper-cased.
-pub(crate) fn validate_country_code(field: &'static str, value: &str) -> Result<String> {
-    let trimmed = value.trim().to_ascii_uppercase();
-    if trimmed.len() != 2 || !trimmed.chars().all(|c| c.is_ascii_alphabetic()) {
+/// An email address as it goes on the wire: trimmed, so the value that was
+/// checked is the value that is sent.
+///
+/// The address shape comes from `garde` (`rules::email::parse_email`: one `@`,
+/// ≤ 64 bytes of `atext` before it, ≤ 255 bytes of domain after it), never from
+/// a local `split_once('@')` heuristic. Two rules are added on top, both about
+/// the domain: it must pass [`Hostname`] (so IDN and label rules are `idna`'s)
+/// and it must carry a dot, because a dotless domain is RFC-valid but cannot
+/// receive mail. The registrar's own check stays authoritative.
+pub(crate) fn validate_email_field(field: &'static str, value: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(Error::validation(field, "must not be empty"));
+    }
+    if trimmed.len() > 255 {
+        return Err(Error::validation(field, "must be at most 255 characters"));
+    }
+    reject_control_chars(field, trimmed)?;
+    parse_email(trimmed).map_err(|error| {
+        Error::validation(
+            field,
+            format!("{trimmed:?} is not a valid address: {error}"),
+        )
+    })?;
+    let domain = trimmed
+        .rsplit_once('@')
+        .map_or("", |(_local, domain)| domain);
+    Hostname::parse(domain)
+        .map_err(|_| Error::validation(field, format!("{domain:?} is not a valid domain")))?;
+    if !domain.contains('.') {
         return Err(Error::validation(
             field,
-            format!("{value:?} is not a two-letter ISO country code"),
+            "domain must contain a dot (a TLD)",
         ));
     }
-    Ok(trimmed)
+    Ok(trimmed.to_owned())
+}
+
+/// A two-letter ISO 3166-1 country code, upper-cased.
+///
+/// The table is `celes`': two ASCII letters are not enough, `ZZ` and `QQ` are
+/// two letters and no country, and the API only says so in a generic `2005`
+/// after the handle was sent.
+pub(crate) fn validate_country_code(field: &'static str, value: &str) -> Result<String> {
+    Country::from_alpha2(value.trim())
+        .map(|country| country.alpha2.to_owned())
+        .map_err(|_| {
+            Error::validation(
+                field,
+                format!("{value:?} is not an ISO 3166-1 alpha-2 country code"),
+            )
+        })
 }
 
 /// Base64 with the standard alphabet and padding, which is what the API uses for
