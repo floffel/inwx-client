@@ -814,6 +814,32 @@ async fn zone_info_refuses_an_answer_for_another_zone() {
 }
 
 #[tokio::test]
+async fn zone_info_refuses_a_short_record_list() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "roId": 7,
+        "domain": "example.com",
+        "type": "MASTER",
+        "count": 2,
+        "record": [{"id": "1", "name": "@", "type": "A", "content": "203.0.113.7"}]
+    }));
+
+    let client = client(transport);
+    let error = client.zone_info(&domain("example.com")).await.unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::RecordCountMismatch {
+            method: "nameserver.info",
+            declared: 2,
+            actual: 1,
+        }
+    ));
+    assert!(!error.is_retryable());
+    assert!(!error.is_uncertain());
+}
+
+#[tokio::test]
 async fn listing_zones_uses_the_documented_default_page_size() {
     let transport = MockTransport::new();
     transport.ok(json!({"count": 1, "domains": [{"domain": "a.de", "type": "MASTER"}]}));
