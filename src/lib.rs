@@ -322,6 +322,7 @@ pub mod pdf;
 pub mod price;
 pub mod record;
 pub mod rpc;
+mod session;
 pub mod tag;
 pub mod transfer;
 pub mod transport;

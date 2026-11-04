@@ -7,7 +7,6 @@
 //! `Debug` representation of anything.
 
 use std::fmt;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
@@ -17,6 +16,7 @@ use zeroize::Zeroize;
 
 use crate::error::{retry_after_at, Error, HttpBody, Result};
 use crate::rpc::{not_an_object, RpcRequest, RpcResponse};
+use crate::session::{SessionGate, Turn};
 use crate::transport::{Request, Response, Transport};
 use crate::types::de;
 
@@ -635,9 +635,10 @@ pub struct AccountUnlock {
 /// A JSON-RPC client for the INWX `DomRobot` API.
 ///
 /// The client is generic over [`Transport`], so tests and binaries can plug in
-/// their own HTTP stack. It is cheap to clone only by wrapping in [`Arc`]; the
-/// session is shared through an internal `Arc<Mutex<_>>`, so 32 tasks can share
-/// one client (see the `concurrency` integration test).
+/// their own HTTP stack. It is cheap to clone only by wrapping in
+/// `std::sync::Arc`; the session is shared through one internal gate, so 32
+/// tasks can share one client (see the `concurrency` integration test) — and a
+/// session that dies under them costs one `account.login`, not one per task.
 ///
 /// ```
 /// use inwx_client::{InwxClient, RetryPolicy, transport::{Request, Response, Transport}, Result};
@@ -671,7 +672,7 @@ pub struct InwxClient<T> {
     transport: T,
     base_url: String,
     credentials: Option<Credentials>,
-    session: Arc<Mutex<Option<String>>>,
+    session: SessionGate,
     policy: RetryPolicy,
     timeout: Option<Duration>,
     language: Option<Language>,
@@ -702,7 +703,7 @@ impl<T: Transport> InwxClient<T> {
             transport,
             base_url: DEFAULT_BASE_URL.to_owned(),
             credentials: None,
-            session: Arc::new(Mutex::new(None)),
+            session: SessionGate::new(),
             policy: RetryPolicy::default(),
             timeout: Some(Duration::from_secs(30)),
             language: None,
@@ -798,10 +799,7 @@ impl<T: Transport> InwxClient<T> {
         if trimmed.is_empty() {
             return Err(Error::validation("session", "must not be empty"));
         }
-        *self
-            .session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(trimmed.to_owned());
+        self.session.install(trimmed.to_owned());
         Ok(self)
     }
 
@@ -930,13 +928,13 @@ impl<T: Transport> InwxClient<T> {
     /// ```
     #[must_use]
     pub fn is_authenticated(&self) -> bool {
-        self.session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_some()
+        self.session.is_authenticated()
     }
 
     /// Drops the session cookie without telling the server.
+    ///
+    /// A login that is already on the wire does not resurrect the session
+    /// afterwards: the drop wins, and the next call logs in again.
     ///
     /// ```
     /// # use inwx_client::{InwxClient, transport::{Request, Response, Transport}, Result};
@@ -952,10 +950,7 @@ impl<T: Transport> InwxClient<T> {
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     pub fn clear_session(&self) {
-        *self
-            .session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        self.session.clear();
     }
 
     /// Logs in with the configured credentials and stores the session cookie.
@@ -976,6 +971,21 @@ impl<T: Transport> InwxClient<T> {
     /// # }
     /// ```
     ///
+    /// # One transition at a time
+    ///
+    /// A login never replaces a session that is already installed: a second
+    /// `account.login` invalidates the cookie of the first server-side, so the
+    /// installed one is reused and this call returns `Ok`. Use
+    /// [`Self::logout`] or [`Self::clear_session`] first to replace a session
+    /// on purpose.
+    ///
+    /// Concurrent callers do not each post credentials. The transition is
+    /// single-flight: one caller runs the login, the others wait for its cookie
+    /// and then use it, so a session that expired under thirty-two tasks costs
+    /// one `account.login` instead of thirty-two — every one of which would be
+    /// invalidated by the next and would count against an account that locks
+    /// after repeated failures.
+    ///
     /// Retries follow [`RetryPolicy`] — including the ones [`InwxClient::call`]
     /// refuses for a mutating command. `account.login` is the one command that
     /// is replayed although it writes: it opens a session and nothing else, so a
@@ -993,6 +1003,37 @@ impl<T: Transport> InwxClient<T> {
     /// API rejects the login, [`Error::Authentication`] when it accepts the
     /// login but sends no cookie.
     pub async fn login(&self) -> Result<()> {
+        if self.credentials.is_none() {
+            return Err(Error::NotAuthenticated);
+        }
+        // `None` for the generation: any session that is installed will do.
+        self.transition_session(None).await
+    }
+
+    /// One session transition: reuse the session somebody else installed, or
+    /// run the one `account.login` that may be on the wire.
+    ///
+    /// `seen` is the generation whose cookie the caller found dead, or `None`
+    /// when any session will do. Whoever claims the transition installs the
+    /// cookie it obtains — and only while the state is still the one it claimed
+    /// it for, so a concurrent [`Self::clear_session`] is not undone.
+    async fn transition_session(&self, seen: Option<u64>) -> Result<()> {
+        match self.session.begin(seen).await {
+            Turn::Fresh => Ok(()),
+            Turn::Login(claim) => {
+                let outcome = self.login_request().await;
+                claim.resolve(outcome.as_ref().ok().cloned());
+                outcome.map(|_| ())
+            }
+        }
+    }
+
+    /// The `account.login` round trip, cookie included.
+    ///
+    /// Callers must hold the login claim (see [`Self::transition_session`]):
+    /// this writes no session state itself, so the decision where the cookie
+    /// belongs stays in one place.
+    async fn login_request(&self) -> Result<String> {
         let credentials = self.credentials.as_ref().ok_or(Error::NotAuthenticated)?;
         let mut params = Map::new();
         params.insert(
@@ -1047,11 +1088,7 @@ impl<T: Transport> InwxClient<T> {
                 source: None,
             });
         }
-        *self
-            .session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cookie);
-        Ok(())
+        Ok(cookie)
     }
 
     /// Ends the session server-side and forgets the cookie locally.
@@ -1287,6 +1324,10 @@ impl<T: Transport> InwxClient<T> {
         let mut attempt = 1u32;
 
         loop {
+            // Read before the request goes out: a session that dies during the
+            // round trip is then this generation, and one a concurrent caller
+            // replaced in the meantime is not.
+            let generation = self.session.generation();
             let outcome = self.send(method, params.clone()).await;
             match outcome {
                 Ok(response) if response.is_success() => {
@@ -1296,8 +1337,7 @@ impl<T: Transport> InwxClient<T> {
                     let envelope = RpcResponse::parse_answer(response.body())?;
                     if envelope.is_authentication() && !relogged_in && self.credentials.is_some() {
                         relogged_in = true;
-                        self.clear_session();
-                        self.login().await?;
+                        self.transition_session(Some(generation)).await?;
                         continue;
                     }
                     // `2300` means the object is mid-transfer: the command did
@@ -1318,8 +1358,7 @@ impl<T: Transport> InwxClient<T> {
                     let status = response.status();
                     if matches!(status, 401 | 403) && !relogged_in && self.credentials.is_some() {
                         relogged_in = true;
-                        self.clear_session();
-                        self.login().await?;
+                        self.transition_session(Some(generation)).await?;
                         continue;
                     }
                     if status_replay_allowed(status, method) {
@@ -1365,6 +1404,13 @@ impl<T: Transport> InwxClient<T> {
     }
 
     /// Opens a session when the next call needs one.
+    ///
+    /// Concurrent callers coalesce here: the first one claims the login, the
+    /// rest wait for its cookie and then find the session installed. Thirty-two
+    /// tasks that start together therefore cost one `account.login`, not
+    /// thirty-two — a second login invalidates the cookie of the first
+    /// server-side, so posting them in parallel is how a client ends up holding
+    /// a session the server has already dropped.
     async fn ensure_session(&self) -> Result<()> {
         if self.is_authenticated() {
             return Ok(());
@@ -1384,11 +1430,7 @@ impl<T: Transport> InwxClient<T> {
         self.add_language(&mut params);
         let body = RpcRequest::from_map(method, params).to_bytes()?;
 
-        let cookie = self
-            .session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let cookie = self.session.cookie();
         let mut request = Request::post_json(&self.base_url, &body)
             .with_header("Content-Type", "application/json")
             .with_header("Accept", "application/json")
@@ -1655,14 +1697,7 @@ impl<T> fmt::Debug for InwxClient<T> {
         formatter
             .debug_struct("InwxClient")
             .field("base_url", &self.base_url)
-            .field(
-                "authenticated",
-                &self
-                    .session
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .is_some(),
-            )
+            .field("authenticated", &self.session.is_authenticated())
             .field("credentials", &self.credentials.is_some())
             .field("retry", &self.policy)
             .field("timeout", &self.timeout)
