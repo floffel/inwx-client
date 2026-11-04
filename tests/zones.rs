@@ -445,11 +445,43 @@ async fn export_endpoints_validate_their_filters() {
         .await
         .is_err());
     assert!(client
+        .export_records(DocumentFormat::Pdf, "*", 1, 1)
+        .await
+        .is_err());
+    assert!(client
+        .export_records(DocumentFormat::Csv, "*", 1, 0)
+        .await
+        .is_err());
+    assert!(client
         .export_records(DocumentFormat::Csv, "  ", 1, 1)
         .await
         .is_err());
     assert!(client.find_zones(" ").await.is_err());
     assert_eq!(transport.call_count(), 0);
+}
+
+#[tokio::test]
+async fn export_records_accepts_csv_and_its_limit_boundaries() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "count": 0, "data": "name,type\n" }));
+    transport.ok(json!({ "count": 0, "data": "name,type\n" }));
+
+    let client = client(transport.clone());
+
+    client
+        .export_records(DocumentFormat::Csv, "*", 1, 1)
+        .await
+        .unwrap();
+    client
+        .export_records(DocumentFormat::Csv, "*", 1, 2)
+        .await
+        .unwrap();
+
+    let calls = transport.calls();
+    assert_eq!(calls[0].method, "nameserver.exportrecords");
+    assert_eq!(calls[0].params["format"], "CSV");
+    assert_eq!(calls[0].params["limit"], 1);
+    assert_eq!(calls[1].params["limit"], 2);
 }
 
 #[tokio::test]
