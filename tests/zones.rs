@@ -221,6 +221,25 @@ async fn update_sends_only_the_fields_that_were_set() {
     assert!(call.params.get("records").is_none());
 }
 
+#[test]
+fn create_and_update_share_the_zone_field_omission_rules() {
+    let create = ZoneCreate::master(domain("a.de")).unwrap();
+    let create_params = create.params().unwrap();
+    assert_eq!(create_params["testing"], false);
+    assert!(create_params.get("ns").is_none());
+
+    let update = ZoneUpdate::new(domain("a.de"))
+        .with_zone_type(ZoneType::Master)
+        .dry_run();
+    let update_params = update.params().unwrap();
+    assert_eq!(update_params["testing"], true);
+    assert!(update_params.get("soaEmail").is_none());
+    assert!(update_params.get("ignoreExisting").is_none());
+
+    let undry = ZoneUpdate::new(domain("a.de")).with_zone_type(ZoneType::Master);
+    assert!(undry.params().unwrap().get("testing").is_none());
+}
+
 #[tokio::test]
 async fn update_can_set_web_forwarding_fields_individually() {
     let transport = MockTransport::new();
