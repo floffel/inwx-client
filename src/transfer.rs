@@ -420,7 +420,8 @@ impl ExtData {
     /// # Errors
     ///
     /// [`Error::Validation`] when the key is not an upper-case token of 1–64
-    /// characters (`A-Z`, `0-9`, `-`), or the value is empty.
+    /// characters (`A-Z`, `0-9`, `-`), the key is one of the documented typed
+    /// keys, or the value is empty.
     ///
     /// ```
     /// use inwx_client::ExtData;
@@ -445,6 +446,12 @@ impl ExtData {
             return Err(Error::validation(
                 "extData",
                 format!("{key:?} must be an upper-case A-Z, 0-9, - token"),
+            ));
+        }
+        if is_reserved_ext_data_key(key) {
+            return Err(Error::validation(
+                "extData",
+                format!("{key:?} must be set with its typed builder"),
             ));
         }
         if value.trim().is_empty() {
@@ -472,6 +479,13 @@ impl ExtData {
                 .collect::<Map<String, Value>>(),
         )
     }
+}
+
+fn is_reserved_ext_data_key(key: &str) -> bool {
+    matches!(
+        key,
+        "NO-DOMAIN-CHECK" | "NO-HOST-CHECK" | "BIRTH-DATE" | "BIRTH-CITY"
+    )
 }
 
 /// What a completed transfer, trade or push cost.
@@ -2070,6 +2084,10 @@ mod tests {
         let mut extra = ExtData::new();
         assert!(extra.set("BAD KEY", "x").is_err());
         assert!(extra.set("GOOD", "").is_err());
+        assert!(extra.set("NO-DOMAIN-CHECK", "false").is_err());
+        assert!(extra.set("NO-HOST-CHECK", "false").is_err());
+        assert!(extra.set("BIRTH-DATE", "23.05.1990").is_err());
+        assert!(extra.set("BIRTH-CITY", "x").is_err());
         assert!(extra.birth_date("2026-02-30").is_err());
         assert!(extra.birth_date("2026-02-28").is_ok());
         assert!(extra.birth_city("x".repeat(65).as_str()).is_err());
