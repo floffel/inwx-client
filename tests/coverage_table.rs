@@ -102,7 +102,7 @@ fn split_method(literal: &str) -> Option<(&str, &str)> {
         && command
             .chars()
             .next()
-            .is_some_and(|c| c.is_ascii_lowercase());
+            .is_some_and(|c| c.is_ascii_alphabetic());
     if namespace_ok && command_ok {
         Some((namespace, command))
     } else {

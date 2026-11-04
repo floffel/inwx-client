@@ -136,7 +136,7 @@
 //! | Account roles | `account.getroles`, `account.addrole`, `account.removerole` |
 //! | Contacts | `contact.create`, `contact.info`, `contact.list`, `contact.update`, `contact.delete` |
 //! | Diagnostics | `domain.log`, `domain.stats`, `domain.getRules`, `domain.getTldGroups` |
-//! | Prices | `domain.getPrices`, `domain.getdomainprice`, `domain.getalldomainprices`, `domain.getextradatarules`, `domain.getpromos`, `domain.pricechanges` |
+//! | Prices | `domain.getPrices`, `domain.getdomainprice`, `domain.getalldomainprices`, `domain.getextradatarules`, `domain.getPromos`, `domain.priceChanges` |
 //! | Applications | `application.check`, `create`, `delete`, `info`, `list`, `update` |
 //! | Customers | `customer.info`, `update`, `delete`, `contactverificationsettingsinfo`, `contactverificationsettingsupdate`, `listdownloads`, `requestdataexport` |
 //! | Hosts (glue records) | `host.check`, `create`, `delete`, `info`, `list`, `update` |
