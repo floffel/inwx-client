@@ -179,6 +179,8 @@ Every method below is implemented against the published INWX API documentation
   giving up. Concurrent first calls may each open a session — harmless, and the
   alternative (holding a lock across an await) buys nothing here.
 * **Bounded retries.** Three attempts, exponential backoff from 500 ms to 8 s,
+  each wait drawn uniformly from `[0, ceiling]` (full jitter) so the tasks of one
+  client, or a fleet of clients that failed together, do not retry in lockstep;
   only for failures that happened *before* the request was written (DNS, connect,
   TLS), HTTP 429/5xx and result code `2300` (object pending transfer). A rejected
   command is never repeated.

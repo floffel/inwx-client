@@ -294,6 +294,14 @@ impl fmt::Debug for Credentials {
 /// retried; everything else is terminal — retrying a rejected command would
 /// just duplicate the rejection.
 ///
+/// The wait is the *ceiling*, not the value slept: [`InwxClient`] draws a
+/// uniform sample from `[0, delay]` for every retry ([`RetryPolicy::delay_with_jitter`]),
+/// because thirty-two tasks sharing one client fail at the same instant and a
+/// fixed delay sends all thirty-two retries back at the same instant, in a
+/// burst that hits a rate-limited API harder than the original load did.
+/// The ceiling itself stays deterministic, so it is what a caller reads to
+/// reason about the worst case, and what the tests pin.
+///
 /// An [`Error::Uncertain`] (a timeout, a reset mid-response) is out of reach
 /// here: the command may already have run, so it is replayed only for a
 /// read-only method, never for a mutating one. See
@@ -307,6 +315,12 @@ impl fmt::Debug for Credentials {
 /// assert_eq!(policy.delay(1), Some(Duration::from_millis(500)));
 /// assert_eq!(policy.delay(2), Some(Duration::from_secs(1)));
 /// assert_eq!(policy.delay(3), None); // three attempts in total
+///
+/// // The jittered value is never above the ceiling, and both ends are reachable.
+/// assert_eq!(policy.delay_with_jitter(1, 0.0), Some(Duration::ZERO));
+/// assert_eq!(policy.delay_with_jitter(1, 1.0), Some(Duration::from_millis(500)));
+/// assert_eq!(policy.delay_with_jitter(2, 0.5), Some(Duration::from_millis(500)));
+/// assert_eq!(policy.delay_with_jitter(3, 0.5), None);
 ///
 /// let impatient = RetryPolicy::new(4).with_base_delay(Duration::ZERO).with_max_delay(Duration::ZERO);
 /// assert_eq!(impatient.delay(3), Some(Duration::ZERO));
@@ -393,6 +407,10 @@ impl RetryPolicy {
     /// How long to wait after failure number `attempt` (1-based), or `None`
     /// when the attempts are exhausted.
     ///
+    /// This is the deterministic ceiling of the backoff — what a caller reads
+    /// to reason about the worst case — not the value [`InwxClient`] sleeps,
+    /// which is [`Self::delay_with_jitter`] of this.
+    ///
     /// ```
     /// use inwx_client::RetryPolicy;
     /// assert!(RetryPolicy::new(2).delay(2).is_none());
@@ -406,6 +424,66 @@ impl RetryPolicy {
             .checked_shl(attempt.saturating_sub(1))
             .unwrap_or(u32::MAX);
         Some(self.base_delay.saturating_mul(factor).min(self.max_delay))
+    }
+
+    /// How long to wait after failure number `attempt` (1-based) when the
+    /// random sample is `unit`: a value uniform in `[0, delay(attempt)]`, or
+    /// `None` when the attempts are exhausted.
+    ///
+    /// This is full jitter: the sample is drawn over the whole interval rather
+    /// than spread around a mean, so two clients that failed at the same moment
+    /// are as far apart as the ceiling allows. It stays a pure function of
+    /// `unit` — the caller owns the randomness, exactly as it owns the clock —
+    /// so the retry decision can be tested without a fake generator.
+    ///
+    /// `unit` is clamped to `[0, 1]`; a `NaN` sample counts as `0`, so a broken
+    /// generator collapses the wait to "immediately" instead of panicking
+    /// inside a retry loop.
+    ///
+    /// # Why this is not a call into a backoff crate
+    ///
+    /// `exponential-backoff` and its kin are generators: `next_backoff` takes
+    /// `&mut self`, so a policy that owned one could not be read through
+    /// `&self` — and this client is shared by `Arc` across thirty-two tasks and
+    /// holds no lock on the retry path. Their state would also make the wait a
+    /// function of how often it was asked, not of `(policy, attempt)`, while
+    /// the retry decision here has to stay a pure function. What remains is the
+    /// clamp and one multiplication.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use inwx_client::RetryPolicy;
+    ///
+    /// let policy = RetryPolicy::new(4).with_base_delay(Duration::from_secs(1));
+    ///
+    /// // Both ends of the interval, and the middle.
+    /// assert_eq!(policy.delay_with_jitter(1, 0.0), Some(Duration::ZERO));
+    /// assert_eq!(policy.delay_with_jitter(1, 1.0), Some(Duration::from_secs(1)));
+    /// assert_eq!(policy.delay_with_jitter(2, 0.5), Some(Duration::from_secs(1)));
+    ///
+    /// // Outside the interval, and no sample at all for the last attempt.
+    /// assert_eq!(policy.delay_with_jitter(1, -1.0), Some(Duration::ZERO));
+    /// assert_eq!(policy.delay_with_jitter(1, 2.0), Some(Duration::from_secs(1)));
+    /// assert_eq!(policy.delay_with_jitter(1, f64::NAN), Some(Duration::ZERO));
+    /// assert_eq!(policy.delay_with_jitter(4, 0.5), None);
+    /// ```
+    #[must_use]
+    pub fn delay_with_jitter(&self, attempt: u32, unit: f64) -> Option<Duration> {
+        let ceiling = self.delay(attempt)?;
+        // `f64::clamp` returns `NaN` for a `NaN` input, and `Duration::mul_f64`
+        // panics on it: normalise first, then multiply.
+        let unit = if unit.is_nan() {
+            0.0
+        } else {
+            unit.clamp(0.0, 1.0)
+        };
+        if unit >= 1.0 {
+            return Some(ceiling);
+        }
+        if unit <= 0.0 {
+            return Some(Duration::ZERO);
+        }
+        Some(ceiling.mul_f64(unit))
     }
 }
 
@@ -1171,7 +1249,7 @@ impl<T: Transport> InwxClient<T> {
                     // `2300` means the object is mid-transfer: the command did
                     // not fail, it is simply too early.
                     if envelope.code == 2300 {
-                        if let Some(delay) = self.policy.delay(attempt) {
+                        if let Some(delay) = self.policy.delay_with_jitter(attempt, jitter_unit()) {
                             sleep_for(delay).await;
                             attempt += 1;
                             continue;
@@ -1191,7 +1269,7 @@ impl<T: Transport> InwxClient<T> {
                         continue;
                     }
                     if status_replay_allowed(status, method) {
-                        if let Some(delay) = self.policy.delay(attempt) {
+                        if let Some(delay) = self.policy.delay_with_jitter(attempt, jitter_unit()) {
                             sleep_for(delay).await;
                             attempt += 1;
                             continue;
@@ -1214,7 +1292,7 @@ impl<T: Transport> InwxClient<T> {
                     };
                 }
                 Err(error) if replay_allowed(&error, method) => {
-                    if let Some(delay) = self.policy.delay(attempt) {
+                    if let Some(delay) = self.policy.delay_with_jitter(attempt, jitter_unit()) {
                         sleep_for(delay).await;
                         attempt += 1;
                         continue;
@@ -1459,6 +1537,24 @@ fn collect_cookies(response: &Response) -> String {
     pairs.join("; ")
 }
 
+/// A uniform sample from `[0, 1)` that scales this retry's backoff.
+///
+/// One draw per retry, from the thread-local generator: thirty-two tasks on one
+/// client fail together, and the sample is what pulls their retries apart. It
+/// is read synchronously, so no generator ever crosses an `.await`.
+#[cfg(feature = "http")]
+fn jitter_unit() -> f64 {
+    rand::random()
+}
+
+/// Without a timer there is nothing to smear out: the retries happen
+/// immediately, so the sample is the lower end of the interval and the wait
+/// stays exactly zero.
+#[cfg(not(feature = "http"))]
+fn jitter_unit() -> f64 {
+    0.0
+}
+
 #[cfg(feature = "http")]
 async fn sleep_for(delay: Duration) {
     tokio::time::sleep(delay).await;
@@ -1605,6 +1701,84 @@ mod tests {
         assert_eq!(policy.delay(4), Some(Duration::from_millis(500)));
         assert_eq!(policy.delay(6), None);
         assert_eq!(policy.delay(0), Some(Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn jittered_delay_sits_inside_the_ceiling() {
+        let policy = RetryPolicy::new(4)
+            .with_base_delay(Duration::from_millis(400))
+            .with_max_delay(Duration::from_secs(2));
+
+        // Both ends of the interval are reachable, and every sample in between
+        // stays at or below the deterministic ceiling.
+        for attempt in 1..policy.attempts() {
+            let ceiling = policy.delay(attempt).unwrap();
+            assert_eq!(policy.delay_with_jitter(attempt, 0.0), Some(Duration::ZERO));
+            assert_eq!(policy.delay_with_jitter(attempt, 1.0), Some(ceiling));
+            for step in 1..100 {
+                let unit = f64::from(step) / 100.0;
+                let waited = policy
+                    .delay_with_jitter(attempt, unit)
+                    .expect("the attempt is inside the budget");
+                assert!(waited <= ceiling, "attempt {attempt} unit {unit}");
+            }
+        }
+
+        // One step outside the interval at each end, and a sample that is not a
+        // number at all: clamped rather than `NaN` reaching `Duration`.
+        assert_eq!(policy.delay_with_jitter(1, -0.5), Some(Duration::ZERO));
+        assert_eq!(
+            policy.delay_with_jitter(1, 1.5),
+            Some(Duration::from_millis(400))
+        );
+        assert_eq!(policy.delay_with_jitter(1, f64::NAN), Some(Duration::ZERO));
+        assert_eq!(
+            policy.delay_with_jitter(1, f64::NEG_INFINITY),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            policy.delay_with_jitter(1, f64::INFINITY),
+            Some(Duration::from_millis(400))
+        );
+
+        // The budget boundary: the last attempt has a wait, one more has none.
+        assert_eq!(
+            policy.delay_with_jitter(3, 0.5),
+            Some(Duration::from_millis(800))
+        );
+        assert_eq!(policy.delay_with_jitter(4, 0.5), None);
+        assert_eq!(policy.delay_with_jitter(5, 0.5), None);
+    }
+
+    #[test]
+    fn jitter_is_monotone_in_the_sample() {
+        let policy = RetryPolicy::new(3).with_base_delay(Duration::from_secs(8));
+        let mut previous = Duration::ZERO;
+        for step in 0..=100 {
+            let unit = f64::from(step) / 100.0;
+            let waited = policy.delay_with_jitter(1, unit).unwrap();
+            assert!(waited >= previous, "unit {unit} went backwards");
+            previous = waited;
+        }
+        assert_eq!(previous, Duration::from_secs(8));
+    }
+
+    /// The point of the jitter: thirty-two tasks that failed together do not
+    /// come back together.
+    #[cfg(feature = "http")]
+    #[test]
+    fn the_retry_sample_does_not_collapse_onto_one_value() {
+        let mut samples: Vec<f64> = (0..32).map(|_| jitter_unit()).collect();
+        assert!(
+            samples.iter().all(|unit| (0.0..1.0).contains(unit)),
+            "every sample is drawn from [0, 1): {samples:?}"
+        );
+        samples.sort_by(f64::total_cmp);
+        samples.dedup();
+        assert!(
+            samples.len() > 1,
+            "32 draws must not land on one value: {samples:?}"
+        );
     }
 
     #[test]

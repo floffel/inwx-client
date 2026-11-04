@@ -19,7 +19,7 @@ all-features = true
 default = ["http"]
 # `bytes` is only the chunk type of the reqwest adapter; it is already in the
 # tree through reqwest, so this names it instead of copying every chunk.
-http = ["dep:bytes", "dep:reqwest", "dep:tokio"]
+http = ["dep:bytes", "dep:rand", "dep:reqwest", "dep:tokio"]
 
 [dependencies]
 base64 = "0.22"
@@ -40,6 +40,11 @@ httpdate = "1"
 # UTS-46 ToASCII with STD3 rules, the hyphen rule and `VerifyDNSLength`: name
 # validation belongs in a maintained IDNA implementation, not in this crate.
 idna = "1"
+# The backoff jitter is one uniform float per retry; `rand` draws it from the
+# thread-local generator. A hand-rolled xorshift seeded from the clock would
+# hand every process started in the same nanosecond the same sequence, which is
+# exactly the lockstep the jitter exists to break.
+rand = { version = "0.10", default-features = false, features = ["thread_rng"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 subtle = "2.6"
