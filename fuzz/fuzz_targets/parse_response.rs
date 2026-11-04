@@ -10,10 +10,10 @@ use inwx_client::{
     AccountRole, AccountRoleEntry, Application, ApplicationCheckResult, ApplicationType, AuthCode,
     AuthInfo2Order, AuthInfo2OrderResult, AuthInfo2PriceQuote, ClientHoldResult, Contact,
     ContactVerificationSettings, Customer, CustomerDownload, DataExport, DnsRecord, DocumentEntry,
-    DomainCheck, DomainControlResult, DomainInfo, DomainLog, DomainLogEntry, DomainRule, DomainStat,
-    DomainStats, DownloadedDocument, HostCheckResult, HostRecord, Message, NewsItem, NicHandle,
-    PdfFile, PdfHandle, PolledMessage, RecordType, RpcResponse, TldGroup, TldGroupList, TldRules,
-    ZoneInfo,
+    DomainCheck, DomainControlResult, DomainInfo, DomainLog, DomainLogEntry, DomainRule,
+    DomainStat, DomainStats, DownloadedDocument, HostCheckResult, HostRecord, Message, NewsItem,
+    NicHandle, PdfFile, PdfHandle, PolledMessage, RecordType, RpcResponse, TldGroup, TldGroupList,
+    TldRules, ZoneInfo,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -89,7 +89,10 @@ fuzz_target!(|data: &[u8]| {
     // `is_success`.
     let code = response.code;
     let result = response.into_result();
-    debug_assert_eq!(result.is_ok(), inwx_client::rpc::is_success_code(code));
+    debug_assert_eq!(
+        result.is_ok(),
+        code.is_some_and(inwx_client::rpc::is_success_code)
+    );
 
     // Record types are parsed from user input, so feed them the same bytes.
     if let Ok(text) = std::str::from_utf8(data) {

@@ -1691,13 +1691,11 @@ pub(crate) mod de {
         Ok(opt_i64(deserializer)?.unwrap_or(0))
     }
 
-    /// An `i32`, falling back to `0` when the value is missing or unusable.
-    pub(crate) fn i32_with_default<'de, D: Deserializer<'de>>(
+    /// An optional `i32` from a number or a numeric string.
+    pub(crate) fn opt_i32<'de, D: Deserializer<'de>>(
         deserializer: D,
-    ) -> std::result::Result<i32, D::Error> {
-        Ok(opt_i64(deserializer)?
-            .and_then(|value| i32::try_from(value).ok())
-            .unwrap_or(0))
+    ) -> std::result::Result<Option<i32>, D::Error> {
+        Ok(opt_i64(deserializer)?.and_then(|value| i32::try_from(value).ok()))
     }
 
     /// An optional float from a number or a numeric string.

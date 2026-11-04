@@ -185,9 +185,9 @@ impl RpcRequest {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RpcResponse {
-    /// Result code; `0` when the field was absent (a malformed answer).
-    #[serde(default, deserialize_with = "de::i32_with_default")]
-    pub code: i32,
+    /// Result code; `None` when the field was absent or unusable.
+    #[serde(default, deserialize_with = "de::opt_i32")]
+    pub code: Option<i32>,
     /// Result message, for example `Command completed successfully`.
     #[serde(default)]
     pub msg: String,
@@ -271,7 +271,7 @@ impl RpcResponse {
     /// ```
     #[must_use]
     pub fn is_success(&self) -> bool {
-        is_success_code(self.code)
+        self.code.is_some_and(is_success_code)
     }
 
     /// `msg` plus `reason`, when the API sent one.
@@ -307,7 +307,7 @@ impl RpcResponse {
     /// ```
     #[must_use]
     pub fn is_authentication(&self) -> bool {
-        matches!(self.code, 2200..=2202)
+        self.code.is_some_and(|code| matches!(code, 2200..=2202))
     }
 
     /// Turns the envelope into `resData`, or into the matching [`Error`].
@@ -323,23 +323,31 @@ impl RpcResponse {
     ///     failure.into_result(),
     ///     Err(Error::Api { code: 2200, .. })
     /// ));
+    ///
+    /// let malformed = RpcResponse::parse(br#"{"msg":"no code"}"#)?;
+    /// assert!(matches!(malformed.into_result(), Err(Error::Uncertain { .. })));
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     ///
     /// # Errors
     ///
-    /// [`Error::Api`] for a non-success code.
+    /// [`Error::Api`] for a non-success code, or [`Error::Uncertain`] when the
+    /// response does not carry a usable result code.
     pub fn into_result(self) -> Result<Value> {
         if self.is_success() {
             Ok(self.res_data.unwrap_or(Value::Null))
-        } else {
+        } else if let Some(code) = self.code {
             Err(Error::Api {
-                code: self.code,
+                code,
                 message: self.error_message(),
                 reason_code: self.reason_code,
                 reason: self.reason,
                 details: self.details,
             })
+        } else {
+            Err(Error::uncertain(
+                "response envelope carried no usable result code; the command may have been executed",
+            ))
         }
     }
 }
@@ -379,13 +387,53 @@ mod tests {
     }
 
     #[test]
-    fn missing_code_is_zero_and_not_success() {
+    fn missing_code_is_uncertain_and_not_api() {
         let response = RpcResponse::parse(br#"{"msg":"?"}"#).unwrap();
-        assert_eq!(response.code, 0);
+        assert_eq!(response.code, None);
         assert!(!response.is_success());
+        let error = response.into_result().unwrap_err();
+        assert!(matches!(error, Error::Uncertain { .. }));
+        assert!(error.is_uncertain());
+        assert!(!error.is_retryable());
+        assert_eq!(error.code(), None);
+    }
+
+    #[test]
+    fn unusable_codes_are_uncertain_and_not_api() {
+        for body in [
+            br#"{"code":null,"msg":"?"}"#.as_slice(),
+            br#"{"code":true,"msg":"?"}"#.as_slice(),
+            br#"{"code":{},"msg":"?"}"#.as_slice(),
+            br#"{"code":1000.0,"msg":"?"}"#.as_slice(),
+            br#"{"code":2147483648,"msg":"?"}"#.as_slice(),
+            br#"{"code":-2147483649,"msg":"?"}"#.as_slice(),
+            br#"{"code":"not a number","msg":"?"}"#.as_slice(),
+        ] {
+            let response = RpcResponse::parse(body).unwrap();
+            assert_eq!(response.code, None, "{}", String::from_utf8_lossy(body));
+
+            let error = response.into_result().unwrap_err();
+            assert!(matches!(error, Error::Uncertain { .. }));
+            assert!(error.is_uncertain());
+            assert!(!error.is_retryable());
+            assert_eq!(error.code(), None);
+        }
+    }
+
+    #[test]
+    fn code_boundaries_keep_the_nearest_representable_values() {
+        let inside = RpcResponse::parse(br#"{"code":2147483647,"msg":"?"}"#).unwrap();
+        assert_eq!(inside.code, Some(i32::MAX));
         assert!(matches!(
-            response.into_result(),
-            Err(Error::Api { code: 0, .. })
+            inside.into_result(),
+            Err(Error::Api { code: i32::MAX, .. })
+        ));
+
+        let outside = RpcResponse::parse(br#"{"code":2147483648,"msg":"?"}"#).unwrap();
+        assert_eq!(outside.code, None);
+        assert!(matches!(
+            outside.into_result(),
+            Err(Error::Uncertain { .. })
         ));
     }
 
@@ -431,7 +479,7 @@ mod tests {
             RpcResponse::parse(br#"{"code":"1000","svTRID":12345,"runtime":"0.25"}"#).unwrap();
         // The API sends the code as a number, but a string is tolerated the
         // same way every other scalar is.
-        assert_eq!(response.code, 1000);
+        assert_eq!(response.code, Some(1000));
         assert!(response.is_success());
         assert_eq!(response.sv_trid.as_deref(), Some("12345"));
         assert_eq!(response.runtime, Some(0.25));
@@ -483,9 +531,12 @@ mod tests {
         let readable = br#"{"code":1000}"#;
         assert_eq!(
             RpcResponse::parse_answer(readable).unwrap().code,
-            CODE_SUCCESS
+            Some(CODE_SUCCESS)
         );
-        assert_eq!(RpcResponse::parse(readable).unwrap().code, CODE_SUCCESS);
+        assert_eq!(
+            RpcResponse::parse(readable).unwrap().code,
+            Some(CODE_SUCCESS)
+        );
 
         let cut = br#"{"code":1000"#;
         assert!(RpcResponse::parse(cut).is_err());
