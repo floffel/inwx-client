@@ -6,8 +6,8 @@ mod common;
 use inwx_client::{
     retry_after_from_header, ContactListing, ContactQuery, Credentials, DomainListQuery,
     DomainListing, DomainName, Hostname, HttpBody, Listing, Pagination, Period, RecordId,
-    RecordSpec, RecordType, RemoveClientHold, RpcResponse, SetClientHold, ZoneListing,
-    MAX_HTTP_BODY_CHARS, MAX_ITEMS, MAX_PAGES, MAX_PAGE_SIZE, MAX_TTL,
+    RecordSpec, RecordType, RemoveClientHold, RpcResponse, SetClientHold, ZoneListPage,
+    ZoneListing, MAX_HTTP_BODY_CHARS, MAX_ITEMS, MAX_PAGES, MAX_PAGE_SIZE, MAX_TTL,
 };
 use proptest::prelude::*;
 use serde_json::Value;
@@ -1328,6 +1328,29 @@ proptest! {
             prop_assert_eq!(params["wide"].as_u64().unwrap(), 1);
             prop_assert_eq!(params["page"].as_u64().unwrap(), 3);
         }
+    }
+    /// A zone page claims more exactly when the reported total exceeds the
+    /// number of zones on it, and never when the answer carries no `count`.
+    #[test]
+    fn a_zone_page_has_more_exactly_when_the_count_is_higher(
+        len in 0usize..=200,
+        count in proptest::option::of(0i64..=200),
+    ) {
+        let zones: Vec<Value> = (0..len)
+            .map(|n| serde_json::json!({ "domain": format!("z{n}.de") }))
+            .collect();
+        let mut payload = serde_json::json!({ "domains": zones });
+        if let Some(count) = count {
+            payload["count"] = serde_json::json!(count);
+        }
+        let page: ZoneListPage = serde_json::from_value(payload)?;
+
+        prop_assert_eq!(page.len(), len);
+        prop_assert_eq!(page.is_empty(), len == 0);
+        prop_assert_eq!(
+            page.has_more(),
+            count.is_some_and(|count| i64::try_from(len).unwrap() < count)
+        );
     }
 }
 

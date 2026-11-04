@@ -1570,7 +1570,10 @@ impl<T: Transport> InwxClient<T> {
     /// For more than one page use
     /// [`InwxClient::list_all_zones`](crate::InwxClient::list_all_zones) with
     /// [`ZoneListing::with_filter`](crate::ZoneListing::with_filter), which
-    /// sends the same parameters and walks the result.
+    /// sends the same parameters and walks the result. This single page holds
+    /// at most 100 matches: a filtered listing with more of them is truncated,
+    /// and only [`ZoneListPage::has_more`](crate::ZoneListPage::has_more) says
+    /// so.
     ///
     /// `nameserver.list` accepts a `domain` filter with `*` wildcards; the plain
     /// [`InwxClient::list_zones`](crate::InwxClient::list_zones) does not expose

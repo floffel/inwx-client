@@ -691,6 +691,8 @@ fn response_payload_types_are_constructible_and_comparable() {
     let zones = ZoneListPage::default();
     assert_eq!(zones.zones.len(), 0);
     assert!(zones.count.is_none());
+    assert!(zones.is_empty());
+    assert!(!zones.has_more());
 
     let zone = ZoneInfo::default();
     assert!(!zone.is_master());

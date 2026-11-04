@@ -75,6 +75,13 @@ own). Rules the crate enforces, with the reason:
   `MAX_PAGES` 10\_000 are **crate-side ceilings** — see Unverified — and all
   three are validated in `Pagination::with_page_size`/`with_max_items`/
   `with_max_pages`, before any request.
+- The zone page helpers pin the page: `list_zones` and `find_zones` ask for
+  `page` 1 with `pagelimit` 100 (`export_zone_list` takes the caller's
+  `limit`), so a single page is a cap, not the listing. `ZoneListPage::has_more`
+  (issue #139) compares `zones.len()` with the `count` of the answer and is the
+  guard that makes the cap visible; it is `false` when no `count` came back.
+  `DomainListPage::has_more` does the same for `domain.list`, where the page
+  size is the query's.
 - The page that crosses `with_max_items` is truncated, so a walk never yields
   more objects than it promised, and `bound_reached()` distinguishes "stopped at
   the bound" from "reached the end".
