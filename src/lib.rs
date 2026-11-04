@@ -419,7 +419,7 @@ pub use rpc::{Detail, RpcRequest, RpcResponse};
 pub use tag::{Tag, TagUpdate, TagUsage, TaggedDomains};
 pub use transfer::{
     ActionKind, ExtData, Irreversible, OwnershipResult, PushRequest, RestoreRequest, RestoreResult,
-    TradeRequest, TransferAnswer, TransferRequest,
+    TradeRequest, TransferAnswer, TransferCancelRequest, TransferOutRequest, TransferRequest,
 };
 #[cfg(feature = "http")]
 pub use transport::ReqwestTransport;

@@ -173,8 +173,8 @@ Source: <https://account.inwx.com/en/help/apidoc/f/ch02s09.html>
 | `domain.trade` | `TradeRequest` → `trade_domain` | 2.137 | 2.138 | `registrant` **required**; `admin`/`tech`/`billing`, `ns`, `authCode`, `whoisProvider`/`whoisUrl`, `scDate`, `extData`, `asynchron`, `testing` |
 | `domain.push` | `PushRequest` → `push_domain` | 2.127 | — | `domain`, `target` `text64`, `scDate`, `testing` |
 | `domain.restore` | `RestoreRequest` → `restore_domain` | 2.132 | 2.133 | `domain`, `renewalMode`, `testing`; output `domain`, `domainAce` |
-| `domain.transfercancel` | `cancel_transfer` | 2.141 | — | `domain` only |
-| `domain.transferOut` | `answer_transfer_out` | 2.142 | — | `domain`, `answer` `transferAnswer` (`ACK` \| `NACK`, ch03 §3.106) |
+| `domain.transfercancel` | `TransferCancelRequest` → `cancel_transfer` | 2.141 | — | `domain`, `testing` |
+| `domain.transferOut` | `TransferOutRequest` → `answer_transfer_out` | 2.142 | — | `domain`, `answer` `transferAnswer` (`ACK` \| `NACK`, ch03 §3.106), `testing` |
 
 `extData` keys documented in ch03 §3.49: `NO-DOMAIN-CHECK` (`boolean`),
 `NO-HOST-CHECK` (`boolean`), `BIRTH-DATE` (`date`), `BIRTH-CITY` (`text64`), plus
