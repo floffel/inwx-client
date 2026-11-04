@@ -1,5 +1,5 @@
 //! Automatic pagination for the list commands (`domain.list`, `contact.list`,
-//! `nameserver.list`).
+//! `nameserver.list`, `application.list`).
 //!
 //! Every list command of the INWX API is paged: it takes `page` (1-based) and
 //! `pagelimit`, and answers with the objects of that page plus — usually — a
@@ -121,8 +121,9 @@ pub trait Page: DeserializeOwned + Sized {
 /// A paged list command: its method name, its filters and its page type.
 ///
 /// Implemented by [`DomainListing`](crate::DomainListing),
-/// [`ContactListing`](crate::ContactListing) and
-/// [`ZoneListing`](crate::ZoneListing).
+/// [`ContactListing`](crate::ContactListing),
+/// [`ZoneListing`](crate::ZoneListing) and
+/// [`ApplicationListing`](crate::ApplicationListing).
 ///
 /// ```
 /// use inwx_client::{ContactListing, ContactQuery, Listing};
@@ -334,10 +335,11 @@ impl Pagination {
 ///
 /// Built by [`InwxClient::list_all_domains`](crate::InwxClient::list_all_domains),
 /// [`InwxClient::list_all_contacts`](crate::InwxClient::list_all_contacts),
-/// [`InwxClient::list_all_zones`](crate::InwxClient::list_all_zones) or, for a
-/// listing of your own, [`Pages::new`]. It borrows the client, so it inherits
-/// the session, the retry policy and the `&self` thread-safety of the client;
-/// nothing is held across an await except the client borrow itself.
+/// [`InwxClient::list_all_zones`](crate::InwxClient::list_all_zones),
+/// [`InwxClient::list_all_applications`](crate::InwxClient::list_all_applications)
+/// or, for a listing of your own, [`Pages::new`]. It borrows the client, so it
+/// inherits the session, the retry policy and the `&self` thread-safety of the
+/// client; nothing is held across an await except the client borrow itself.
 ///
 /// The walk ends at the first of: a page shorter than requested, an empty page,
 /// the `count` the API reports, [`Pagination::with_max_items`],

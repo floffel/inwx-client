@@ -61,8 +61,9 @@ filtered variant; `nameserver.exportlist` is Tables 2.203/2.204):
 | `nameserver.list` | `page`, `pagelimit` | `count` | `domains` array |
 
 `Pages` turns one of those commands into a walk (`list_all_domains`,
-`list_all_contacts`, `list_all_zones`, `list_all_nichandles`, or `Pages::new`
-for a `Listing` of your own). Rules the crate enforces, with the reason:
+`list_all_contacts`, `list_all_zones`, `list_all_nichandles`,
+`list_all_applications`, or `Pages::new` for a `Listing` of your own). Rules the
+crate enforces, with the reason:
 
 - The walk owns the cursor: `page` and `pagelimit` are set by the walker, so a
   query that pins a page cannot fight it. Filters (`domain`, `search`, `status`,
@@ -462,7 +463,7 @@ Source: <https://account.inwx.com/en/help/apidoc/f/ch02s03.html>
 | `application.create` | `ApplicationCreate` → `create_application` | 2.38 (derived) | 2.39 (derived) |
 | `application.delete` | `delete_application` | 2.40 (derived) | — |
 | `application.info` | `application_info` | 2.41 (derived) | 2.42 (derived) |
-| `application.list` | `ApplicationQuery` → `list_applications` | 2.43 (derived) | 2.44 (derived) |
+| `application.list` | `ApplicationQuery` → `list_applications`; `ApplicationListing` → `list_all_applications` | 2.43 (derived) | 2.44 (derived) |
 | `application.update` | `ApplicationUpdate` → `update_application` | 2.45 (derived) | — |
 
 The section ends where `authinfo2` begins, which is where `certificate` starts
@@ -473,6 +474,13 @@ check needs at least one selector, an update needs at least one changed field,
 `pagelimit` ≥ 1. The application type is not a frozen vocabulary — the list is
 per-account — so it is a validated `[A-Z0-9_.-]` token (`ApplicationType`) that
 upper-cases on the way in and carries anything on the way out.
+
+`list_applications` answers one [`ApplicationListPage`] and reads the answer's
+`count` (or `total`) so the page can say whether it is the whole listing; the
+default query asks for page 1 with a 50-row cap. `list_all_applications` walks
+the pages with the same [`Pagination`] bound as the other list commands, so a
+reseller with more than 50 applications can reach every row instead of silently
+receiving the first page.
 
 ### `authinfo2.*` (`src/authinfo2.rs`)
 

@@ -142,7 +142,8 @@
 //! | `AuthInfo2` | `authinfo2.create`, `authinfo2.getprice` |
 //!
 //! The list commands are walked by [`Pagination`] and the per-command listing types
-//! ([`DomainListing`], [`ContactListing`], [`ZoneListing`], [`NicHandleListing`]);
+//! ([`DomainListing`], [`ContactListing`], [`ZoneListing`], [`NicHandleListing`],
+//! [`ApplicationListing`]);
 //! they are client-side helpers, not additional API methods, so they are not part
 //! of the table above.
 //!
@@ -172,11 +173,12 @@
 //!   numbers or strings —
 //!   INWX is inconsistent between methods.
 //! * **Walk the whole list.** [`InwxClient::list_all_domains`],
-//!   [`InwxClient::list_all_contacts`], [`InwxClient::list_all_zones`] and
-//!   [`InwxClient::list_all_nichandles`] return a [`Pages`] walk instead of one
-//!   page: page size and bound are validated where they are set, the last page
-//!   is cut at the bound, and [`Pages::bound_reached`] says whether the listing
-//!   ended or the walk stopped early.
+//!   [`InwxClient::list_all_contacts`], [`InwxClient::list_all_zones`],
+//!   [`InwxClient::list_all_nichandles`] and
+//!   [`InwxClient::list_all_applications`] return a [`Pages`] walk instead of
+//!   one page: page size and bound are validated where they are set, the last
+//!   page is cut at the bound, and [`Pages::bound_reached`] says whether the
+//!   listing ended or the walk stopped early.
 //! * **No socket needed.** The HTTP layer sits behind [`Transport`]; the
 //!   quickstart above runs end to end against an inline scripted transport in
 //!   every feature configuration, and the integration tests in `tests/` drive
@@ -339,8 +341,8 @@ pub use accounting::{
     RefundRequest, SslFund, StatementQuery, Transaction, TransactionLog, TransactionLogQuery,
 };
 pub use application::{
-    Application, ApplicationCheck, ApplicationCheckResult, ApplicationCreate, ApplicationQuery,
-    ApplicationType, ApplicationUpdate,
+    Application, ApplicationCheck, ApplicationCheckResult, ApplicationCreate, ApplicationListPage,
+    ApplicationListing, ApplicationQuery, ApplicationType, ApplicationUpdate,
 };
 pub use authinfo2::{AuthInfo2Order, AuthInfo2OrderResult, AuthInfo2PriceQuote};
 pub use certificate::{
