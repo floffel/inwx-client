@@ -224,11 +224,11 @@ impl<T: Transport> InwxClient<T> {
     /// # }
     /// ```
     ///
-    /// This is a billable, non-idempotent order, so it is never replayed: on a
-    /// 429, a 5xx or a timeout after the request was written the call answers
-    /// [`Error::Uncertain`] after a single attempt. Check the current state
-    /// (`domain.info`) before ordering again — a retry could buy the product
-    /// twice.
+    /// This is a billable, non-idempotent order, so it is never replayed: a 429
+    /// or a 5xx after the request was written is [`Error::HttpUncertain`], and a
+    /// timeout is [`Error::Uncertain`]; both come back after a single attempt.
+    /// Check the current state (`domain.info`) before ordering again — a retry
+    /// could buy the product twice.
     ///
     /// # Errors
     ///
@@ -237,9 +237,10 @@ impl<T: Transport> InwxClient<T> {
     /// [`Error::Transport`]/[`Error::Http`] for a transport or HTTP failure,
     /// [`Error::Json`] for a payload that does not fit the model,
     /// [`Error::Undecodable`] for an answer that cannot be read at all (also
-    /// uncertain — the order may have been placed), and [`Error::Uncertain`]
-    /// when the request was written but the answer never arrived — that outcome
-    /// is never replayed, because the order may already have been placed.
+    /// uncertain — the order may have been placed), [`Error::HttpUncertain`] for
+    /// a transient HTTP answer, and [`Error::Uncertain`] when the request was
+    /// written but the answer never arrived — those outcomes are never replayed,
+    /// because the order may already have been placed.
     pub async fn create_auth_info2(&self, order: &AuthInfo2Order) -> Result<AuthInfo2OrderResult> {
         let data = self.call("authinfo2.create", order.params()).await?;
         serde_json::from_value(data).map_err(Error::from)

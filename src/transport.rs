@@ -30,7 +30,7 @@ use crate::{Error, Result};
 /// use inwx_client::transport::Request;
 ///
 /// let body = br#"{"method":"account.check","params":{}}"#;
-/// let request = Request::post_json("https://api.domrobot.com/jsonrpc/", body)
+/// let request = Request::post_json("https://api.domrobot.com/jsonrpc/", body.to_vec())
 ///     .with_header("Cookie", "session=abc")
 ///     .with_timeout(Some(std::time::Duration::from_secs(5)));
 /// assert_eq!(request.header("cookie"), Some("session=abc"));
@@ -41,7 +41,10 @@ pub struct Request<'a> {
     /// Absolute URL of the JSON-RPC endpoint.
     pub url: &'a str,
     /// Serialised JSON body, already valid JSON.
-    pub body: &'a [u8],
+    ///
+    /// Stored by value so the transport can hand it to the HTTP client without
+    /// copying the whole envelope again.
+    pub body: Vec<u8>,
     /// Additional headers, as `(name, value)` pairs in insertion order.
     pub headers: Vec<(String, String)>,
     /// Per-request timeout; `None` leaves the transport default in place.
@@ -72,6 +75,9 @@ impl fmt::Debug for Request<'_> {
 impl<'a> Request<'a> {
     /// A POST with a JSON body and no extra headers.
     ///
+    /// The body is accepted as any byte container that can become a `Vec<u8>`,
+    /// so a caller can pass an owned serialized request without an extra copy.
+    ///
     /// ```
     /// use inwx_client::transport::Request;
     ///
@@ -79,10 +85,10 @@ impl<'a> Request<'a> {
     /// assert!(request.headers.is_empty());
     /// ```
     #[must_use]
-    pub fn post_json(url: &'a str, body: &'a [u8]) -> Self {
+    pub fn post_json(url: &'a str, body: impl Into<Vec<u8>>) -> Self {
         Self {
             url,
-            body,
+            body: body.into(),
             headers: Vec::new(),
             timeout: None,
         }
@@ -141,7 +147,8 @@ impl<'a> Request<'a> {
 ///
 /// Header names are lower-cased on construction and duplicates are preserved,
 /// because a `Set-Cookie` per session is normal and the client must see them
-/// all.
+/// all. Header values stay as bytes until a caller asks for text, so an opaque
+/// cookie or an extension header is not rounded to an empty string.
 ///
 /// ```
 /// use inwx_client::transport::Response;
@@ -158,7 +165,7 @@ impl<'a> Request<'a> {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Response {
     status: u16,
-    headers: Vec<(String, String)>,
+    headers: Vec<(String, Vec<u8>)>,
     body: Vec<u8>,
 }
 
@@ -181,7 +188,7 @@ impl fmt::Debug for Response {
 }
 
 impl Response {
-    /// Builds a response, lower-casing header names.
+    /// Builds a response from text header values, lower-casing header names.
     ///
     /// ```
     /// use inwx_client::transport::Response;
@@ -192,6 +199,38 @@ impl Response {
     pub fn new(
         status: u16,
         headers: impl IntoIterator<Item = (String, String)>,
+        body: Vec<u8>,
+    ) -> Self {
+        Self::from_header_bytes(
+            status,
+            headers
+                .into_iter()
+                .map(|(name, value)| (name, value.into_bytes())),
+            body,
+        )
+    }
+
+    /// Builds a response from raw header bytes, lower-casing header names.
+    ///
+    /// HTTP header values are bytes, not UTF-8 strings. This constructor is
+    /// the lossless one for transports that can see opaque values; the client
+    /// converts only the headers it needs, and reports an error when one of
+    /// those cannot be read as text.
+    ///
+    /// ```
+    /// use inwx_client::transport::Response;
+    ///
+    /// let response = Response::from_header_bytes(
+    ///     200,
+    ///     [("X-Opaque".to_string(), vec![0xff, 0xfe])],
+    ///     Vec::new(),
+    /// );
+    /// assert_eq!(response.header("x-opaque"), None);
+    /// assert_eq!(response.header_bytes("x-opaque"), Some([0xff, 0xfe].as_slice()));
+    /// ```
+    pub fn from_header_bytes(
+        status: u16,
+        headers: impl IntoIterator<Item = (String, Vec<u8>)>,
         body: Vec<u8>,
     ) -> Self {
         Self {
@@ -217,6 +256,10 @@ impl Response {
 
     /// First value of a header, case-insensitively.
     ///
+    /// Returns `None` when the header is absent or when its bytes are not valid
+    /// UTF-8; use [`Response::header_bytes`] when an opaque value must be kept
+    /// exactly.
+    ///
     /// ```
     /// use inwx_client::transport::Response;
     ///
@@ -225,13 +268,15 @@ impl Response {
     /// ```
     #[must_use]
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
+        self.header_bytes(name)
+            .and_then(|value| std::str::from_utf8(value).ok())
     }
 
     /// Every value of a header, case-insensitively.
+    ///
+    /// Values that are not valid UTF-8 are skipped. Use
+    /// [`Response::header_all_bytes`] to see every value exactly as it was
+    /// received.
     ///
     /// ```
     /// use inwx_client::transport::Response;
@@ -247,10 +292,55 @@ impl Response {
     /// assert_eq!(response.header_all("set-cookie").count(), 2);
     /// ```
     pub fn header_all<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        self.header_all_bytes(name)
+            .filter_map(|value| std::str::from_utf8(value).ok())
+    }
+
+    /// First value of a header as raw bytes, case-insensitively.
+    ///
+    /// ```
+    /// use inwx_client::transport::Response;
+    ///
+    /// let response = Response::from_header_bytes(
+    ///     200,
+    ///     [("X-Trace".to_string(), b"abc".to_vec())],
+    ///     Vec::new(),
+    /// );
+    /// assert_eq!(response.header_bytes("x-trace"), Some(b"abc".as_slice()));
+    /// assert_eq!(response.header_bytes("missing"), None);
+    /// ```
+    #[must_use]
+    pub fn header_bytes(&self, name: &str) -> Option<&[u8]> {
         self.headers
             .iter()
             .filter(move |(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
+            .map(|(_, value)| value.as_slice())
+            .next()
+    }
+
+    /// Every value of a header as raw bytes, case-insensitively.
+    ///
+    /// ```
+    /// use inwx_client::transport::Response;
+    ///
+    /// let response = Response::from_header_bytes(
+    ///     200,
+    ///     [
+    ///         ("Set-Cookie".to_string(), b"a=1".to_vec()),
+    ///         ("set-cookie".to_string(), b"b=2".to_vec()),
+    ///     ],
+    ///     Vec::new(),
+    /// );
+    /// assert_eq!(
+    ///     response.header_all_bytes("set-cookie").collect::<Vec<_>>(),
+    ///     [b"a=1".as_slice(), b"b=2".as_slice()],
+    /// );
+    /// ```
+    pub fn header_all_bytes<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a [u8]> + 'a {
+        self.headers
+            .iter()
+            .filter(move |(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_slice())
     }
 
     /// Raw body bytes.
@@ -494,8 +584,9 @@ pub async fn read_capped_body<S: ChunkSource>(
 /// number — absent, `-1`, `42x`, two values in one header, bigger than
 /// `u64` — becomes `None`, which leaves enforcement to the running total.
 #[cfg(feature = "http")]
-fn parse_content_length(value: Option<&str>) -> Option<u64> {
-    value?.trim().parse().ok()
+fn parse_content_length(value: Option<&[u8]>) -> Option<u64> {
+    let value = std::str::from_utf8(value?).ok()?;
+    value.trim().parse().ok()
 }
 
 /// Performs one HTTP request. Implement it for your own stack, or use
@@ -667,16 +758,22 @@ impl Transport for ReqwestTransport {
                 "could not build the reqwest client",
             ));
         };
-        let mut builder = client.post(request.url);
-        if let Some(timeout) = request.timeout {
+        let Request {
+            url,
+            body,
+            headers,
+            timeout,
+        } = request;
+        let mut builder = client.post(url);
+        if let Some(timeout) = timeout {
             builder = builder.timeout(timeout);
         }
-        for (name, value) in &request.headers {
+        for (name, value) in &headers {
             builder = builder.header(name.as_str(), value.as_str());
         }
 
         let mut response = builder
-            .body(request.body.to_vec())
+            .body(body)
             .send()
             .await
             .map_err(describe_reqwest_error)?;
@@ -687,12 +784,7 @@ impl Transport for ReqwestTransport {
         let headers = response
             .headers()
             .iter()
-            .map(|(name, value)| {
-                (
-                    name.as_str().to_string(),
-                    value.to_str().unwrap_or_default().to_string(),
-                )
-            })
+            .map(|(name, value)| (name.as_str().to_string(), value.as_bytes().to_vec()))
             .collect::<Vec<_>>();
         // The declared size is only a hint: `read_capped_body` checks it and
         // then counts what actually arrives, so a lying header cannot buy a
@@ -701,11 +793,11 @@ impl Transport for ReqwestTransport {
             response
                 .headers()
                 .get(reqwest::header::CONTENT_LENGTH)
-                .and_then(|value| value.to_str().ok()),
+                .map(reqwest::header::HeaderValue::as_bytes),
         );
         let body = read_capped_body(&mut response, declared_len, self.max_response_bytes).await?;
 
-        Ok(Response::new(status, headers, body))
+        Ok(Response::from_header_bytes(status, headers, body))
     }
 }
 
@@ -956,15 +1048,16 @@ mod tests {
     #[test]
     #[cfg(feature = "http")]
     fn only_a_plain_number_counts_as_a_declared_length() {
-        assert_eq!(parse_content_length(Some("64")), Some(64));
-        assert_eq!(parse_content_length(Some(" 64 ")), Some(64));
-        assert_eq!(parse_content_length(Some("0")), Some(0));
+        assert_eq!(parse_content_length(Some(b"64")), Some(64));
+        assert_eq!(parse_content_length(Some(b" 64 ")), Some(64));
+        assert_eq!(parse_content_length(Some(b"0")), Some(0));
         assert_eq!(parse_content_length(None), None);
-        assert_eq!(parse_content_length(Some("")), None);
-        assert_eq!(parse_content_length(Some("-1")), None);
-        assert_eq!(parse_content_length(Some("64x")), None);
-        assert_eq!(parse_content_length(Some("64, 64")), None);
-        assert_eq!(parse_content_length(Some("99999999999999999999999")), None);
+        assert_eq!(parse_content_length(Some(b"")), None);
+        assert_eq!(parse_content_length(Some(b"-1")), None);
+        assert_eq!(parse_content_length(Some(b"64x")), None);
+        assert_eq!(parse_content_length(Some(b"64, 64")), None);
+        assert_eq!(parse_content_length(Some(b"99999999999999999999999")), None);
+        assert_eq!(parse_content_length(Some(&[0xff, 0xfe])), None);
     }
 
     #[test]
@@ -999,6 +1092,33 @@ mod tests {
         assert_eq!(
             response.header_all("set-cookie").collect::<Vec<_>>(),
             ["a=1", "b=2"]
+        );
+    }
+
+    #[test]
+    fn header_bytes_keep_opaque_values_and_text_lookup_stays_lossless() {
+        let valid = Response::from_header_bytes(
+            200,
+            [("X-Text".to_string(), "café".as_bytes().to_vec())],
+            Vec::new(),
+        );
+        assert_eq!(valid.header("x-text"), Some("café"));
+        assert_eq!(valid.header_bytes("x-text"), Some("café".as_bytes()));
+
+        let opaque = Response::from_header_bytes(
+            200,
+            [("X-Opaque".to_string(), vec![0xff, 0xfe])],
+            Vec::new(),
+        );
+        assert_eq!(opaque.header("x-opaque"), None);
+        assert_eq!(opaque.header_all("x-opaque").next(), None);
+        assert_eq!(
+            opaque.header_bytes("x-opaque"),
+            Some([0xff, 0xfe].as_slice())
+        );
+        assert_eq!(
+            opaque.header_all_bytes("x-opaque").collect::<Vec<_>>(),
+            [[0xff, 0xfe].as_slice()]
         );
     }
 

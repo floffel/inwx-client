@@ -164,6 +164,26 @@ async fn login_without_a_cookie_is_an_authentication_error() {
     }
 }
 
+#[tokio::test]
+async fn login_with_a_non_utf8_cookie_is_an_uncertain_transport_error() {
+    let transport = MockTransport::new();
+    transport.push(Reply::Response(Response::from_header_bytes(
+        200,
+        [("Set-Cookie".to_owned(), vec![0xff, 0xfe])],
+        br#"{"code":1000,"msg":"Login successful"}"#.to_vec(),
+    )));
+
+    let client = anonymous_client(transport.clone());
+    let error = client.login().await.unwrap_err();
+
+    assert!(matches!(error, Error::Uncertain { .. }), "{error:?}");
+    assert!(error.is_uncertain());
+    assert!(!error.is_retryable());
+    assert!(error.to_string().contains("Set-Cookie"), "{error}");
+    assert_eq!(transport.call_count(), 1);
+    assert!(!client.is_authenticated());
+}
+
 /// A login is one transition of one session: a second login would invalidate
 /// the cookie the first one handed out, so an installed session is reused
 /// instead of replaced. Dropping it is what asks for a new one.
@@ -694,6 +714,7 @@ async fn a_transient_status_on_a_write_carries_no_retry_after() {
         .await
         .unwrap_err();
 
+    assert!(matches!(&error, Error::HttpUncertain { status: 429, .. }));
     assert!(error.is_uncertain());
     assert_eq!(error.retry_after(), None);
 }
@@ -1096,7 +1117,7 @@ async fn debug_output_hides_the_session_cookie() {
 
 #[test]
 fn request_debug_output_hides_header_values_and_body_bytes() {
-    let body = br#"{"method":"account.login","params":{"pass":"hunter2"}}"#;
+    let body = br#"{"method":"account.login","params":{"pass":"hunter2"}}"#.to_vec();
     let request = Request::post_json("https://inwx.test/jsonrpc/", body)
         .with_header("Cookie", "domrobot=test-session")
         .with_header("Content-Type", "application/json");
@@ -1171,9 +1192,9 @@ async fn a_transport_that_always_fails_is_tried_exactly_three_times() {
     assert!(matches!(error, Error::Transport { .. }));
 }
 
-/// A reply that is a success envelope with a bogus code must not be accepted.
+/// A reply without a usable code is uncertain, not a definite API rejection.
 #[tokio::test]
-async fn code_zero_is_not_success() {
+async fn missing_code_is_uncertain() {
     let transport = MockTransport::new();
     transport.push(Reply::Body(r#"{"msg":"no code"}"#.to_owned()));
 
@@ -1183,7 +1204,9 @@ async fn code_zero_is_not_success() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.code(), Some(0));
+    assert!(error.is_uncertain());
+    assert!(!error.is_retryable());
+    assert_eq!(error.code(), None);
 }
 
 /// `account.unlock` is a mutating command on the current account, so it must

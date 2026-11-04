@@ -17,7 +17,7 @@ use zeroize::{ZeroizeOnDrop, Zeroizing};
 use crate::error::{retry_after_at, Error, HttpBody, Result};
 use crate::rpc::{not_an_object, RpcRequest, RpcResponse};
 use crate::session::{SessionGate, Turn};
-use crate::transport::{Request, Response, Transport};
+use crate::transport::{Request, Response, Transport, TransportStage};
 use crate::types::de;
 
 /// Longest account username accepted by the `account.login` `text64` field.
@@ -936,7 +936,7 @@ impl<T: Transport> InwxClient<T> {
         let envelope = RpcResponse::parse_answer(response.body())?;
         envelope.into_result()?;
 
-        let cookie = collect_cookies(&response);
+        let cookie = collect_cookies(&response)?;
         if cookie.is_empty() {
             return Err(Error::Authentication {
                 message: "login succeeded but the response carried no session cookie".to_owned(),
@@ -1045,7 +1045,7 @@ impl<T: Transport> InwxClient<T> {
     /// The same rule covers HTTP: a 429 or a 5xx is replayed only for a
     /// read-only method. For a mutating method the status says nothing about
     /// whether the command already ran, so the call answers
-    /// [`Error::Uncertain`] after a single attempt instead of retrying.
+    /// [`Error::HttpUncertain`] after a single attempt instead of retrying.
     ///
     /// API code `2300` (object pending transfer) is gated the same way: a read
     /// is replayed once the object is out of the transfer, a mutation is
@@ -1129,7 +1129,8 @@ impl<T: Transport> InwxClient<T> {
                             continue;
                         }
                     }
-                    return match RpcResponse::parse(response.body()) {
+                    let parse = RpcResponse::parse(response.body());
+                    return match parse {
                         // The API did answer with a verdict, so the verdict
                         // outranks the status and is never repeated.
                         Ok(envelope) if !envelope.is_success() => envelope.into_result(),
@@ -1137,10 +1138,19 @@ impl<T: Transport> InwxClient<T> {
                         // The request was written, so on a command that mutates
                         // the outcome is unknown and a replay could duplicate
                         // the work.
-                        _ if status_is_uncertain(status, method) => Err(Error::uncertain(format!(
-                            "`{method}` answered HTTP {status}; the command may have been \
-                             executed, check the current state before retrying"
-                        ))),
+                        _ if status_is_uncertain(status, method) => match parse {
+                            Err(source) => Err(Error::http_uncertain(
+                                method,
+                                status,
+                                HttpBody::from_bytes(response.body()),
+                            )
+                            .with_source(source)),
+                            Ok(_) => Err(Error::http_uncertain(
+                                method,
+                                status,
+                                HttpBody::from_bytes(response.body()),
+                            )),
+                        },
                         Ok(envelope) => envelope.into_result(),
                         // The body is unreadable, and the parse error is the
                         // only thing that separates "not JSON at all" — a proxy
@@ -1192,7 +1202,7 @@ impl<T: Transport> InwxClient<T> {
         let body = RpcRequest::from_map(method, params).to_bytes()?;
 
         let cookie = self.session.cookie();
-        let mut request = Request::post_json(&self.base_url, &body)
+        let mut request = Request::post_json(&self.base_url, body)
             .with_header("Content-Type", "application/json")
             .with_header("Accept", "application/json")
             .with_header(
@@ -1275,6 +1285,8 @@ const READ_ONLY_METHODS: &[&str] = &[
     "nameserver.list",
     "nameserverset.info",
     "nameserverset.list",
+    "request.info",
+    "request.list",
     "tag.info",
     "tag.list",
 ];
@@ -1366,8 +1378,8 @@ fn status_replay_allowed(status: u16, method: &str) -> bool {
 /// For a mutating method the code is the answer — the command already reached
 /// the object — and repeating it once the transfer settled would register,
 /// charge or delete a second time, so it is handed back as-is.
-fn code_replay_allowed(code: i32, method: &str) -> bool {
-    code == 2300 && is_read_only_method(method)
+fn code_replay_allowed(code: Option<i32>, method: &str) -> bool {
+    code == Some(2300) && is_read_only_method(method)
 }
 
 /// Whether a status leaves the outcome of `method` unknown: the request was
@@ -1414,10 +1426,18 @@ fn retry_after_in(response: &Response) -> Option<Duration> {
 ///
 /// Attributes (`Path`, `Domain`, `HttpOnly`, …) are dropped: only the
 /// `name=value` pair belongs in the request header. Duplicate names keep the
-/// last value, which is what a browser cookie jar would do.
-fn collect_cookies(response: &Response) -> String {
+/// last value, which is what a browser cookie jar would do. A `Set-Cookie`
+/// value that is not valid UTF-8 is a typed transport error: the real value is
+/// not text, and silently dropping it would install no session.
+fn collect_cookies(response: &Response) -> Result<String> {
     let mut pairs: Vec<String> = Vec::new();
-    for header in response.header_all("set-cookie") {
+    for header in response.header_all_bytes("set-cookie") {
+        let header = std::str::from_utf8(header).map_err(|_| {
+            Error::transport_at(
+                TransportStage::AfterSend,
+                "login response carried a Set-Cookie header that is not valid UTF-8",
+            )
+        })?;
         let pair = header.split(';').next().unwrap_or("").trim();
         if pair.is_empty() || pair.contains('\n') || pair.contains('\r') {
             continue;
@@ -1432,7 +1452,7 @@ fn collect_cookies(response: &Response) -> String {
         pairs.retain(|existing: &String| !existing.starts_with(&format!("{name}=")));
         pairs.push(pair.to_owned());
     }
-    pairs.join("; ")
+    Ok(pairs.join("; "))
 }
 
 /// A uniform sample from `[0, 1)` that scales this retry's backoff.
@@ -1687,7 +1707,21 @@ mod tests {
             ],
             Vec::new(),
         );
-        assert_eq!(collect_cookies(&response), "other=x; domrobot=s2");
+        assert_eq!(collect_cookies(&response).unwrap(), "other=x; domrobot=s2");
+    }
+
+    #[test]
+    fn a_non_utf8_cookie_is_a_typed_uncertain_error() {
+        let response = Response::from_header_bytes(
+            200,
+            [("Set-Cookie".to_string(), vec![0xff, 0xfe])],
+            Vec::new(),
+        );
+        let error = collect_cookies(&response).unwrap_err();
+        assert!(matches!(error, Error::Uncertain { .. }), "{error:?}");
+        assert!(error.is_uncertain());
+        assert!(!error.is_retryable());
+        assert!(error.to_string().contains("Set-Cookie"), "{error}");
     }
 
     #[test]

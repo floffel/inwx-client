@@ -56,7 +56,7 @@ impl OneSessionServer {
 
 impl Transport for OneSessionServer {
     async fn execute(&self, request: Request<'_>) -> Result<Response> {
-        let body: Value = serde_json::from_slice(request.body).unwrap_or(Value::Null);
+        let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
         let method = body
             .get("method")
             .and_then(Value::as_str)

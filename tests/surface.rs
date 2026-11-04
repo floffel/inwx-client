@@ -19,9 +19,9 @@ use inwx_client::{
     DomainPriceQuote, DomainRenew, DomainRule, DomainStat, DomainStats, DomainUpdate, Error,
     ExtraDataRule, Hostname, InwxClient, Language, NameserverCheck, Period, PriceChange, PriceList,
     PriceType, PromoCode, RecordId, RecordSpec, RecordType, RecordUpdate, RemoveClientHold,
-    RenewalMode, RetryPolicy, SetClientHold, SubAccount, SubAccountCreated, SubAccountList,
-    SubAccountsDeleted, TldGroup, TldGroupList, TldPrice, TldRules, TransferCodeUpdate, ZoneInfo,
-    ZoneListPage, ZoneSummary,
+    RenewalMode, RequestEntry, RequestListPage, RequestListing, RequestState, RetryPolicy,
+    SetClientHold, SubAccount, SubAccountCreated, SubAccountList, SubAccountsDeleted, TldGroup,
+    TldGroupList, TldPrice, TldRules, TransferCodeUpdate, ZoneInfo, ZoneListPage, ZoneSummary,
 };
 use serde_json::{json, Value};
 
@@ -101,7 +101,7 @@ fn renewal_mode_traits() {
         assert_eq!(RenewalMode::from_str(text).unwrap(), expected);
         assert_eq!(expected.to_string(), expected.as_str());
     }
-    let custom = RenewalMode::Other("MANUAL".into());
+    let custom = "manual".parse::<RenewalMode>().unwrap();
     assert_eq!(custom.to_string(), "MANUAL");
     assert_eq!(serde_json::to_string(&custom).unwrap(), "\"MANUAL\"");
     let parsed: RenewalMode = serde_json::from_str("\"AUTODELETE\"").unwrap();
@@ -114,11 +114,14 @@ fn contact_type_traits() {
     assert_eq!(ContactType::Org.to_string(), "ORG");
     assert_eq!(ContactType::Role.to_string(), "ROLE");
     assert_eq!(ContactType::Person.to_string(), "PERSON");
-    assert_eq!(ContactType::Other("TRUSTEE".into()).to_string(), "TRUSTEE");
+    assert_eq!(
+        ContactType::parse("TRUSTEE").unwrap().to_string(),
+        "TRUSTEE"
+    );
     assert_eq!(ContactType::from_str("role").unwrap(), ContactType::Role);
     assert_eq!(serde_json::to_string(&ContactType::Org).unwrap(), "\"ORG\"");
     let parsed: ContactType = serde_json::from_str("\"trustee\"").unwrap();
-    assert_eq!(parsed, ContactType::Other("TRUSTEE".into()));
+    assert_eq!(parsed, ContactType::parse("TRUSTEE").unwrap());
     assert!(ContactType::parse("").is_err());
     assert!(serde_json::from_str::<ContactType>("\"\"").is_err());
 }
@@ -211,7 +214,7 @@ fn every_record_update_setter() {
     assert_eq!(params["prio"], 3);
     assert_eq!(params["id"], json!(["1", "2"]));
 
-    // A name-only change is enough; content is not re-validated without a type.
+    // A name-only change is enough.
     let rename = RecordUpdate::new([RecordId::from_number(1)]).name("api");
     assert!(rename.params().is_ok());
 
@@ -403,8 +406,8 @@ fn contact_validation_covers_every_optional_length() {
 
 #[test]
 fn transport_request_accessors() {
-    let body = b"{}";
-    let request = Request::post_json("https://example.test/jsonrpc/", body)
+    let body = b"{}".to_vec();
+    let request = Request::post_json("https://example.test/jsonrpc/", body.clone())
         .with_header("Content-Type", "application/json")
         .with_header("Cookie", "a=b")
         .with_timeout(Some(std::time::Duration::from_secs(3)));
@@ -459,7 +462,7 @@ fn rpc_response_accessors() {
         br#"{"code":1000,"msg":"ok","resData":{"id":1},"svTRID":"abc","runtime":0.5,"details":[]}"#,
     )
     .unwrap();
-    assert_eq!(response.code, 1000);
+    assert_eq!(response.code, Some(1000));
     assert_eq!(response.msg, "ok");
     assert_eq!(response.sv_trid.as_deref(), Some("abc"));
     assert_eq!(response.runtime, Some(0.5));
@@ -471,7 +474,7 @@ fn rpc_response_accessors() {
     assert!(!response.is_authentication());
 
     let cloned = response.clone();
-    assert_eq!(cloned.code, 1000);
+    assert_eq!(cloned.code, Some(1000));
     let encoded = serde_json::to_string(&response).unwrap();
     assert!(encoded.contains("svTRID"));
 }
@@ -546,6 +549,13 @@ fn error_helpers_cover_every_branch() {
     assert!(!is_read_only_method("domain.create"));
     assert!(!is_read_only_method(""));
     assert!(!is_read_only_method("   "));
+    // The request namespace sits on both sides of the line: listing and reading
+    // a push request only read, answering one mutates it.
+    assert!(is_read_only_method("request.list"));
+    assert!(is_read_only_method("REQUEST.INFO"));
+    assert!(!is_read_only_method("request.accept"));
+    assert!(!is_read_only_method("request.deny"));
+    assert!(!is_read_only_method("request.cancel"));
     // The transfer/lock controls are mutations and must never be replayed.
     for control in [
         "domain.setAuthInfo",
@@ -632,6 +642,76 @@ fn an_error_cause_survives_the_crate_boundary() {
     );
     assert!(!sized.is_retryable());
     assert!(!sized.is_uncertain());
+}
+
+#[test]
+fn request_namespace_traits_and_accessors() {
+    // RequestState: Display, FromStr, serde both ways, unknown carried.
+    for (text, expected) in [
+        ("PENDING", RequestState::Pending),
+        ("accepted", RequestState::Accepted),
+        ("Denied", RequestState::Denied),
+        ("CANCELLED", RequestState::Canceled),
+    ] {
+        assert_eq!(RequestState::from_str(text).unwrap(), expected);
+        assert_eq!(expected.to_string(), expected.as_str());
+    }
+    let custom = RequestState::Other("FUTURE".into());
+    assert_eq!(custom.as_str(), "FUTURE");
+    assert_eq!(serde_json::to_string(&custom).unwrap(), "\"FUTURE\"");
+    assert_eq!(
+        serde_json::from_str::<RequestState>("\"future\"").unwrap(),
+        custom
+    );
+    assert!(serde_json::from_str::<RequestState>("\"\"").is_err());
+    assert!(RequestState::parse("").is_err());
+
+    // RequestEntry: permissive, both spellings accepted, unknown ignored.
+    let entry: RequestEntry = serde_json::from_str(
+        r#"{"id":"7","domain_name":"example.com","state":"PENDING","type":"TRANSFER",
+            "created_at":"2026-01-01","updatedAt":"2026-01-02","message":"hi",
+            "from":"a","to":"b","unknown":1}"#,
+    )
+    .unwrap();
+    assert_eq!(entry.id, Some(7));
+    assert_eq!(entry.domain.as_deref(), Some("example.com"));
+    assert_eq!(entry.state, Some(RequestState::Pending));
+    assert_eq!(entry.request_type.as_deref(), Some("TRANSFER"));
+    assert_eq!(entry.created.as_deref(), Some("2026-01-01"));
+    assert_eq!(entry.updated.as_deref(), Some("2026-01-02"));
+    assert_eq!(entry.message.as_deref(), Some("hi"));
+    assert_eq!(entry.requester.as_deref(), Some("a"));
+    assert_eq!(entry.target.as_deref(), Some("b"));
+    assert_eq!(RequestEntry::default(), RequestEntry::default());
+
+    // RequestListPage: len/is_empty/has_more and the Page impl.
+    let page: RequestListPage =
+        serde_json::from_str(r#"{"count":2,"requests":{"id":7,"state":"ACCEPTED"}}"#).unwrap();
+    assert_eq!(page.len(), 1);
+    assert!(!page.is_empty());
+    assert!(page.has_more());
+    assert_eq!(inwx_client::Page::total(&page), Some(2));
+    assert_eq!(inwx_client::Page::len(&page), 1);
+    let mut truncated = page.clone();
+    inwx_client::Page::truncate_to(&mut truncated, 0);
+    assert!(truncated.is_empty());
+    assert_eq!(inwx_client::Page::into_items(page).len(), 1);
+
+    // A page without a count cannot claim more.
+    let singular: RequestListPage = serde_json::from_str(r#"{"requests":[{"id":1}]}"#).unwrap();
+    assert!(!singular.has_more());
+    assert!(RequestListPage::default().is_empty());
+
+    // RequestListing: constructor and the Listing contract.
+    assert_eq!(RequestListing::new(), RequestListing);
+    assert_eq!(
+        <RequestListing as inwx_client::Listing>::METHOD,
+        "request.list"
+    );
+    assert_eq!(
+        inwx_client::Listing::params(&RequestListing::new(), 3, 10),
+        serde_json::json!({"page": 3, "pagelimit": 10})
+    );
 }
 
 #[test]

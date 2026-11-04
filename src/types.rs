@@ -82,6 +82,112 @@ pub const MAX_LABEL_LEN: usize = 63;
 /// # Ok::<(), inwx_client::Error>(())
 /// ```
 pub const MAX_PASSWORD_LEN: usize = 255;
+
+/// A checked unknown renewal mode.
+///
+/// INWX occasionally adds enum values before this crate knows them. Types such
+/// as [`RenewalMode`] and [`ContactType`] keep those values instead of dropping
+/// them, but the wire value still has to be a safe token: non-empty after
+/// trimming, at most 255 characters, and made only of ASCII letters, digits,
+/// `_`, `.` and `-`. Values are normalised by [`RenewalMode`]'s parser, so
+/// equality, hashing and serialization all see the same canonical text.
+///
+/// ```
+/// use inwx_client::RenewalMode;
+///
+/// let mode: RenewalMode = "newMode".parse()?;
+/// assert_eq!(mode.to_string(), "NEWMODE");
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RenewalModeUnknown(String);
+
+impl RenewalModeUnknown {
+    fn parse_upper(field: &'static str, input: &str) -> Result<Self> {
+        Ok(Self(validate_upper_token(field, input, 255)?))
+    }
+
+    /// The canonical wire representation.
+    ///
+    /// ```
+    /// use inwx_client::RenewalMode;
+    ///
+    /// match "manual".parse::<RenewalMode>()? {
+    ///     RenewalMode::Other(token) => assert_eq!(token.as_str(), "MANUAL"),
+    ///     other => panic!("expected an unknown mode, got {other}"),
+    /// }
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for RenewalModeUnknown {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl From<RenewalModeUnknown> for String {
+    fn from(token: RenewalModeUnknown) -> Self {
+        token.0
+    }
+}
+
+/// A checked unknown contact type.
+///
+/// INWX occasionally adds enum values before this crate knows them. Types such
+/// as [`ContactType`] keep those values instead of dropping them, but the wire
+/// value still has to be a safe token: non-empty after trimming, at most 255
+/// characters, and made only of ASCII letters, digits, `_`, `.` and `-`. Values
+/// are normalised by [`ContactType`]'s parser, so equality, hashing and
+/// serialization all see the same canonical text.
+///
+/// ```
+/// use inwx_client::ContactType;
+///
+/// let kind: ContactType = "trustee".parse()?;
+/// assert_eq!(kind.to_string(), "TRUSTEE");
+/// # Ok::<(), inwx_client::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContactTypeUnknown(String);
+
+impl ContactTypeUnknown {
+    fn parse_upper(field: &'static str, input: &str) -> Result<Self> {
+        Ok(Self(validate_upper_token(field, input, 255)?))
+    }
+
+    /// The canonical wire representation.
+    ///
+    /// ```
+    /// use inwx_client::ContactType;
+    ///
+    /// match "trustee".parse::<ContactType>()? {
+    ///     ContactType::Other(token) => assert_eq!(token.as_str(), "TRUSTEE"),
+    ///     other => panic!("expected an unknown contact type, got {other}"),
+    /// }
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ContactTypeUnknown {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl From<ContactTypeUnknown> for String {
+    fn from(token: ContactTypeUnknown) -> Self {
+        token.0
+    }
+}
 /// Longest legal authorisation code, in bytes.
 ///
 /// The API types the transfer code as `token255`, so 255 bytes are still
@@ -494,7 +600,8 @@ impl Serialize for Period {
     }
 }
 
-/// What happens when a domain expires. Unknown values are carried verbatim.
+/// What happens when a domain expires. Unknown values are carried as checked
+/// tokens.
 ///
 /// ```
 /// use inwx_client::RenewalMode;
@@ -515,8 +622,8 @@ pub enum RenewalMode {
     AutoDelete,
     /// Let the domain expire without deleting it.
     AutoExpire,
-    /// A mode this crate does not know; carried verbatim, upper-cased.
-    Other(String),
+    /// A mode this crate does not know; carried as a checked, upper-cased token.
+    Other(RenewalModeUnknown),
 }
 
 impl RenewalMode {
@@ -532,7 +639,7 @@ impl RenewalMode {
             Self::AutoRenew => "AUTORENEW",
             Self::AutoDelete => "AUTODELETE",
             Self::AutoExpire => "AUTOEXPIRE",
-            Self::Other(raw) => raw,
+            Self::Other(token) => token.as_str(),
         }
     }
 }
@@ -548,14 +655,11 @@ impl FromStr for RenewalMode {
 
     fn from_str(input: &str) -> Result<Self> {
         let upper = input.trim().to_ascii_uppercase();
-        if upper.is_empty() {
-            return Err(Error::validation("renewalMode", "must not be empty"));
-        }
         Ok(match upper.as_str() {
             "AUTORENEW" => Self::AutoRenew,
             "AUTODELETE" => Self::AutoDelete,
             "AUTOEXPIRE" => Self::AutoExpire,
-            _ => Self::Other(upper),
+            _ => Self::Other(RenewalModeUnknown::parse_upper("renewalMode", input)?),
         })
     }
 }
@@ -573,14 +677,15 @@ impl<'de> Deserialize<'de> for RenewalMode {
     }
 }
 
-/// Kind of contact handle. Unknown values are carried verbatim.
+/// Kind of contact handle. Unknown values are carried as checked tokens.
 ///
 /// ```
 /// use inwx_client::ContactType;
 ///
 /// assert_eq!(ContactType::parse("org").unwrap(), ContactType::Org);
-/// assert_eq!(ContactType::Other("TRUSTEE".into()).to_string(), "TRUSTEE");
+/// assert_eq!(ContactType::parse("trustee")?.to_string(), "TRUSTEE");
 /// assert!(ContactType::parse("").is_err());
+/// # Ok::<(), inwx_client::Error>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ContactType {
@@ -590,8 +695,8 @@ pub enum ContactType {
     Person,
     /// Role address such as `hostmaster`.
     Role,
-    /// A type this crate does not know; carried verbatim, upper-cased.
-    Other(String),
+    /// A type this crate does not know; carried as a checked, upper-cased token.
+    Other(ContactTypeUnknown),
 }
 
 impl ContactType {
@@ -603,14 +708,11 @@ impl ContactType {
     /// [`Error::Validation`] when the input is empty.
     pub fn parse(input: &str) -> Result<Self> {
         let upper = input.trim().to_ascii_uppercase();
-        if upper.is_empty() {
-            return Err(Error::validation("contact.type", "must not be empty"));
-        }
         Ok(match upper.as_str() {
             "ORG" => Self::Org,
             "PERSON" => Self::Person,
             "ROLE" => Self::Role,
-            _ => Self::Other(upper),
+            _ => Self::Other(ContactTypeUnknown::parse_upper("contact.type", input)?),
         })
     }
 
@@ -626,7 +728,7 @@ impl ContactType {
             Self::Org => "ORG",
             Self::Person => "PERSON",
             Self::Role => "ROLE",
-            Self::Other(raw) => raw,
+            Self::Other(token) => token.as_str(),
         }
     }
 }
@@ -1187,9 +1289,11 @@ impl Drop for Password {
 /// (`2004-05-23T14:25:10`, ISO-8601).
 ///
 /// Scheduled executions (`scDate`), accounting ranges and `dnssec.listkeys`
-/// filters take these. The original spelling is kept for the wire; the parsed
-/// value is what makes range validation (`dateFrom <= dateTo`) possible.
-/// Parsing uses the `time` crate rather than a hand-rolled parser.
+/// filters take these. The documented `YYYY-MM-DDTHH:MM:SS` form is stored and
+/// sent unchanged. A `Z` or `±HH:MM` suffix is accepted and rewritten to the
+/// equivalent naive UTC form, so equality and ordering compare exactly the
+/// value that reaches the wire. Parsing uses the `time` crate rather than a
+/// hand-rolled parser.
 ///
 /// ```
 /// use inwx_client::Timestamp;
@@ -1198,10 +1302,18 @@ impl Drop for Password {
 /// assert_eq!(at.as_str(), "2026-11-01T03:00:00");
 /// assert!(at > Timestamp::parse("2026-10-31T23:59:59")?);
 ///
-/// // An offset is normalised for comparison but kept for the wire.
+/// // An offset is normalised for comparison and rewritten for the wire.
 /// let zoned = Timestamp::parse("2026-11-01T04:00:00+01:00")?;
 /// assert_eq!(zoned, at);
-/// for bad in ["", "2026-13-01T00:00:00", "tomorrow", "2026-11-01"] {
+/// assert_eq!(zoned.as_str(), "2026-11-01T03:00:00");
+/// for bad in [
+///     "",
+///     "2026-13-01T00:00:00",
+///     "tomorrow",
+///     "2026-11-01",
+///     "2026-11-01T03:00:00.5",
+///     "2026-11-01T03:00:00+0100",
+/// ] {
 ///     assert!(Timestamp::parse(bad).is_err(), "{bad:?}");
 /// }
 /// # Ok::<(), inwx_client::Error>(())
@@ -1215,25 +1327,26 @@ pub struct Timestamp {
 impl Timestamp {
     /// Parses an ISO-8601 timestamp, with or without an offset.
     ///
+    /// The documented naive form is stored unchanged. `Z` and `±HH:MM`
+    /// inputs are converted to the equivalent UTC naive form, which is what
+    /// [`Timestamp::as_str`] and serialization expose.
+    ///
     /// # Errors
     ///
     /// [`Error::Validation`] when the value is not `YYYY-MM-DDTHH:MM:SS`,
-    /// optionally followed by a fraction, `Z` or a `±HH:MM` offset.
+    /// optionally followed by `Z` or a `±HH:MM` offset.
     pub fn parse(input: &str) -> Result<Self> {
         let raw = input.trim();
         if raw.is_empty() {
             return Err(Error::validation("timestamp", "must not be empty"));
         }
-        let at = parse_timestamp(raw).ok_or_else(|| {
+        let (raw, at) = parse_timestamp(raw).ok_or_else(|| {
             Error::validation(
                 "timestamp",
                 format!("{raw:?} is not an ISO-8601 timestamp (2026-11-01T03:00:00)"),
             )
         })?;
-        Ok(Self {
-            raw: raw.to_owned(),
-            at,
-        })
+        Ok(Self { raw, at })
     }
 
     /// The timestamp as it will be sent.
@@ -1249,25 +1362,36 @@ impl Timestamp {
     }
 }
 
-/// Parses the two timestamp shapes the API documentation shows.
+/// Parses the timestamp shapes accepted for the wire.
 ///
-/// A `+HH:MM` value is converted to UTC so two spellings of the same instant
-/// compare equal; a naive value is taken as UTC, which is the only assumption
-/// that keeps ordering total.
-fn parse_timestamp(raw: &str) -> Option<time::PrimitiveDateTime> {
-    use time::format_description::well_known::Rfc3339;
+/// The returned string is the exact text this crate will serialize. A `Z` or
+/// `±HH:MM` value is converted to UTC so two spellings of the same instant
+/// compare and serialize consistently; a naive value is taken as UTC, which is
+/// the only assumption that keeps ordering total.
+fn parse_timestamp(raw: &str) -> Option<(String, time::PrimitiveDateTime)> {
     use time::macros::format_description;
 
-    if let Ok(offset) = time::OffsetDateTime::parse(raw, &Rfc3339) {
-        let utc = offset.to_offset(time::UtcOffset::UTC);
-        return Some(time::PrimitiveDateTime::new(utc.date(), utc.time()));
-    }
     let naive = format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]");
-    time::PrimitiveDateTime::parse(raw, &naive).ok()
+    let utc = format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
+    let offset = format_description!(
+        "[year]-[month]-[day]T[hour]:[minute]:[second][offset_hour sign:mandatory]:[offset_minute]"
+    );
+
+    if let Ok(at) = time::PrimitiveDateTime::parse(raw, &utc) {
+        return Some((at.format(&naive).ok()?, at));
+    }
+    if let Ok(offset) = time::OffsetDateTime::parse(raw, &offset) {
+        let utc = offset.to_offset(time::UtcOffset::UTC);
+        let at = time::PrimitiveDateTime::new(utc.date(), utc.time());
+        return Some((at.format(&naive).ok()?, at));
+    }
+    let at = time::PrimitiveDateTime::parse(raw, &naive).ok()?;
+    Some((raw.to_owned(), at))
 }
 
-/// Timestamps are equal when they name the same instant, whatever offset was
-/// written: `2026-11-01T04:00:00+01:00` equals `2026-11-01T03:00:00`.
+/// Timestamps are equal when they name the same instant. Offset input is
+/// canonicalized on parse, so `2026-11-01T04:00:00+01:00` equals, displays and
+/// serializes as `2026-11-01T03:00:00`.
 impl PartialEq for Timestamp {
     fn eq(&self, other: &Self) -> bool {
         self.at == other.at
@@ -1691,13 +1815,11 @@ pub(crate) mod de {
         Ok(opt_i64(deserializer)?.unwrap_or(0))
     }
 
-    /// An `i32`, falling back to `0` when the value is missing or unusable.
-    pub(crate) fn i32_with_default<'de, D: Deserializer<'de>>(
+    /// An optional `i32` from a number or a numeric string.
+    pub(crate) fn opt_i32<'de, D: Deserializer<'de>>(
         deserializer: D,
-    ) -> std::result::Result<i32, D::Error> {
-        Ok(opt_i64(deserializer)?
-            .and_then(|value| i32::try_from(value).ok())
-            .unwrap_or(0))
+    ) -> std::result::Result<Option<i32>, D::Error> {
+        Ok(opt_i64(deserializer)?.and_then(|value| i32::try_from(value).ok()))
     }
 
     /// An optional float from a number or a numeric string.
@@ -1741,6 +1863,13 @@ pub(crate) mod de {
             Value::Null => None,
             other => Some(other.to_string()),
         })
+    }
+
+    /// A string, falling back to empty when the value is missing or unusable.
+    pub(crate) fn string_with_default<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<String, D::Error> {
+        Ok(opt_string(deserializer)?.unwrap_or_default())
     }
 
     /// An optional record id from a string or a number.
@@ -1914,9 +2043,21 @@ mod tests {
     fn renewal_mode_unknown_is_carried_upper_cased() {
         assert_eq!(
             "newMode".parse::<RenewalMode>().unwrap(),
-            RenewalMode::Other("NEWMODE".into())
+            RenewalMode::Other(RenewalModeUnknown::parse_upper("renewalMode", "NEWMODE").unwrap())
         );
         assert!("  ".parse::<RenewalMode>().is_err());
+    }
+
+    #[test]
+    fn unknown_token_validation_is_exact() {
+        let at_limit = "A".repeat(255);
+        let over_limit = "A".repeat(256);
+        assert!(RenewalModeUnknown::parse_upper("renewalMode", &at_limit).is_ok());
+        assert!(RenewalModeUnknown::parse_upper("renewalMode", &over_limit).is_err());
+        assert!(RenewalModeUnknown::parse_upper("renewalMode", "  manual\t").is_ok());
+        assert!(RenewalModeUnknown::parse_upper("renewalMode", "").is_err());
+        assert!(RenewalModeUnknown::parse_upper("renewalMode", "AUTO\nRENEW").is_err());
+        assert!(RenewalModeUnknown::parse_upper("renewalMode", "AUTO RENEW").is_err());
     }
 
     #[test]

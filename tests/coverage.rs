@@ -23,8 +23,8 @@ use inwx_client::{
     NameserverSet, NameserverSetType, NameserverSetUpdate, NewsItem, NicHandle, NicHandleQuery,
     Password, PdfFile, PdfRender, PostalDelivery, RecordSet, RecordSpec, RefundRequest,
     StatementQuery, SubAccount, SubAccountCreate, SubAccountCreated, SubAccountList,
-    SubAccountsDeleted, TagUpdate, Timestamp, TransferAnswer, UrlRedirectType, ZoneCreate,
-    ZoneType, ZoneUpdate, MAX_PASSWORD_LEN,
+    SubAccountsDeleted, TagUpdate, Timestamp, TransferAnswer, TransferCancelRequest,
+    TransferOutRequest, UrlRedirectType, ZoneCreate, ZoneType, ZoneUpdate, MAX_PASSWORD_LEN,
 };
 use serde_json::json;
 
@@ -561,14 +561,25 @@ fn transfer_branches() {
     .unwrap();
     assert_eq!(trade.domain().as_str(), "a.de");
 
-    let push = inwx_client::PushRequest::new(Irreversible::acknowledge(
+    let push = inwx_client::PushRequest::builder(Irreversible::acknowledge(
         inwx_client::ActionKind::Push,
         &domain("a.de"),
     ))
+    .build()
     .unwrap();
     assert_eq!(push.domain().as_str(), "a.de");
-    assert!(push.clone().with_target("").is_err());
-    assert!(push.with_target("x".repeat(65)).is_err());
+    assert!(inwx_client::PushRequest::builder(Irreversible::acknowledge(
+        inwx_client::ActionKind::Push,
+        &domain("a.de"),
+    ))
+    .with_target("")
+    .is_err());
+    assert!(inwx_client::PushRequest::builder(Irreversible::acknowledge(
+        inwx_client::ActionKind::Push,
+        &domain("a.de"),
+    ))
+    .with_target("x".repeat(65))
+    .is_err());
 
     let restore = inwx_client::RestoreRequest::builder(Irreversible::acknowledge(
         inwx_client::ActionKind::Restore,
@@ -588,6 +599,25 @@ fn transfer_branches() {
         .params()["testing"],
         true
     );
+
+    let cancel = TransferCancelRequest::new(Irreversible::acknowledge(
+        inwx_client::ActionKind::TransferCancel,
+        &domain("a.de"),
+    ))
+    .unwrap();
+    assert_eq!(cancel.domain().as_str(), "a.de");
+    assert_eq!(cancel.params()["testing"], false);
+    assert_eq!(cancel.dry_run().params()["testing"], true);
+
+    let out = TransferOutRequest::new(
+        Irreversible::acknowledge(inwx_client::ActionKind::TransferOut, &domain("a.de")),
+        TransferAnswer::Nack,
+    )
+    .unwrap();
+    assert_eq!(out.domain().as_str(), "a.de");
+    assert_eq!(out.answer(), TransferAnswer::Nack);
+    assert_eq!(out.params()["testing"], false);
+    assert_eq!(out.dry_run().params()["testing"], true);
 
     // Nameserver validation inside the ownership builders.
     assert!(transfer.clone().with_nameservers(&[]).is_err());

@@ -744,13 +744,16 @@ impl CertificateOrder {
             return Err(Error::validation("certificate.san", "must not be empty"));
         }
         for (index, domain) in domains.iter().enumerate() {
-            if domains.iter().take(index).any(|earlier| earlier == domain) {
+            let name = domain.as_str();
+            if domains.iter().take(index).any(|earlier| earlier == domain)
+                || self.sans.iter().any(|earlier| earlier == name)
+            {
                 return Err(Error::validation(
                     "certificate.san",
                     format!("{domain} is listed twice"),
                 ));
             }
-            self.sans.push(domain.as_str().to_owned());
+            self.sans.push(name.to_owned());
         }
         Ok(self)
     }
@@ -760,7 +763,7 @@ impl CertificateOrder {
     /// # Errors
     ///
     /// [`Error::Validation`] when the value is not a single leftmost `*` label
-    /// followed by a valid domain.
+    /// followed by a valid domain, or when that wildcard is already listed.
     ///
     /// ```
     /// use inwx_client::{CertificateOrder, DomainName};
@@ -774,6 +777,12 @@ impl CertificateOrder {
     /// ```
     pub fn with_wildcard_san(mut self, wildcard: &str) -> Result<Self> {
         let name = validate_wildcard(wildcard)?;
+        if self.sans.iter().any(|earlier| earlier == &name) {
+            return Err(Error::validation(
+                "certificate.san",
+                format!("{name} is listed twice"),
+            ));
+        }
         self.sans.push(name);
         Ok(self)
     }
@@ -962,7 +971,7 @@ impl CertificateOrder {
     ///
     /// [`Error::Validation`] when neither a CSR nor a common name was set — the
     /// API documents both as optional, but an order with neither cannot be
-    /// issued.
+    /// issued — or when the SAN counts do not fit the SANs listed.
     ///
     /// ```
     /// use inwx_client::{CertificateOrder, DomainName};
@@ -976,6 +985,41 @@ impl CertificateOrder {
                 "certificate.order",
                 "needs a CSR or a common name",
             ));
+        }
+        let wildcard_count = self.sans.iter().filter(|san| san.starts_with("*.")).count();
+        if let Some(number_of_san) = self.number_of_san {
+            let number_of_san = usize::from(number_of_san);
+            if self.sans.len() > number_of_san {
+                return Err(Error::validation(
+                    "certificate.numberOfSan",
+                    format!(
+                        "must be at least the number of SANs, but {number_of_san} is less than {}",
+                        self.sans.len()
+                    ),
+                ));
+            }
+        }
+        if let Some(number_of_wildcard_san) = self.number_of_wildcard_san {
+            let number_of_wildcard_san = usize::from(number_of_wildcard_san);
+            if wildcard_count > number_of_wildcard_san {
+                return Err(Error::validation(
+                    "certificate.numberOfWildcardSan",
+                    format!(
+                        "must be at least the number of wildcard SANs, but \
+                         {number_of_wildcard_san} is less than {wildcard_count}"
+                    ),
+                ));
+            }
+            if number_of_wildcard_san > self.sans.len() {
+                return Err(Error::validation(
+                    "certificate.numberOfWildcardSan",
+                    format!(
+                        "must not exceed the number of SANs, but {number_of_wildcard_san} is \
+                         greater than {}",
+                        self.sans.len()
+                    ),
+                ));
+            }
         }
         let mut params = Map::new();
         params.insert("productId".to_owned(), json!(self.product_id));
@@ -2305,6 +2349,72 @@ mod tests {
         assert!(CertificateOrder::new(17)
             .unwrap()
             .with_sans(&[domain.clone(), domain])
+            .is_err());
+    }
+
+    #[test]
+    fn san_lists_reject_duplicates_across_builder_calls() {
+        let domain = DomainName::parse("www.example.com").unwrap();
+        assert!(CertificateOrder::new(17)
+            .unwrap()
+            .with_sans(std::slice::from_ref(&domain))
+            .unwrap()
+            .with_sans(std::slice::from_ref(&domain))
+            .is_err());
+        assert!(CertificateOrder::new(17)
+            .unwrap()
+            .with_wildcard_san("*.example.com")
+            .unwrap()
+            .with_wildcard_san("*.example.com")
+            .is_err());
+    }
+
+    #[test]
+    fn san_counts_must_fit_the_names_listed() {
+        let www = DomainName::parse("www.example.com").unwrap();
+        let shop = DomainName::parse("shop.example.com").unwrap();
+        let base = || {
+            CertificateOrder::new(17)
+                .unwrap()
+                .with_common_name(DomainName::parse("example.com").unwrap())
+        };
+
+        // Valid value and just inside the limit: two SANs, counted as two.
+        assert!(base()
+            .with_sans(&[www.clone(), shop])
+            .unwrap()
+            .with_san_count(2, 0)
+            .params()
+            .is_ok());
+        // Just outside: one name more than the order buys.
+        assert!(base()
+            .with_sans(&[DomainName::parse("www.example.com").unwrap()])
+            .unwrap()
+            .with_san_count(0, 0)
+            .params()
+            .is_err());
+
+        // Wildcard capacity is bounded by the SAN list and by the wildcard
+        // entries in it.
+        assert!(base()
+            .with_sans(&[DomainName::parse("www.example.com").unwrap()])
+            .unwrap()
+            .with_wildcard_san("*.example.com")
+            .unwrap()
+            .with_san_count(2, 1)
+            .params()
+            .is_ok());
+        assert!(base()
+            .with_wildcard_san("*.example.com")
+            .unwrap()
+            .with_san_count(1, 0)
+            .params()
+            .is_err());
+        assert!(base()
+            .with_wildcard_san("*.example.com")
+            .unwrap()
+            .with_san_count(1, 2)
+            .params()
             .is_err());
     }
 

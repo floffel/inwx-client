@@ -235,7 +235,7 @@ impl Transport for MockTransport {
         // Keep this a real coroutine: the trait method is `async`.
         std::future::ready(()).await;
 
-        let body: Value = serde_json::from_slice(request.body).unwrap_or(Value::Null);
+        let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
         let call = Call {
             url: request.url.to_owned(),
             method: body

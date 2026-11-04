@@ -249,11 +249,22 @@ proptest! {
         match RpcResponse::parse(&bytes) {
             Ok(response) => {
                 // Parsed responses classify their own code consistently.
-                prop_assert_eq!(response.is_success(), inwx_client::rpc::is_success_code(response.code));
+                prop_assert_eq!(
+                    response.is_success(),
+                    response
+                        .code
+                        .is_some_and(inwx_client::rpc::is_success_code)
+                );
                 let code = response.code;
                 let result = response.into_result();
-                if inwx_client::rpc::is_success_code(code) {
+                if code.is_some_and(inwx_client::rpc::is_success_code) {
                     prop_assert!(result.is_ok());
+                } else if code.is_none() {
+                    let is_uncertain_error = matches!(
+                        &result,
+                        Err(error) if error.is_uncertain()
+                    );
+                    prop_assert!(is_uncertain_error);
                 } else {
                     let is_api_error = matches!(result, Err(inwx_client::Error::Api { .. }));
                     prop_assert!(is_api_error);
@@ -525,6 +536,31 @@ proptest! {
         let at = Timestamp::parse(&text).unwrap();
         prop_assert_eq!(at.as_str(), text.as_str());
         prop_assert_eq!(Timestamp::parse(at.as_str()).unwrap(), at);
+    }
+
+    /// Offset input names the same instant before and after canonicalization,
+    /// and the text sent on the wire is the normalized UTC spelling.
+    #[test]
+    fn accepted_offset_timestamps_are_normalised_for_the_wire(
+        year in 2000u16..2100,
+        month in 1u8..13,
+        day in 1u8..=28,
+        hour in 0u8..24,
+        minute in 0u8..60,
+        second in 0u8..60,
+        offset_hour in 0u8..24,
+        offset_minute in 0u8..60,
+        positive in any::<bool>(),
+    ) {
+        let text = format!(
+            "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}{}{offset_hour:02}:{offset_minute:02}",
+            if positive { '+' } else { '-' }
+        );
+        let zoned = inwx_client::Timestamp::parse(&text).unwrap();
+        let canonical = inwx_client::Timestamp::parse(zoned.as_str()).unwrap();
+        prop_assert_eq!(&canonical, &zoned);
+        prop_assert_eq!(canonical.as_str().len(), 19);
+        prop_assert_eq!(serde_json::to_string(&zoned).unwrap(), format!("\"{}\"", zoned.as_str()));
     }
 
     #[test]

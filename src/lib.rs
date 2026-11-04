@@ -65,7 +65,7 @@
 //!
 //! impl Transport for Scripted {
 //!     async fn execute(&self, request: Request<'_>) -> Result<Response> {
-//!         let method = serde_json::from_slice::<Value>(request.body)
+//!         let method = serde_json::from_slice::<Value>(&request.body)
 //!             .ok()
 //!             .and_then(|body| body.get("method")?.as_str().map(str::to_owned));
 //!         let (headers, payload) = match method.as_deref() {
@@ -129,6 +129,7 @@
 //! | DNSSEC | `dnssec.*` (7 methods) |
 //! | Tags | `tag.*` (5 methods) |
 //! | Nameserver sets | `nameserverset.*` (5 methods) |
+//! | Push requests | `request.list`, `request.info`, `request.accept`, `request.deny`, `request.cancel` |
 //! | DynDNS | `dyndns.*` (8 methods) |
 //! | DynDNS subscriptions | `dyndnssubscription.create`, `dyndnssubscription.cancel`, `dyndnssubscription.list`, `dyndnssubscription.listProducts` |
 //! | Accounting | `accounting.*` (11 methods) |
@@ -171,8 +172,7 @@
 //! * **Parse permissively.** Unknown fields are ignored, unknown enum values are
 //!   carried ([`RecordType::Other`], [`RenewalMode::Other`],
 //!   [`ContactType::Other`], [`AccountRole::Other`]), and scalars are accepted as
-//!   numbers or strings —
-//!   INWX is inconsistent between methods.
+//!   numbers or strings — INWX is inconsistent between methods.
 //! * **Walk the whole list.** [`InwxClient::list_all_domains`],
 //!   [`InwxClient::list_all_contacts`], [`InwxClient::list_all_zones`],
 //!   [`InwxClient::list_all_nichandles`] and
@@ -243,7 +243,7 @@
 //!   `2300` (pending transfer) on a read-only method — a rejected command is
 //!   never repeated. A 429/5xx is replayed only for a read-only method as well:
 //!   for an order the status says nothing about whether it already went
-//!   through, so that outcome is [`Error::Uncertain`] after a single attempt.
+//!   through, so that outcome is [`Error::HttpUncertain`] after a single attempt.
 //!   `2300` follows the same gate and is returned as-is for a mutation, because
 //!   the object was already reached and a second `domain.transfer` after the
 //!   pending one settled is a second order. `account.login` is the one
@@ -328,6 +328,7 @@ pub mod pagination;
 pub mod pdf;
 pub mod price;
 pub mod record;
+pub mod request;
 pub mod rpc;
 mod session;
 pub mod tag;
@@ -412,11 +413,12 @@ pub use price::{DomainPriceQuote, ExtraDataRule, PriceChange, PriceList, PromoCo
 pub use record::{
     DnsRecord, RecordId, RecordSet, RecordSpec, RecordType, RecordUpdate, DEFAULT_TTL, MAX_TTL,
 };
+pub use request::{RequestEntry, RequestListPage, RequestListing, RequestState};
 pub use rpc::{Detail, RpcRequest, RpcResponse};
 pub use tag::{Tag, TagUpdate, TagUsage, TaggedDomains};
 pub use transfer::{
     ActionKind, ExtData, Irreversible, OwnershipResult, PushRequest, RestoreRequest, RestoreResult,
-    TradeRequest, TransferAnswer, TransferRequest,
+    TradeRequest, TransferAnswer, TransferCancelRequest, TransferOutRequest, TransferRequest,
 };
 #[cfg(feature = "http")]
 pub use transport::ReqwestTransport;
@@ -424,8 +426,8 @@ pub use transport::{
     read_capped_body, ChunkSource, Response, Transport, TransportStage, DEFAULT_MAX_RESPONSE_BYTES,
 };
 pub use types::{
-    parse_ip, AuthCode, ContactType, DocumentFormat, DomainName, Email, Handle, Hostname, Password,
-    Period, PriceType, RenewalMode, Timestamp, MAX_AUTH_CODE_LEN, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
-    MAX_PASSWORD_LEN,
+    parse_ip, AuthCode, ContactType, ContactTypeUnknown, DocumentFormat, DomainName, Email, Handle,
+    Hostname, Password, Period, PriceType, RenewalMode, RenewalModeUnknown, Timestamp,
+    MAX_AUTH_CODE_LEN, MAX_DOMAIN_LEN, MAX_LABEL_LEN, MAX_PASSWORD_LEN,
 };
 pub use zone::{RecordExport, UrlRedirectType, ZoneCreate, ZoneExport, ZoneType, ZoneUpdate};

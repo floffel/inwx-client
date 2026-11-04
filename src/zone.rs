@@ -29,7 +29,7 @@ use std::str::FromStr;
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 use crate::client::InwxClient;
 use crate::error::{Error, Result};
@@ -215,6 +215,71 @@ impl<'de> Deserialize<'de> for UrlRedirectType {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
         let raw = String::deserialize(deserializer)?;
         Self::from_str(&raw).map_err(D::Error::custom)
+    }
+}
+
+/// The shared `nameserver.create` / `nameserver.update` body.
+///
+/// Create-only fields such as `soaEmail` and `ignoreExisting` stay `None` on
+/// update; update-only omission rules are expressed by `None` plus
+/// `skip_serializing_if`.
+#[derive(Serialize)]
+struct ZoneParams<'a> {
+    domain: &'a DomainName,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    zone_type: Option<&'a ZoneType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ns: Option<&'a [Hostname]>,
+    #[serde(rename = "masterIp", skip_serializing_if = "Option::is_none")]
+    master_ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    web: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mail: Option<&'a str>,
+    #[serde(rename = "soaEmail", skip_serializing_if = "Option::is_none")]
+    soa_email: Option<&'a Email>,
+    #[serde(rename = "urlRedirectType", skip_serializing_if = "Option::is_none")]
+    redirect_type: Option<UrlRedirectType>,
+    #[serde(rename = "urlRedirectTitle", skip_serializing_if = "Option::is_none")]
+    redirect_title: Option<&'a str>,
+    #[serde(
+        rename = "urlRedirectDescription",
+        skip_serializing_if = "Option::is_none"
+    )]
+    redirect_description: Option<&'a str>,
+    #[serde(rename = "urlRedirectFavIcon", skip_serializing_if = "Option::is_none")]
+    redirect_favicon: Option<&'a str>,
+    #[serde(
+        rename = "urlRedirectKeywords",
+        skip_serializing_if = "Option::is_none"
+    )]
+    redirect_keywords: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    testing: Option<bool>,
+    #[serde(rename = "ignoreExisting", skip_serializing_if = "Option::is_none")]
+    ignore_existing: Option<bool>,
+}
+
+impl ZoneParams<'_> {
+    fn has_frame_metadata(&self) -> bool {
+        self.redirect_title.is_some()
+            || self.redirect_description.is_some()
+            || self.redirect_favicon.is_some()
+            || self.redirect_keywords.is_some()
+    }
+
+    fn has_update_fields(&self) -> bool {
+        self.zone_type.is_some()
+            || self.ns.is_some()
+            || self.master_ip.is_some()
+            || self.web.is_some()
+            || self.mail.is_some()
+            || self.redirect_type.is_some()
+            || self.has_frame_metadata()
+    }
+
+    fn to_value(&self) -> Result<Value> {
+        Ok(serde_json::to_value(self)?)
     }
 }
 
@@ -693,11 +758,8 @@ impl ZoneCreate {
             }
             _ => {}
         }
-        let frame_metadata = self.redirect_title.is_some()
-            || self.redirect_description.is_some()
-            || self.redirect_favicon.is_some()
-            || self.redirect_keywords.is_some();
-        if frame_metadata
+        let params = self.zone_params();
+        if params.has_frame_metadata()
             && !self
                 .redirect_type
                 .is_some_and(UrlRedirectType::supports_frame_metadata)
@@ -713,49 +775,26 @@ impl ZoneCreate {
                 "must be at most 253 characters",
             ));
         }
-        Ok(self.params_unchecked())
+        params.to_value()
     }
 
-    /// Serialises without re-validating; `params` has already done it.
-    fn params_unchecked(&self) -> Value {
-        let mut params = Map::new();
-        params.insert("domain".to_owned(), json!(self.domain));
-        params.insert("type".to_owned(), json!(self.zone_type));
-        if !self.nameservers.is_empty() {
-            params.insert("ns".to_owned(), json!(self.nameservers));
+    fn zone_params(&self) -> ZoneParams<'_> {
+        ZoneParams {
+            domain: &self.domain,
+            zone_type: Some(&self.zone_type),
+            ns: (!self.nameservers.is_empty()).then_some(self.nameservers.as_slice()),
+            master_ip: self.master_ip.map(|ip| ip.to_string()),
+            web: self.web.as_deref(),
+            mail: self.mail.as_deref(),
+            soa_email: self.soa_email.as_ref(),
+            redirect_type: self.redirect_type,
+            redirect_title: self.redirect_title.as_deref(),
+            redirect_description: self.redirect_description.as_deref(),
+            redirect_favicon: self.redirect_favicon.as_deref(),
+            redirect_keywords: self.redirect_keywords.as_deref(),
+            testing: Some(self.testing),
+            ignore_existing: self.ignore_existing.then_some(true),
         }
-        if let Some(ip) = self.master_ip {
-            params.insert("masterIp".to_owned(), json!(ip.to_string()));
-        }
-        if let Some(web) = &self.web {
-            params.insert("web".to_owned(), json!(web));
-        }
-        if let Some(mail) = &self.mail {
-            params.insert("mail".to_owned(), json!(mail));
-        }
-        if let Some(email) = &self.soa_email {
-            params.insert("soaEmail".to_owned(), json!(email));
-        }
-        if let Some(kind) = self.redirect_type {
-            params.insert("urlRedirectType".to_owned(), json!(kind));
-        }
-        if let Some(title) = &self.redirect_title {
-            params.insert("urlRedirectTitle".to_owned(), json!(title));
-        }
-        if let Some(description) = &self.redirect_description {
-            params.insert("urlRedirectDescription".to_owned(), json!(description));
-        }
-        if let Some(favicon) = &self.redirect_favicon {
-            params.insert("urlRedirectFavIcon".to_owned(), json!(favicon));
-        }
-        if let Some(keywords) = &self.redirect_keywords {
-            params.insert("urlRedirectKeywords".to_owned(), json!(keywords));
-        }
-        params.insert("testing".to_owned(), json!(self.testing));
-        if self.ignore_existing {
-            params.insert("ignoreExisting".to_owned(), json!(true));
-        }
-        Value::Object(params)
     }
 }
 
@@ -793,16 +832,6 @@ pub struct ZoneUpdate {
     redirect_keywords: Option<String>,
     testing: bool,
 }
-
-/// Parameter names that only a `FRAME` redirect may carry. Used by
-/// [`ZoneUpdate::params`] to reject a frame field whose type was changed away
-/// from `FRAME` after it was set.
-const FRAME_METADATA_FIELDS: &[&str] = &[
-    "urlRedirectTitle",
-    "urlRedirectDescription",
-    "urlRedirectFavIcon",
-    "urlRedirectKeywords",
-];
 
 impl ZoneUpdate {
     /// An empty update for `domain`.
@@ -1107,48 +1136,6 @@ impl ZoneUpdate {
         self
     }
 
-    /// The fields this update sets, as `(parameter name, value)` pairs in the
-    /// order the API documents them.
-    ///
-    /// This is the one definition of "a change" for [`ZoneUpdate`]: both
-    /// [`has_changes`](Self::has_changes) and [`params`](Self::params) derive
-    /// from it, so the guard and the serialiser cannot drift apart. `testing`
-    /// is deliberately absent — see [`dry_run`](Self::dry_run).
-    fn set_fields(&self) -> Vec<(&'static str, Value)> {
-        let mut fields: Vec<(&'static str, Value)> = Vec::new();
-        if let Some(zone_type) = &self.zone_type {
-            fields.push(("type", json!(zone_type)));
-        }
-        if let Some(nameservers) = &self.nameservers {
-            fields.push(("ns", json!(nameservers)));
-        }
-        if let Some(ip) = self.master_ip {
-            fields.push(("masterIp", json!(ip.to_string())));
-        }
-        if let Some(web) = &self.web {
-            fields.push(("web", json!(web)));
-        }
-        if let Some(mail) = &self.mail {
-            fields.push(("mail", json!(mail)));
-        }
-        if let Some(kind) = self.redirect_type {
-            fields.push(("urlRedirectType", json!(kind)));
-        }
-        if let Some(title) = &self.redirect_title {
-            fields.push(("urlRedirectTitle", json!(title)));
-        }
-        if let Some(description) = &self.redirect_description {
-            fields.push(("urlRedirectDescription", json!(description)));
-        }
-        if let Some(favicon) = &self.redirect_favicon {
-            fields.push(("urlRedirectFavIcon", json!(favicon)));
-        }
-        if let Some(keywords) = &self.redirect_keywords {
-            fields.push(("urlRedirectKeywords", json!(keywords)));
-        }
-        fields
-    }
-
     /// Whether a field has been set.
     ///
     /// `dry_run` does not count: `testing` asks the API to simulate the command
@@ -1175,7 +1162,7 @@ impl ZoneUpdate {
     /// ```
     #[must_use]
     pub fn has_changes(&self) -> bool {
-        !self.set_fields().is_empty()
+        self.zone_params().has_update_fields()
     }
 
     /// The `nameserver.update` parameters.
@@ -1200,8 +1187,8 @@ impl ZoneUpdate {
     /// zone without `masterIp`, a `MASTER` zone with one, or a frame field paired
     /// with a non-FRAME redirect type.
     pub fn params(&self) -> Result<Value> {
-        let fields = self.set_fields();
-        if fields.is_empty() {
+        let params = self.zone_params();
+        if !params.has_update_fields() {
             return Err(Error::validation(
                 "zone.update",
                 "sets no field; add a change or skip the call \
@@ -1229,9 +1216,7 @@ impl ZoneUpdate {
             }
             _ => {}
         }
-        if fields
-            .iter()
-            .any(|(name, _)| FRAME_METADATA_FIELDS.contains(name))
+        if params.has_frame_metadata()
             && self
                 .redirect_type
                 .is_some_and(|kind| !kind.supports_frame_metadata())
@@ -1241,15 +1226,26 @@ impl ZoneUpdate {
                 "frame metadata needs a FRAME redirect type or no urlRedirectType",
             ));
         }
-        let mut params = Map::new();
-        params.insert("domain".to_owned(), json!(self.domain));
-        for (name, value) in fields {
-            params.insert((*name).to_owned(), value);
+        params.to_value()
+    }
+
+    fn zone_params(&self) -> ZoneParams<'_> {
+        ZoneParams {
+            domain: &self.domain,
+            zone_type: self.zone_type.as_ref(),
+            ns: self.nameservers.as_deref(),
+            master_ip: self.master_ip.map(|ip| ip.to_string()),
+            web: self.web.as_deref(),
+            mail: self.mail.as_deref(),
+            soa_email: None,
+            redirect_type: self.redirect_type,
+            redirect_title: self.redirect_title.as_deref(),
+            redirect_description: self.redirect_description.as_deref(),
+            redirect_favicon: self.redirect_favicon.as_deref(),
+            redirect_keywords: self.redirect_keywords.as_deref(),
+            testing: self.testing.then_some(true),
+            ignore_existing: None,
         }
-        if self.testing {
-            params.insert("testing".to_owned(), json!(true));
-        }
-        Ok(Value::Object(params))
     }
 }
 
