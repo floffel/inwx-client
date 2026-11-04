@@ -189,7 +189,9 @@ pub struct RpcResponse {
     #[serde(default, deserialize_with = "de::i32_with_default")]
     pub code: i32,
     /// Result message, for example `Command completed successfully`.
-    #[serde(default)]
+    ///
+    /// A `null` or absent value becomes an empty string.
+    #[serde(default, deserialize_with = "de::string_with_default")]
     pub msg: String,
     /// Short machine readable error tag, for example `MISSING_ID`.
     #[serde(default, rename = "reasonCode", deserialize_with = "de::opt_string")]
@@ -207,7 +209,9 @@ pub struct RpcResponse {
     #[serde(default, deserialize_with = "de::opt_f64")]
     pub runtime: Option<f64>,
     /// Per-parameter error details.
-    #[serde(default)]
+    ///
+    /// A `null` or absent value becomes an empty list.
+    #[serde(default, deserialize_with = "de::rows")]
     pub details: Vec<Detail>,
     /// Additional fields returned by the API.
     ///
@@ -386,6 +390,41 @@ mod tests {
         assert!(matches!(
             response.into_result(),
             Err(Error::Api { code: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn null_msg_and_details_are_permissive_on_success() {
+        let response = RpcResponse::parse(
+            br#"{"code":1000,"msg":null,"details":null,"resData":{"id":7},"svTRID":"abc"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(response.msg, "");
+        assert_eq!(response.details, [] as [Detail; 0]);
+        assert_eq!(response.sv_trid.as_deref(), Some("abc"));
+        assert_eq!(response.into_result().unwrap()["id"], 7);
+    }
+
+    #[test]
+    fn null_msg_and_details_are_permissive_on_error() {
+        let response = RpcResponse::parse(
+            br#"{"code":2303,"msg":null,"reasonCode":"PENDING","reason":"later","details":null,"svTRID":"abc"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(response.msg, "");
+        assert_eq!(response.details, [] as [Detail; 0]);
+        assert_eq!(response.sv_trid.as_deref(), Some("abc"));
+        assert!(matches!(
+            response.into_result(),
+            Err(Error::Api {
+                code: 2303,
+                reason_code: Some(reason_code),
+                reason: Some(reason),
+                details,
+                ..
+            }) if reason_code == "PENDING" && reason == "later" && details.is_empty()
         ));
     }
 

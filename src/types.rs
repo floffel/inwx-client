@@ -1743,6 +1743,13 @@ pub(crate) mod de {
         })
     }
 
+    /// A string, falling back to empty when the value is missing or unusable.
+    pub(crate) fn string_with_default<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<String, D::Error> {
+        Ok(opt_string(deserializer)?.unwrap_or_default())
+    }
+
     /// An optional record id from a string or a number.
     pub(crate) fn opt_record_id<'de, D: Deserializer<'de>>(
         deserializer: D,
