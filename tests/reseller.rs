@@ -14,7 +14,7 @@ use inwx_client::{
     ApplicationUpdate, AuthInfo2Order, ContactVerificationSettingsUpdate, CustomerDownloadQuery,
     CustomerUpdate, DocumentFormat, DocumentKind, DocumentQuery, DocumentUpload,
     DocumentUploadOutcome, DomainName, Error, HostCheck, HostCreate, HostQuery, HostUpdate,
-    Hostname, MessageAck, NicHandleQuery, Pagination, PdfRender,
+    Hostname, MessageAck, NewsQuery, NicHandleQuery, Pagination, PdfRender,
 };
 use serde_json::json;
 
@@ -1118,7 +1118,12 @@ async fn list_news_pages() {
     let transport = MockTransport::new();
     transport.ok(json!({ "news": [{ "id": 1, "title": "Maintenance" }] }));
 
-    let page = client(transport.clone()).list_news(1, 20).await.unwrap();
+    let query = NewsQuery::new()
+        .with_page(1)
+        .unwrap()
+        .with_limit(20)
+        .unwrap();
+    let page = client(transport.clone()).list_news(&query).await.unwrap();
     assert_eq!(page.len(), 1);
     assert_eq!(page.items[0].title.as_deref(), Some("Maintenance"));
     assert!(!page.has_more());
@@ -1139,8 +1144,13 @@ async fn an_unparseable_news_row_fails_the_page_instead_of_vanishing() {
         ]
     }));
 
+    let query = NewsQuery::new()
+        .with_page(2)
+        .unwrap()
+        .with_limit(20)
+        .unwrap();
     let error = client(transport)
-        .list_news(2, 20)
+        .list_news(&query)
         .await
         .expect_err("a duplicated alias must not be dropped");
 
@@ -1160,7 +1170,8 @@ async fn an_unparseable_news_row_fails_the_page_instead_of_vanishing() {
 #[tokio::test]
 async fn a_zero_page_limit_for_news_never_reaches_the_wire() {
     let transport = MockTransport::new();
-    assert!(client(transport.clone()).list_news(1, 0).await.is_err());
+    assert!(NewsQuery::new().with_limit(0).is_err());
+    assert!(NewsQuery::new().with_page(0).is_err());
     assert_eq!(transport.call_count(), 0);
 }
 
@@ -1169,20 +1180,17 @@ async fn news_page_limit_stays_inside_the_crate_ceiling() {
     let transport = MockTransport::new();
     transport.ok(json!({ "news": [] }));
 
-    let page = client(transport.clone())
-        .list_news(1, inwx_client::MAX_PAGE_SIZE)
-        .await
+    let query = NewsQuery::new()
+        .with_limit(inwx_client::MAX_PAGE_SIZE)
         .unwrap();
+    let page = client(transport.clone()).list_news(&query).await.unwrap();
     assert_eq!(page.limit, inwx_client::MAX_PAGE_SIZE);
     assert_eq!(transport.only_call().params["pagelimit"], 1000);
 
-    let transport = MockTransport::new();
-    let error = client(transport.clone())
-        .list_news(1, inwx_client::MAX_PAGE_SIZE + 1)
-        .await
+    let error = NewsQuery::new()
+        .with_limit(inwx_client::MAX_PAGE_SIZE + 1)
         .unwrap_err();
     assert!(error.is_validation());
-    assert_eq!(transport.call_count(), 0);
 }
 
 #[tokio::test]
@@ -1190,7 +1198,8 @@ async fn a_full_news_page_says_that_more_may_follow() {
     let transport = MockTransport::new();
     transport.ok(json!({ "news": [{ "id": 1 }, { "id": 2 }] }));
 
-    let page = client(transport).list_news(1, 2).await.unwrap();
+    let query = NewsQuery::new().with_limit(2).unwrap();
+    let page = client(transport).list_news(&query).await.unwrap();
     assert_eq!(page.len(), 2);
     assert!(page.has_more());
 }

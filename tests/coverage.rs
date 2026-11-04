@@ -20,9 +20,9 @@ use inwx_client::{
     DocumentFormat, DocumentQuery, DocumentUpload, DomainControlResult, DomainName,
     DownloadedDocument, DsRecord, DynDnsAccount, DynDnsAccountRef, DynDnsRecord, Email, Handle,
     HostCheck, HostCreate, HostUpdate, HostingOrder, HostingPeriod, Hostname, Irreversible,
-    NameserverSet, NameserverSetType, NameserverSetUpdate, NewsItem, NicHandle, NicHandleQuery,
-    Password, PdfFile, PdfRender, PostalDelivery, RecordSet, RecordSpec, RefundRequest,
-    StatementQuery, SubAccount, SubAccountCreate, SubAccountCreated, SubAccountList,
+    NameserverSet, NameserverSetType, NameserverSetUpdate, NewsItem, NewsQuery, NicHandle,
+    NicHandleQuery, Password, PdfFile, PdfRender, PostalDelivery, RecordSet, RecordSpec,
+    RefundRequest, StatementQuery, SubAccount, SubAccountCreate, SubAccountCreated, SubAccountList,
     SubAccountsDeleted, TagUpdate, Timestamp, TransferAnswer, TransferCancelRequest,
     TransferOutRequest, UrlRedirectType, ZoneCreate, ZoneType, ZoneUpdate, MAX_PASSWORD_LEN,
 };
@@ -914,6 +914,17 @@ fn reseller_value_types_run_their_trait_impls() {
     // The read helpers of the small answer types.
     let news: NewsItem = serde_json::from_str(r#"{"id":1,"read":1}"#).unwrap();
     assert_eq!(news.is_read(), Some(true));
+    let news_query = NewsQuery::new()
+        .with_page(2)
+        .unwrap()
+        .with_limit(10)
+        .unwrap();
+    assert_eq!(news_query.params()["page"], 2);
+    assert_eq!(news_query.params()["pagelimit"], 10);
+    assert_eq!(news_query, news_query.clone());
+    assert_ne!(news_query, NewsQuery::default());
+    assert!(NewsQuery::new().with_page(0).is_err());
+    assert!(NewsQuery::new().with_limit(0).is_err());
     let handle: NicHandle = serde_json::from_str(r#"{"nicId":1,"deleted":0}"#).unwrap();
     assert_eq!(handle.is_deleted(), Some(false));
     let settings: ContactVerificationSettings =
