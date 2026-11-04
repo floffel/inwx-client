@@ -30,7 +30,7 @@ use crate::{Error, Result};
 /// use inwx_client::transport::Request;
 ///
 /// let body = br#"{"method":"account.check","params":{}}"#;
-/// let request = Request::post_json("https://api.domrobot.com/jsonrpc/", body)
+/// let request = Request::post_json("https://api.domrobot.com/jsonrpc/", body.to_vec())
 ///     .with_header("Cookie", "session=abc")
 ///     .with_timeout(Some(std::time::Duration::from_secs(5)));
 /// assert_eq!(request.header("cookie"), Some("session=abc"));
@@ -41,7 +41,10 @@ pub struct Request<'a> {
     /// Absolute URL of the JSON-RPC endpoint.
     pub url: &'a str,
     /// Serialised JSON body, already valid JSON.
-    pub body: &'a [u8],
+    ///
+    /// Stored by value so the transport can hand it to the HTTP client without
+    /// copying the whole envelope again.
+    pub body: Vec<u8>,
     /// Additional headers, as `(name, value)` pairs in insertion order.
     pub headers: Vec<(String, String)>,
     /// Per-request timeout; `None` leaves the transport default in place.
@@ -72,6 +75,9 @@ impl fmt::Debug for Request<'_> {
 impl<'a> Request<'a> {
     /// A POST with a JSON body and no extra headers.
     ///
+    /// The body is accepted as any byte container that can become a `Vec<u8>`,
+    /// so a caller can pass an owned serialized request without an extra copy.
+    ///
     /// ```
     /// use inwx_client::transport::Request;
     ///
@@ -79,10 +85,10 @@ impl<'a> Request<'a> {
     /// assert!(request.headers.is_empty());
     /// ```
     #[must_use]
-    pub fn post_json(url: &'a str, body: &'a [u8]) -> Self {
+    pub fn post_json(url: &'a str, body: impl Into<Vec<u8>>) -> Self {
         Self {
             url,
-            body,
+            body: body.into(),
             headers: Vec::new(),
             timeout: None,
         }
@@ -667,16 +673,22 @@ impl Transport for ReqwestTransport {
                 "could not build the reqwest client",
             ));
         };
-        let mut builder = client.post(request.url);
-        if let Some(timeout) = request.timeout {
+        let Request {
+            url,
+            body,
+            headers,
+            timeout,
+        } = request;
+        let mut builder = client.post(url);
+        if let Some(timeout) = timeout {
             builder = builder.timeout(timeout);
         }
-        for (name, value) in &request.headers {
+        for (name, value) in &headers {
             builder = builder.header(name.as_str(), value.as_str());
         }
 
         let mut response = builder
-            .body(request.body.to_vec())
+            .body(body)
             .send()
             .await
             .map_err(describe_reqwest_error)?;
