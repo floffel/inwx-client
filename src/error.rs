@@ -928,7 +928,9 @@ impl Error {
     /// [`RetryPolicy`](crate::RetryPolicy)
     /// ([issue #2](https://github.com/floffel/inwx-client/issues/2)): a
     /// transient status says another attempt *could* work, not that replaying
-    /// `domain.create` is safe.
+    /// `domain.create` is safe. `2300` is gated the same way:
+    /// [`InwxClient::call`](crate::InwxClient::call) replays it only for a
+    /// read-only method and hands it back at once for a mutation.
     ///
     /// A `Retry-After` header carried on the error never changes the answer
     /// here — it only says *when* a retry would be polite, never *whether* one

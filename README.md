@@ -187,8 +187,10 @@ Every method below is implemented against the published INWX API documentation
   each wait drawn uniformly from `[0, ceiling]` (full jitter) so the tasks of one
   client, or a fleet of clients that failed together, do not retry in lockstep;
   only for failures that happened *before* the request was written (DNS, connect,
-  TLS), HTTP 429/5xx and result code `2300` (object pending transfer). A rejected
-  command is never repeated. `account.login` is the exception among the writes:
+  TLS), and HTTP 429/5xx and result code `2300` (object pending transfer) on a
+  read-only method. A rejected command is never repeated, and `2300` on a
+  mutation is handed back as-is: the command already reached the object, so a
+  replay could order it twice. `account.login` is the exception among the writes:
   it opens a session and nothing else, so a login is replayed after a 429, a 5xx
   or a lost answer too — the repeat replaces the session, it cannot charge twice.
 * **`is_retryable` classifies, it does not retry.** `Error::Http` reports `429`,
