@@ -1037,6 +1037,34 @@ async fn list_news_pages() {
 }
 
 #[tokio::test]
+async fn an_unparseable_news_row_fails_the_page_instead_of_vanishing() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "news": [
+            { "id": 1, "title": "Maintenance" },
+            { "id": 2, "message": "short", "text": "long" }
+        ]
+    }));
+
+    let error = client(transport)
+        .list_news(2, 20)
+        .await
+        .expect_err("a duplicated alias must not be dropped");
+
+    assert!(matches!(
+        error,
+        Error::UnexpectedAnswer {
+            method: "news.list",
+            field: "news",
+            ..
+        }
+    ));
+    let message = error.to_string();
+    assert!(message.contains("page 2"), "{message}");
+    assert!(message.contains("entry 1"), "{message}");
+}
+
+#[tokio::test]
 async fn a_zero_page_limit_for_news_never_reaches_the_wire() {
     let transport = MockTransport::new();
     assert!(client(transport.clone()).list_news(1, 0).await.is_err());
