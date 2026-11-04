@@ -506,6 +506,9 @@ fn parse_content_length(value: Option<&str>) -> Option<u64> {
 /// * send exactly the headers in [`Request::headers`] (including `Cookie`),
 /// * return the raw status, headers and body even for non-2xx (the client
 ///   decides what is retryable),
+/// * never transparently re-send the request body — in particular, do not
+///   follow 3xx redirects for this `POST`; a 3xx answer must become a terminal
+///   transport or HTTP error, not a successful [`Response`],
 /// * classify a failure that happened before the request was written (DNS,
 ///   connect, TLS) as [`Error::transport_before_send`], or — when the stage is
 ///   at hand — as [`Error::transport_at`], which picks the variant from it,
@@ -573,7 +576,7 @@ pub trait Transport {
 #[cfg(feature = "http")]
 #[derive(Debug, Clone)]
 pub struct ReqwestTransport {
-    client: reqwest::Client,
+    client: Option<reqwest::Client>,
     max_response_bytes: u64,
 }
 
@@ -581,7 +584,10 @@ pub struct ReqwestTransport {
 impl Default for ReqwestTransport {
     fn default() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .ok(),
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
         }
     }
@@ -589,7 +595,7 @@ impl Default for ReqwestTransport {
 
 #[cfg(feature = "http")]
 impl ReqwestTransport {
-    /// Creates a transport with a default client (rustls, redirects followed)
+    /// Creates a transport with a default client (rustls, redirects refused)
     /// and the [`DEFAULT_MAX_RESPONSE_BYTES`] cap.
     ///
     /// ```
@@ -655,7 +661,13 @@ impl ChunkSource for reqwest::Response {
 #[cfg(feature = "http")]
 impl Transport for ReqwestTransport {
     async fn execute(&self, request: Request<'_>) -> Result<Response> {
-        let mut builder = self.client.post(request.url);
+        let Some(client) = self.client.as_ref() else {
+            return Err(Error::transport_at(
+                TransportStage::Local,
+                "could not build the reqwest client",
+            ));
+        };
+        let mut builder = client.post(request.url);
         if let Some(timeout) = request.timeout {
             builder = builder.timeout(timeout);
         }
@@ -668,6 +680,9 @@ impl Transport for ReqwestTransport {
             .send()
             .await
             .map_err(describe_reqwest_error)?;
+        if let Some(error) = redirect_refusal(response.status().as_u16()) {
+            return Err(error);
+        }
         let status = response.status().as_u16();
         let headers = response
             .headers()
@@ -737,6 +752,20 @@ fn classify_reqwest_error(error: &reqwest::Error) -> (&'static str, TransportSta
 fn describe_reqwest_error(error: reqwest::Error) -> Error {
     let (description, stage) = classify_reqwest_error(&error);
     Error::transport_at_caused_by(stage, description, error)
+}
+
+/// Refuses a status that would tell a client to replay the request elsewhere.
+///
+/// The reqwest transport disables automatic redirects for exactly this reason.
+/// A custom transport that still sees a 3xx must not hand it back as a normal
+/// response: the client would parse the redirect body as an envelope, and a
+/// transparent replay would duplicate a mutating `POST` outside the
+/// [`TransportStage`] model.
+#[cfg(feature = "http")]
+fn redirect_refusal(status: u16) -> Option<Error> {
+    (300..400)
+        .contains(&status)
+        .then(|| Error::http(status, crate::HttpBody::from_bytes(&[])))
 }
 
 #[cfg(test)]
@@ -936,6 +965,24 @@ mod tests {
         assert_eq!(parse_content_length(Some("64x")), None);
         assert_eq!(parse_content_length(Some("64, 64")), None);
         assert_eq!(parse_content_length(Some("99999999999999999999999")), None);
+    }
+
+    #[test]
+    #[cfg(feature = "http")]
+    fn redirects_are_refused_as_terminal_http_errors() {
+        for status in [300, 307, 308, 399] {
+            let error = redirect_refusal(status).expect("a 3xx status must be refused");
+            assert!(
+                matches!(error, Error::Http { status: seen, .. } if seen == status),
+                "{error:?}"
+            );
+            assert!(!error.is_retryable(), "{status}");
+            assert!(!error.is_uncertain(), "{status}");
+        }
+
+        assert!(redirect_refusal(299).is_none());
+        assert!(redirect_refusal(400).is_none());
+        assert!(redirect_refusal(503).is_none());
     }
 
     #[test]
