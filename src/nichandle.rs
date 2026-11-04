@@ -28,22 +28,25 @@ use crate::pagination::{self, Listing, Page, Pages, Pagination};
 use crate::transport::Transport;
 use crate::types::{
     field_map, opt_i64_value, pick_bool, pick_i64, pick_text, validate_id, validate_page_limit,
-    validate_token, validate_upper_token,
+    validate_token, validate_upper_token, ContactType,
 };
 
 /// Longest handle token this crate accepts.
 const MAX_HANDLE_LEN: usize = 64;
 
+/// Longest handle class token this crate accepts (`nicHandle.type`, `text064`).
+const MAX_HANDLE_CLASS_LEN: usize = 64;
+
 /// One NIC handle.
 ///
 /// ```
-/// use inwx_client::NicHandle;
+/// use inwx_client::{ContactType, NicHandle};
 ///
 /// let handle: NicHandle = serde_json::from_str(
 ///     r#"{"id":"98765","handle":"ACME-1","type":"PERSON","cc":"DE","restricted":"0","deleted":0}"#,
 /// )?;
 /// assert_eq!(handle.id, 98765);
-/// assert_eq!(handle.handle_type.as_deref(), Some("PERSON"));
+/// assert_eq!(handle.handle_type, Some(ContactType::Person));
 /// assert_eq!(handle.is_deleted(), Some(false));
 /// # Ok::<(), serde_json::Error>(())
 /// ```
@@ -71,8 +74,12 @@ pub struct NicHandle {
     pub phone: Option<String>,
     /// Fax number.
     pub fax: Option<String>,
-    /// Handle class, carried verbatim (`PERSON`, `ORGANISATION`, …).
-    pub handle_type: Option<String>,
+    /// Handle class.
+    ///
+    /// The known classes decode to their [`ContactType`] variant; a class this
+    /// crate does not name is carried as [`ContactType::Other`] instead of
+    /// dropping the row.
+    pub handle_type: Option<ContactType>,
     /// Customer the handle belongs to.
     pub customer_number: Option<i64>,
     /// Whether the handle is restricted by a registry.
@@ -99,12 +106,21 @@ impl<'de> Deserialize<'de> for NicHandle {
             country_code: pick_text(&fields, &["cc", "country"]),
             phone: pick_text(&fields, &["phone"]),
             fax: pick_text(&fields, &["fax"]),
-            handle_type: pick_text(&fields, &["type"]),
+            handle_type: opt_contact_type(pick_text(&fields, &["type"]))
+                .map_err(D::Error::custom)?,
             customer_number: pick_i64(&fields, &["customerNumber", "customer_number"]),
             restricted: pick_bool(&fields, &["restricted"]),
             deleted: pick_bool(&fields, &["deleted"]),
         })
     }
+}
+
+/// Parses a handle class leniently: an empty or absent value means `None`, and
+/// a class this crate does not name is carried rather than failing the row.
+fn opt_contact_type(raw: Option<String>) -> Result<Option<ContactType>> {
+    raw.filter(|raw| !raw.trim().is_empty())
+        .map(|raw| ContactType::parse(&raw))
+        .transpose()
 }
 
 impl NicHandle {
@@ -317,7 +333,7 @@ pub struct NicHandleQuery {
     name: Option<String>,
     email: Option<String>,
     customer_number: Option<i64>,
-    handle_type: Option<String>,
+    handle_type: Option<ContactType>,
     page: Option<u32>,
     limit: Option<u32>,
 }
@@ -410,24 +426,23 @@ impl NicHandleQuery {
         Ok(self)
     }
 
-    /// Filters by handle class, upper-cased.
+    /// Filters by handle class.
     ///
     /// # Errors
     ///
-    /// [`crate::Error::Validation`] for an empty or oddly shaped class token.
+    /// [`crate::Error::Validation`] when the class carries more than 64
+    /// characters, matching the documented `text064` field.
     ///
     /// ```
-    /// use inwx_client::NicHandleQuery;
+    /// use inwx_client::{ContactType, NicHandleQuery};
     ///
-    /// assert_eq!(NicHandleQuery::new().with_type("person")?.params()?["type"], "PERSON");
+    /// let query = NicHandleQuery::new().with_type(ContactType::parse("person")?)?;
+    /// assert_eq!(query.params()?["type"], "PERSON");
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
-    pub fn with_type(mut self, handle_type: impl Into<String>) -> Result<Self> {
-        self.handle_type = Some(validate_upper_token(
-            "nicHandle.type",
-            &handle_type.into(),
-            MAX_HANDLE_LEN,
-        )?);
+    pub fn with_type(mut self, handle_type: ContactType) -> Result<Self> {
+        validate_upper_token("nicHandle.type", handle_type.as_str(), MAX_HANDLE_CLASS_LEN)?;
+        self.handle_type = Some(handle_type);
         Ok(self)
     }
 
@@ -664,6 +679,52 @@ mod tests {
     fn a_handle_is_trimmed_and_upper_cased_before_it_is_sent() {
         let query = NicHandleQuery::new().with_handle(" acme-1 ").unwrap();
         assert_eq!(query.params().unwrap()["handle"], "ACME-1");
+    }
+
+    #[test]
+    fn a_handle_class_of_64_characters_is_accepted_and_65_is_not() {
+        let inside = "C".repeat(MAX_HANDLE_CLASS_LEN);
+        let just_inside = NicHandleQuery::new()
+            .with_type(ContactType::parse(&inside).unwrap())
+            .unwrap();
+        assert_eq!(just_inside.params().unwrap()["type"], inside.as_str());
+
+        let outside = "C".repeat(MAX_HANDLE_CLASS_LEN + 1);
+        assert!(NicHandleQuery::new()
+            .with_type(ContactType::parse(&outside).unwrap())
+            .is_err());
+    }
+
+    #[test]
+    fn a_known_handle_class_decodes_to_its_variant_and_an_unknown_one_is_carried() {
+        let person: NicHandle = serde_json::from_str(r#"{"nicId":1,"type":"person"}"#).unwrap();
+        assert_eq!(person.handle_type, Some(ContactType::Person));
+
+        let unknown: NicHandle = serde_json::from_str(r#"{"nicId":2,"type":"trustee"}"#).unwrap();
+        assert_eq!(
+            unknown.handle_type,
+            Some(ContactType::parse("TRUSTEE").unwrap())
+        );
+        assert_eq!(
+            unknown.handle_type.as_ref().map(ToString::to_string),
+            Some("TRUSTEE".to_owned())
+        );
+
+        let blank: NicHandle = serde_json::from_str(r#"{"nicId":3,"type":"  "}"#).unwrap();
+        assert_eq!(blank.handle_type, None);
+        let absent: NicHandle = serde_json::from_str(r#"{"nicId":4}"#).unwrap();
+        assert_eq!(absent.handle_type, None);
+    }
+
+    #[test]
+    fn a_blank_handle_class_is_never_sent() {
+        let err = ContactType::parse(" ");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn an_oddly_shaped_handle_class_is_refused_rather_than_dropped() {
+        assert!(serde_json::from_str::<NicHandle>(r#"{"nicId":1,"type":"a b"}"#).is_err());
     }
 
     #[test]

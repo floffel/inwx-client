@@ -14,7 +14,7 @@ use inwx_client::{
     ApplicationCreate, ApplicationQuery, ApplicationType, ApplicationUpdate, AuthCode,
     AuthInfo2Order, AuthInfo2OrderResult, AuthInfo2PriceQuote, Certificate, CertificateLogEntry,
     CertificateOrder, CertificateProduct, CertificateProductQuery, CertificateQuery,
-    CertificateUpdate, CertificateValidationMethod, ContactVerificationSettings,
+    CertificateUpdate, CertificateValidationMethod, ContactType, ContactVerificationSettings,
     ContactVerificationSettingsUpdate, CustomerUpdate, DataExport, DnsKey, DnssecAlgorithm,
     DnssecDigestType, DnssecDomainStatus, DnssecFlag, DnssecKeyQuery, DnssecKeyStatus, Document,
     DocumentFormat, DocumentQuery, DocumentUpload, DomainControlResult, DomainName,
@@ -1153,7 +1153,7 @@ fn reseller_documents_and_pdfs_fill_their_parameters() {
         .unwrap()
         .with_customer_number(123_456)
         .unwrap()
-        .with_type("person")
+        .with_type(ContactType::Person)
         .unwrap()
         .with_page(1, 3)
         .unwrap();

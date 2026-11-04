@@ -11,10 +11,10 @@ mod common;
 use common::{client, MockTransport};
 use inwx_client::{
     ApplicationCheck, ApplicationCreate, ApplicationListPage, ApplicationQuery, ApplicationType,
-    ApplicationUpdate, AuthInfo2Order, ContactVerificationSettingsUpdate, CustomerDownloadQuery,
-    CustomerUpdate, DocumentFormat, DocumentKind, DocumentQuery, DocumentUpload,
-    DocumentUploadOutcome, DomainName, Error, HostCheck, HostCreate, HostQuery, HostUpdate,
-    Hostname, MessageAck, NewsQuery, NicHandleQuery, Pagination, PdfRender,
+    ApplicationUpdate, AuthInfo2Order, ContactType, ContactVerificationSettingsUpdate,
+    CustomerDownloadQuery, CustomerUpdate, DocumentFormat, DocumentKind, DocumentQuery,
+    DocumentUpload, DocumentUploadOutcome, DomainName, Error, HostCheck, HostCreate, HostQuery,
+    HostUpdate, Hostname, MessageAck, NewsQuery, NicHandleQuery, Pagination, PdfRender,
 };
 use serde_json::json;
 
@@ -1212,7 +1212,7 @@ async fn list_nichandles_filters_the_handle_tree() {
     let query = NicHandleQuery::new()
         .with_handle("ACME-1")
         .unwrap()
-        .with_type("person")
+        .with_type(ContactType::Person)
         .unwrap()
         .with_page(1, 5)
         .unwrap();
