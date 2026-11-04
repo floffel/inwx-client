@@ -609,6 +609,43 @@ async fn an_unreadable_order_answer_still_names_the_billed_certificate() {
     assert!(!error.to_string().contains("invalid JSON"), "{error}");
 }
 
+/// Regression for #97: `certificate.create` is billable and non-idempotent. A
+/// 5xx can arrive after the order was placed, so the call must stop after one
+/// attempt and carry the status and bounded body instead of replaying the
+/// order.
+#[tokio::test]
+async fn a_transient_status_never_replays_a_certificate_order() {
+    let transport = MockTransport::new();
+    transport.status(503, "upstream failed");
+    transport.ok(json!({ "certificateId": 10 }));
+
+    let error = client(transport.clone())
+        .order_certificate(&order())
+        .await
+        .expect_err("a 503 on a billable order is uncertain, not successful");
+
+    let Error::HttpUncertain {
+        method,
+        status,
+        body,
+        ..
+    } = &error
+    else {
+        panic!("expected the HTTP status and body to survive, got {error:?}");
+    };
+    assert_eq!(method, "certificate.create");
+    assert_eq!(*status, 503);
+    assert!(body.as_str().contains("upstream failed"), "{body}");
+    assert!(error.is_uncertain());
+    assert!(!error.is_retryable());
+    assert!(error.to_string().contains("HTTP 503"), "{error}");
+    assert_eq!(
+        transport.call_count(),
+        1,
+        "the certificate order must not be replayed"
+    );
+}
+
 /// The other side of that boundary: an answer that names no certificate at all
 /// cannot be rescued into a handle, so it is `Ambiguous` — same verdict
 /// (uncertain, never retried), and the caller is told to list before ordering.

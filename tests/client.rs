@@ -680,6 +680,7 @@ async fn a_transient_status_on_a_write_carries_no_retry_after() {
         .await
         .unwrap_err();
 
+    assert!(matches!(&error, Error::HttpUncertain { status: 429, .. }));
     assert!(error.is_uncertain());
     assert_eq!(error.retry_after(), None);
 }
