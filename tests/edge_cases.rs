@@ -256,6 +256,24 @@ fn a_record_update_needs_an_id_and_a_change() {
 }
 
 #[test]
+fn content_only_record_update_runs_the_type_independent_checks() {
+    let at_limit = RecordUpdate::new([RecordId::from_number(1)]).content("x".repeat(1024));
+    assert!(at_limit.params().is_ok());
+
+    let over_limit = RecordUpdate::new([RecordId::from_number(1)]).content("x".repeat(1025));
+    assert!(over_limit.params().is_err());
+
+    let empty = RecordUpdate::new([RecordId::from_number(1)]).content("");
+    assert!(empty.params().is_err());
+
+    let control = RecordUpdate::new([RecordId::from_number(1)]).content("a\u{0}b");
+    assert!(control.params().is_err());
+
+    let quoted = RecordUpdate::new([RecordId::from_number(1)]).content("\"v=spf1 -all\"");
+    assert!(quoted.params().is_err());
+}
+
+#[test]
 fn mx_accepts_the_full_priority_range() {
     let host = Hostname::parse("mx.example.com").unwrap();
     assert!(RecordSpec::mx("@", 0, &host).is_ok());
