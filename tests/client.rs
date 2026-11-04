@@ -175,6 +175,141 @@ async fn a_rejected_login_is_an_api_error() {
     assert!(!client.is_authenticated());
 }
 
+/// A login is the one command that writes and is still replayed: it opens a
+/// session and nothing else, so a transient status costs an attempt instead of
+/// aborting the call that needed the session.
+#[tokio::test]
+async fn a_transient_status_on_login_is_retried() {
+    let transport = MockTransport::new();
+    transport.status(503, "upstream failed");
+    transport.status(429, "");
+    transport.login("domrobot=abc123");
+    transport.ok(json!({ "accountId": 7 }));
+
+    let client = anonymous_client(transport.clone());
+    client.login().await.unwrap();
+    assert!(client.is_authenticated());
+    // The retried login still produced the cookie the next call needs.
+    let info = client.account_info().await.unwrap();
+    assert_eq!(info.account_id, Some(7));
+
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 4);
+    assert!(calls[..3].iter().all(|call| call.method == "account.login"));
+    assert_eq!(calls[3].header("cookie"), Some("domrobot=abc123"));
+}
+
+/// One attempt is one attempt: a policy without a second try repeats nothing.
+#[tokio::test]
+async fn a_single_attempt_policy_does_not_repeat_a_login() {
+    let transport = MockTransport::new();
+    transport.status(503, r#"{"code":2200,"msg":"Authentication error"}"#);
+
+    let client = anonymous_client(transport.clone()).with_retry(RetryPolicy::new(1));
+    let error = client.login().await.unwrap_err();
+
+    // The verdict inside the transient answer outranks the bare status.
+    assert_eq!(error.code(), Some(2200));
+    assert_eq!(transport.call_count(), 1);
+    assert!(!client.is_authenticated());
+}
+
+/// Two attempts repeat a login exactly once, and the last answer is what the
+/// caller sees — the verdict in it, not the status that carried it.
+#[tokio::test]
+async fn login_retries_stop_at_the_policy_limit() {
+    let transport = MockTransport::new();
+    for _ in 0..3 {
+        transport.status(503, r#"{"code":2303,"msg":"Object does not exist"}"#);
+    }
+
+    let client = anonymous_client(transport.clone()).with_retry(RetryPolicy::new(2));
+    let error = client.login().await.unwrap_err();
+
+    assert_eq!(error.code(), Some(2303));
+    assert_eq!(transport.call_count(), 2);
+    assert!(!client.is_authenticated());
+}
+
+/// A login whose request never left the process reached nobody, so repeating it
+/// cannot have reached anybody twice.
+#[tokio::test]
+async fn a_login_that_never_left_the_process_is_retried() {
+    let transport = MockTransport::new();
+    transport.transport_failure("dns lookup failed");
+    transport.login("domrobot=abc123");
+
+    let client = anonymous_client(transport.clone());
+    client.login().await.unwrap();
+
+    assert!(client.is_authenticated());
+    assert_eq!(transport.call_count(), 2);
+}
+
+/// The one write that stays safe after a lost answer: the session the first
+/// attempt may have opened is replaced by the second, not duplicated.
+#[tokio::test]
+async fn an_uncertain_login_is_retried() {
+    let transport = MockTransport::new();
+    transport.uncertain_failure("timeout waiting for the login answer");
+    transport.login("domrobot=abc123");
+
+    let client = anonymous_client(transport.clone());
+    client.login().await.unwrap();
+
+    assert!(client.is_authenticated());
+    assert_eq!(transport.call_count(), 2);
+}
+
+/// A failure that is terminal stays terminal for a login as well.
+#[tokio::test]
+async fn a_terminal_login_failure_is_not_retried() {
+    let transport = MockTransport::new();
+    transport.terminal_failure("unsupported scheme");
+
+    let client = anonymous_client(transport.clone());
+    let error = client.login().await.unwrap_err();
+
+    assert!(!error.is_retryable());
+    assert_eq!(transport.call_count(), 1);
+}
+
+/// Neither is a status no repeat could improve on.
+#[tokio::test]
+async fn a_non_transient_status_on_login_is_terminal() {
+    let transport = MockTransport::new();
+    transport.status(400, "<html>bad request</html>");
+
+    let client = anonymous_client(transport.clone());
+    assert!(client.login().await.is_err());
+    assert!(!client.is_authenticated());
+    assert_eq!(transport.call_count(), 1);
+}
+
+/// The retry lives in `login`, so the implicit login a call performs gets it
+/// too: a session renewed behind a transient 503 still reaches the API.
+#[tokio::test]
+async fn a_relogin_after_an_expired_session_retries_a_transient_status() {
+    let transport = MockTransport::new();
+    transport.login("domrobot=first");
+    transport.api_error(2200, "Authentication error");
+    transport.status(503, "");
+    transport.login("domrobot=second");
+    transport.ok(json!({ "domain": [] }));
+
+    let client = anonymous_client(transport.clone());
+    client
+        .list_domains(&DomainListQuery::default())
+        .await
+        .unwrap();
+
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 5);
+    assert_eq!(calls[2].method, "account.login");
+    assert_eq!(calls[3].method, "account.login");
+    assert_eq!(calls[4].header("cookie"), Some("domrobot=second"));
+}
+
 #[tokio::test]
 async fn logout_drops_the_session_even_when_the_call_fails() {
     let transport = MockTransport::new();

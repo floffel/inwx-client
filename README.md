@@ -183,7 +183,9 @@ Every method below is implemented against the published INWX API documentation
   client, or a fleet of clients that failed together, do not retry in lockstep;
   only for failures that happened *before* the request was written (DNS, connect,
   TLS), HTTP 429/5xx and result code `2300` (object pending transfer). A rejected
-  command is never repeated.
+  command is never repeated. `account.login` is the exception among the writes:
+  it opens a session and nothing else, so a login is replayed after a 429, a 5xx
+  or a lost answer too — the repeat replaces the session, it cannot charge twice.
 * **`is_retryable` classifies, it does not retry.** `Error::Http` reports `429`,
   `502`, `503` and `504` as retryable and every other status (`400`, `401`, `403`,
   `404`, `500`, …) as terminal, so callers keying their own backoff off the error
@@ -198,8 +200,10 @@ Every method below is implemented against the published INWX API documentation
 * **Uncertain is not retried.** A timeout or a reset after the request was
   written is `Error::Uncertain`: the API may already have run the command. It is
   replayed only for a read-only method (`is_read_only_method`), never for a
-  mutating one, so a registration cannot be submitted twice. An answer that
-  arrives but cannot be read is `Error::Undecodable` — a `200` carrying a
+  mutating one, so a registration cannot be submitted twice. `account.login` is
+  the one write that is replayed: a second login replaces the session the lost
+  answer may have opened. An answer that arrives but cannot be read is
+  `Error::Undecodable` — a `200` carrying a
   gateway page, a blank or cut-off body — and carries the same verdict: the
   exchange completed, so the command may have run and it is not replayed either.
   `Error::Json` stays the *certain* decode failure, for a payload that arrived

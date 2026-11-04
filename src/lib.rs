@@ -239,12 +239,16 @@
 //!   (pending transfer) — a rejected command is never repeated. A 429/5xx is
 //!   replayed only for a read-only method as well: for an order the status says
 //!   nothing about whether it already went through, so that outcome is
-//!   [`Error::Uncertain`] after a single attempt.
+//!   [`Error::Uncertain`] after a single attempt. `account.login` is the one
+//!   exception: it opens a session and nothing else, so a repeat replaces that
+//!   session instead of duplicating a domain, an order or a charge, and a login
+//!   is retried after a 429/5xx like any read.
 //! * A transport failure after the request was written (a timeout, a reset
 //!   mid-response) is [`Error::Uncertain`]: the command may have run. It is
 //!   replayed only for a read-only method ([`is_read_only_method`]), never for a
 //!   mutating one, so a registration cannot be submitted twice and a transfer
-//!   code or a domain block cannot be applied twice.
+//!   code or a domain block cannot be applied twice. A login is the one write
+//!   that is repeated here too, for the reason above.
 //! * An answer that arrives but cannot be read as an envelope — a `200` carrying
 //!   a gateway page, a blank or cut-off body — is [`Error::Undecodable`]: the
 //!   exchange completed, so the command may have run, and the call reports that
