@@ -120,6 +120,15 @@ pub struct ZoneSummary {
 ///     r#"{"count":1,"domains":[{"domain":"example.com","type":"MASTER"}]}"#,
 /// )?;
 /// assert_eq!(page.zones[0].domain.as_str(), "example.com");
+///
+/// // A single zone where the array belongs is a page of one, and a row that
+/// // does not fit the model costs that row rather than the page.
+/// let single: ZoneListPage =
+///     serde_json::from_str(r#"{"count":1,"domains":{"domain":"example.com"}}"#)?;
+/// assert_eq!(single.len(), 1);
+/// let mixed: ZoneListPage =
+///     serde_json::from_str(r#"{"count":2,"domains":[{"domain":"example.com"},null]}"#)?;
+/// assert_eq!(mixed.len(), 1);
 /// # Ok::<(), serde_json::Error>(())
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -128,7 +137,7 @@ pub struct ZoneListPage {
     #[serde(default, deserialize_with = "de::opt_i64")]
     pub count: Option<i64>,
     /// The zones on this page.
-    #[serde(default, rename = "domains")]
+    #[serde(default, rename = "domains", deserialize_with = "de::rows")]
     pub zones: Vec<ZoneSummary>,
 }
 

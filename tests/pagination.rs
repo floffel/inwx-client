@@ -616,7 +616,7 @@ async fn a_failed_page_can_be_retried_by_the_caller() {
 async fn a_malformed_page_is_a_json_error_with_a_source() {
     let transport = MockTransport::new();
     transport.push(Reply::Body(
-        json!({"code": 1000, "msg": "ok", "resData": {"domain": "not-a-list"}}).to_string(),
+        json!({"code": 1000, "msg": "ok", "resData": "not-a-page"}).to_string(),
     ));
 
     let client = client(transport.clone());

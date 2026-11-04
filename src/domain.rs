@@ -196,6 +196,15 @@ impl DomainInfo {
 /// )?;
 /// assert_eq!(page.len(), 2);
 /// assert_eq!(page.count, Some(2));
+///
+/// // A single domain where the array belongs is a page of one, and a row that
+/// // does not fit the model costs that row rather than the page.
+/// let single: DomainListPage = serde_json::from_str(r#"{"count":1,"domain":{"domain":"a.de"}}"#)?;
+/// assert_eq!(single.len(), 1);
+/// let mixed: DomainListPage = serde_json::from_str(
+///     r#"{"count":2,"domain":[{"domain":"a.de"},null]}"#,
+/// )?;
+/// assert_eq!(mixed.len(), 1);
 /// # Ok::<(), serde_json::Error>(())
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -204,7 +213,7 @@ pub struct DomainListPage {
     #[serde(default, deserialize_with = "de::opt_i64")]
     pub count: Option<i64>,
     /// The domains on this page.
-    #[serde(default, rename = "domain")]
+    #[serde(default, rename = "domain", deserialize_with = "de::rows")]
     pub domains: Vec<DomainInfo>,
 }
 

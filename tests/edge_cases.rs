@@ -497,6 +497,55 @@ async fn a_response_with_wrong_types_degrades_instead_of_failing() {
     assert!(checks[0].price.is_none());
 }
 
+#[tokio::test]
+async fn domain_list_and_zone_list_read_a_single_row_and_skip_unusable_rows() {
+    let transport = MockTransport::new();
+
+    // The documented shape first: arrays with concrete rows.
+    transport.ok(json!({"count": 2, "domain": [{"domain": "a.de"}, {"domain": "b.de"}]}));
+    transport.ok(json!({"count": 2, "domains": [{"domain": "a.de"}, {"domain": "b.de"}]}));
+    // A single object where the array belongs is a page of one.
+    transport.ok(json!({"count": 1, "domain": {"domain": "a.de"}}));
+    transport.ok(json!({"count": 1, "domains": {"domain": "a.de"}}));
+    // One row that does not fit the model costs that row, not the page.
+    transport.ok(json!({"count": 2, "domain": [null, {"domain": "a.de"}]}));
+    transport.ok(json!({"count": 2, "domains": [null, {"domain": "a.de"}]}));
+
+    let client = client(transport.clone());
+
+    let page = client
+        .list_domains(&DomainListQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(page.len(), 2);
+    assert_eq!(page.count, Some(2));
+    let page = client.list_zones().await.unwrap();
+    assert_eq!(page.len(), 2);
+    assert_eq!(page.count, Some(2));
+
+    let page = client
+        .list_domains(&DomainListQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.domains[0].domain.as_str(), "a.de");
+    let page = client.list_zones().await.unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.zones[0].domain.as_str(), "a.de");
+
+    let page = client
+        .list_domains(&DomainListQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.count, Some(2));
+    let page = client.list_zones().await.unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.count, Some(2));
+
+    assert_eq!(transport.call_count(), 6);
+}
+
 #[test]
 fn value_helpers_accept_the_shapes_the_api_uses() {
     // `wide` is documented as int, `avail` as int, but both appear as bools in
