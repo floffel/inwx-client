@@ -9,11 +9,12 @@ mod common;
 
 use common::{client, MockTransport};
 use inwx_client::{
-    parse_ip, AccountBalance, AccountRole, AccountRoleEntry, AccountUnlock, AddDnsKeyRequest,
-    ApplicationCheck, ApplicationCreate, ApplicationQuery, ApplicationType, ApplicationUpdate,
-    AuthCode, AuthInfo2Order, AuthInfo2OrderResult, AuthInfo2PriceQuote, Certificate,
-    CertificateLogEntry, CertificateOrder, CertificateProduct, CertificateProductQuery,
-    CertificateQuery, CertificateUpdate, CertificateValidationMethod, ContactVerificationSettings,
+    parse_ip, AccountBalance, AccountCheck, AccountPasswordChange, AccountRole, AccountRoleEntry,
+    AccountRoleId, AccountUnlockRequest, AccountUpdate, AddDnsKeyRequest, ApplicationCheck,
+    ApplicationCreate, ApplicationQuery, ApplicationType, ApplicationUpdate, AuthCode,
+    AuthInfo2Order, AuthInfo2OrderResult, AuthInfo2PriceQuote, Certificate, CertificateLogEntry,
+    CertificateOrder, CertificateProduct, CertificateProductQuery, CertificateQuery,
+    CertificateUpdate, CertificateValidationMethod, ContactVerificationSettings,
     ContactVerificationSettingsUpdate, CustomerUpdate, DataExport, DnsKey, DnssecAlgorithm,
     DnssecDigestType, DnssecDomainStatus, DnssecFlag, DnssecKeyQuery, DnssecKeyStatus, Document,
     DocumentFormat, DocumentQuery, DocumentUpload, DomainControlResult, DomainName,
@@ -21,8 +22,9 @@ use inwx_client::{
     HostCheck, HostCreate, HostUpdate, HostingOrder, HostingPeriod, Hostname, Irreversible,
     NameserverSet, NameserverSetType, NameserverSetUpdate, NewsItem, NicHandle, NicHandleQuery,
     Password, PdfFile, PdfRender, PostalDelivery, RecordSet, RecordSpec, RefundRequest,
-    StatementQuery, TagUpdate, Timestamp, TransferAnswer, UnlockAccount, UrlRedirectType,
-    ZoneCreate, ZoneType, ZoneUpdate, MAX_PASSWORD_LEN, MAX_SUBACCOUNT_USERNAME_LEN,
+    StatementQuery, SubAccount, SubAccountCreate, SubAccountCreated, SubAccountList,
+    SubAccountsDeleted, TagUpdate, Timestamp, TransferAnswer, UrlRedirectType, ZoneCreate,
+    ZoneType, ZoneUpdate, MAX_PASSWORD_LEN,
 };
 use serde_json::json;
 
@@ -347,15 +349,18 @@ fn token_and_text_validators_cover_their_limits() {
         true
     );
 
-    // A sub-account login name is stricter than free text: `validate_text`
-    // tolerates a newline, the unlock request does not.
-    assert!(UnlockAccount::new("us\ner").is_err());
-    assert!(UnlockAccount::new("nul\u{0}byte").is_err());
-    assert!(UnlockAccount::new("").is_err());
-    assert!(UnlockAccount::new("   ").is_err());
-    let at_limit = "a".repeat(MAX_SUBACCOUNT_USERNAME_LEN);
-    assert!(UnlockAccount::new(&at_limit).is_ok());
-    assert!(UnlockAccount::new(format!("{at_limit}x")).is_err());
+    // The unlock TAN is a `text10`: at the limit it is accepted, one more
+    // character is refused.
+    let at_limit = "1".repeat(10);
+    assert!(AccountUnlockRequest::new()
+        .unwrap()
+        .with_tan(&at_limit)
+        .is_ok());
+    assert!(AccountUnlockRequest::new()
+        .unwrap()
+        .with_tan(format!("{at_limit}1"))
+        .is_err());
+    assert!(AccountUnlockRequest::new().unwrap().with_tan("").is_err());
 }
 
 #[test]
@@ -757,21 +762,12 @@ fn remaining_public_accessors_and_parsers() {
     assert!("abc".parse::<HostingPeriod>().is_err());
     assert_eq!("18".parse::<HostingPeriod>().unwrap().months(), 18);
 
-    // `UnlockAccount` accessors and the permissive `AccountUnlock` answer.
-    let request = UnlockAccount::new("sub-account").unwrap();
-    assert_eq!(request.username(), "sub-account");
-    assert_eq!(request.params(), json!({ "user": "sub-account" }));
-
-    let answer: AccountUnlock = serde_json::from_value(json!({
-        "username": "sub-account",
-        "state": 1,
-        "someFutureField": { "nested": true },
-    }))
-    .unwrap();
-    assert_eq!(answer.username.as_deref(), Some("sub-account"));
-    assert_eq!(answer.state.as_deref(), Some("1"));
-    assert_eq!(AccountUnlock::default().username, None);
-    assert_eq!(AccountUnlock::default().state, None);
+    // `AccountUnlockRequest` accessors: the default sends no parameter, a TAN
+    // is carried verbatim.
+    let request = AccountUnlockRequest::new().unwrap();
+    assert_eq!(request.params().unwrap(), json!({}));
+    let request = request.with_tan("123456").unwrap();
+    assert_eq!(request.params().unwrap(), json!({ "tan": "123456" }));
 }
 
 #[test]
@@ -792,32 +788,6 @@ fn listing_helpers_report_empty_and_full_pages() {
     assert_eq!(handles.len(), 2);
     assert!(!handles.is_empty());
     assert!(handles.has_more());
-}
-
-#[tokio::test]
-async fn unlock_account_sends_the_name_and_tolerates_an_empty_answer() {
-    let transport = MockTransport::new();
-    transport.ok(json!({ "username": "sub-account", "state": "OPEN" }));
-    transport.ok_empty();
-
-    let client = client(transport.clone());
-    let answer = client
-        .unlock_account(&UnlockAccount::new("sub-account").unwrap())
-        .await
-        .unwrap();
-    assert_eq!(answer.username.as_deref(), Some("sub-account"));
-    assert_eq!(answer.state.as_deref(), Some("OPEN"));
-
-    let call = &transport.calls()[0];
-    assert_eq!(call.method, "account.unlock");
-    assert_eq!(call.params, json!({ "user": "sub-account" }));
-
-    // A success envelope without `resData` is the empty answer, not an error.
-    let empty = client
-        .unlock_account(&UnlockAccount::new("other").unwrap())
-        .await
-        .unwrap();
-    assert_eq!(empty, AccountUnlock::default());
 }
 
 // ------------------------------------------------------------ reseller #22 --
@@ -1154,81 +1124,98 @@ fn reseller_hosts_cover_the_testing_and_rename_fields() {
     assert!(HostCheck::new(long_domain, Hostname::parse(&"n".repeat(58)).unwrap()).is_err());
 }
 
-// --------------------------------------------------------- account roles (#74)
+// ---------------------------------------------------------------- account (#62)
 
 #[tokio::test]
-async fn account_roles_reads_both_spellings_of_the_answer_list() {
+async fn account_check_reports_the_active_user() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "user": "sub-account", "future": 1 }));
+
+    let client = client(transport.clone());
+    let check = client.account_check().await.unwrap();
+    assert_eq!(check.user.as_deref(), Some("sub-account"));
+    let call = transport.only_call();
+    assert_eq!(call.method, "account.check");
+    assert_eq!(call.params, json!({}));
+
+    // A bare success carries no user and is not an error.
+    transport.ok_empty();
+    assert_eq!(
+        client.account_check().await.unwrap(),
+        AccountCheck::default()
+    );
+}
+
+#[tokio::test]
+async fn account_roles_reads_numeric_ids_and_legacy_string_rows() {
     let transport = MockTransport::new();
     transport.ok(json!({
         "roles": [
-            {"handle": "4711", "role": "TECH", "customer": "example"},
-            {"handle": 4712, "role": "TRUSTEE", "username": "other", "extra": true}
+            {"accountId": "4711", "roleId": "20004", "extra": true},
+            20000,
+            {"accountId": 4712, "role": "TRUSTEE"}
         ]
     }));
     let client = client(transport.clone());
-    let rows = client.account_roles().await.unwrap();
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].handle, Some(4711));
-    assert_eq!(rows[0].role, Some(AccountRole::Tech));
-    assert_eq!(rows[0].customer.as_deref(), Some("example"));
-    assert_eq!(rows[1].role, Some(AccountRole::Other("TRUSTEE".into())));
-    assert_eq!(rows[1].customer.as_deref(), Some("other"));
+    let rows = client.account_roles(None).await.unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].account_id, Some(4711));
+    assert_eq!(rows[0].role_id, Some(AccountRoleId::Dns));
+    assert_eq!(rows[1].role_id, Some(AccountRoleId::Standard));
+    assert_eq!(rows[2].role, Some(AccountRole::Other("TRUSTEE".into())));
+    assert_eq!(transport.only_call().params, json!({}));
 
-    // A single object arrives as one row ...
-    transport.ok(json!({ "role": { "handle": 1, "role": "OWNER" } }));
-    let rows = client.account_roles().await.unwrap();
+    // Passing an account id scopes the query.
+    transport.ok(json!({ "roles": [] }));
+    assert_eq!(client.account_roles(Some(4711)).await.unwrap(), Vec::new());
+    assert_eq!(transport.calls()[1].params, json!({ "accountId": 4711 }));
+
+    // A single object arrives as one row, and an empty answer is empty.
+    transport.ok(json!({ "roles": { "roleId": 20001 } }));
+    let rows = client.account_roles(None).await.unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].role, Some(AccountRole::Owner));
-
-    // ... and an answer without either key is simply empty.
+    assert_eq!(rows[0].role_id, Some(AccountRoleId::Accounting));
     transport.ok(json!({}));
-    let rows = client.account_roles().await.unwrap();
-    assert_eq!(rows, Vec::new());
+    assert_eq!(client.account_roles(None).await.unwrap(), Vec::new());
 }
 
 #[tokio::test]
-async fn add_role_and_remove_role_send_the_expected_command() {
+async fn add_role_and_remove_role_send_the_numeric_command() {
     let transport = MockTransport::new();
     transport.ok_empty();
     let client = client(transport.clone());
-    client.add_role(4711, &AccountRole::Tech).await.unwrap();
+    client.add_role(4711, AccountRoleId::Dns).await.unwrap();
     let call = transport.only_call();
     assert_eq!(call.method, "account.addrole");
-    assert_eq!(call.params, json!({"handle": 4711, "role": "TECH"}));
+    assert_eq!(call.params, json!({"accountId": 4711, "roleId": 20004}));
 
     transport.ok_empty();
-    client.remove_role(4711, &AccountRole::None).await.unwrap();
+    client.remove_role(4711, AccountRoleId::Dns).await.unwrap();
     let calls = transport.calls();
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[1].method, "account.removerole");
-    assert_eq!(calls[1].params, json!({"handle": 4711, "role": "NONE"}));
+    assert_eq!(calls[1].params, json!({"accountId": 4711, "roleId": 20004}));
 }
 
 #[tokio::test]
-async fn an_account_role_command_stops_at_the_handle_and_role_limits() {
+async fn account_role_commands_stop_at_the_id_limits() {
     let transport = MockTransport::new();
     let client = client(transport.clone());
 
-    // Just inside the 255-character role limit: the request goes out.
+    // A positive account and an unknown-but-positive role id go out.
     transport.ok_empty();
     client
-        .add_role(1, &AccountRole::Other("x".repeat(255)))
+        .add_role(1, AccountRoleId::Other(20_999))
         .await
         .unwrap();
     assert_eq!(transport.call_count(), 1);
 
-    // Just outside it, and a handle that is not positive: refused before the
-    // socket is touched.
-    assert!(client
-        .add_role(1, &AccountRole::Other("x".repeat(256)))
-        .await
-        .is_err());
-    assert!(client.add_role(0, &AccountRole::Tech).await.is_err());
-    assert!(client.remove_role(-1, &AccountRole::Tech).await.is_err());
-    assert!(client
-        .remove_role(1, &AccountRole::Other(" ".into()))
-        .await
-        .is_err());
+    assert!(client.add_role(0, AccountRoleId::Dns).await.is_err());
+    assert!(client.remove_role(-1, AccountRoleId::Dns).await.is_err());
+    assert!(client.account_roles(Some(0)).await.is_err());
+    assert!(AccountRoleId::new(0).is_err());
+    assert!(AccountRoleId::new(i64::from(i32::MAX)).is_ok());
+    assert!(AccountRoleId::new(i64::from(i32::MAX) + 1).is_err());
     assert_eq!(transport.call_count(), 1);
 }
 
@@ -1239,14 +1226,14 @@ async fn an_uncertain_failure_replays_getroles_but_not_removerole() {
     transport.ok(json!({ "roles": [] }));
 
     let client = client(transport.clone());
-    let rows = client.account_roles().await.unwrap();
+    let rows = client.account_roles(None).await.unwrap();
     assert_eq!(rows, Vec::new());
     assert_eq!(transport.call_count(), 2);
 
     transport.uncertain_failure("timeout waiting for response");
     transport.ok_empty();
     let error = client
-        .remove_role(4711, &AccountRole::Tech)
+        .remove_role(4711, AccountRoleId::Dns)
         .await
         .unwrap_err();
     assert!(error.is_uncertain());
@@ -1254,7 +1241,43 @@ async fn an_uncertain_failure_replays_getroles_but_not_removerole() {
 }
 
 #[test]
-fn account_role_display_and_serde_cover_the_error_branches() {
+fn account_role_ids_cover_the_error_branches() {
+    for (id, role) in [
+        (20_000, AccountRoleId::Standard),
+        (20_001, AccountRoleId::Accounting),
+        (20_002, AccountRoleId::Domain),
+        (20_003, AccountRoleId::Hosting),
+        (20_004, AccountRoleId::Dns),
+        (20_005, AccountRoleId::Authcodes),
+        (20_999, AccountRoleId::Other(20_999)),
+    ] {
+        assert_eq!(AccountRoleId::from_id(id), role);
+        assert_eq!(role.id(), id);
+        assert_eq!(id.to_string().parse::<AccountRoleId>().unwrap(), role);
+        assert_eq!(
+            serde_json::from_value::<AccountRoleId>(json!(id)).unwrap(),
+            role
+        );
+        assert_eq!(serde_json::to_value(role).unwrap(), json!(id));
+    }
+    assert_eq!(AccountRoleId::Standard.name(), Some("Standard"));
+    assert_eq!(AccountRoleId::Accounting.name(), Some("Accounting"));
+    assert_eq!(AccountRoleId::Domain.name(), Some("Domain"));
+    assert_eq!(AccountRoleId::Hosting.name(), Some("Hosting"));
+    assert_eq!(AccountRoleId::Dns.name(), Some("DNS"));
+    assert_eq!(AccountRoleId::Authcodes.name(), Some("Authcodes"));
+    assert_eq!(AccountRoleId::Other(20_999).name(), None);
+    // Numeric strings decode, junk does not.
+    assert_eq!(
+        serde_json::from_str::<AccountRoleId>("\"20002\"").unwrap(),
+        AccountRoleId::Domain
+    );
+    assert!(serde_json::from_str::<AccountRoleId>("\"dns\"").is_err());
+    assert!(serde_json::from_str::<AccountRoleId>("null").is_err());
+    assert!("0".parse::<AccountRoleId>().is_err());
+    assert!("not-a-number".parse::<AccountRoleId>().is_err());
+
+    // The legacy string role still round-trips for older callers.
     assert_eq!(
         " admin ".parse::<AccountRole>().unwrap(),
         AccountRole::Admin
@@ -1265,22 +1288,111 @@ fn account_role_display_and_serde_cover_the_error_branches() {
         "\"TECH\""
     );
     assert_eq!(
-        serde_json::to_string(&AccountRole::Other("TRUSTEE".into())).unwrap(),
-        "\"TRUSTEE\""
-    );
-    assert_eq!(
         serde_json::from_str::<AccountRole>("\"trustee\"").unwrap(),
         AccountRole::Other("TRUSTEE".into())
     );
-    // Empty and non-string inputs fail instead of silently becoming a role.
-    assert!(serde_json::from_str::<AccountRole>("\"\"").is_err());
     assert!(serde_json::from_str::<AccountRole>("null").is_err());
-    assert!(serde_json::from_str::<AccountRole>("7").is_err());
 
-    // The row model accepts nulls and ignores unknown fields.
+    // The row model accepts nulls, both spellings and unknown fields.
     let row: AccountRoleEntry =
-        serde_json::from_str(r#"{"handle":null,"role":null,"customer":null,"extra":1}"#).unwrap();
+        serde_json::from_str(r#"{"account_id":null,"role_id":null,"role":null,"extra":1}"#)
+            .unwrap();
     assert_eq!(row, AccountRoleEntry::default());
+}
+
+#[tokio::test]
+async fn account_subaccount_management_round_trips() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "adminId": "1",
+        "accounts": [{"id": "2", "username": "sub", "tfaEnabled": "1"}]
+    }));
+    transport.ok(json!({ "id": "4711" }));
+    transport.ok(json!({ "countDeleted": "2" }));
+
+    let client = client(transport.clone());
+    let list: SubAccountList = client.list_subaccounts().await.unwrap();
+    assert_eq!(list.admin_id, Some(1));
+    assert_eq!(list.accounts.len(), 1);
+    let account: &SubAccount = &list.accounts[0];
+    assert_eq!(account.id, Some(2));
+    assert_eq!(list.accounts[0].username.as_deref(), Some("sub"));
+    assert_eq!(list.accounts[0].two_factor_enabled, Some(true));
+
+    let request = SubAccountCreate::new(
+        "sub-account",
+        "Dr.",
+        "Ada",
+        "Lovelace",
+        "Main Street 1",
+        "12345",
+        "London",
+        "GB",
+        "ada@example.com",
+    )
+    .unwrap()
+    .with_org("Example Ltd")
+    .unwrap()
+    .with_required_2fa(1)
+    .unwrap();
+    let created: SubAccountCreated = client.create_subaccount(&request).await.unwrap();
+    assert_eq!(created.id, Some(4711));
+
+    let deleted: SubAccountsDeleted = client.delete_subaccounts(&[1, 2]).await.unwrap();
+    assert_eq!(deleted.count_deleted, Some(2));
+
+    let calls = transport.calls();
+    assert_eq!(calls[0].method, "account.list");
+    assert_eq!(calls[0].params, json!({}));
+    assert_eq!(calls[1].method, "account.create");
+    assert_eq!(calls[1].params["username"], "sub-account");
+    assert_eq!(calls[1].params["org"], "Example Ltd");
+    assert_eq!(calls[1].params["required2fa"], 1);
+    assert_eq!(calls[2].method, "account.delete");
+    assert_eq!(calls[2].params, json!({ "ids": [1, 2] }));
+
+    // Local validation: an empty delete list and a bad id never reach the wire.
+    assert!(client.delete_subaccounts(&[]).await.is_err());
+    assert!(client.delete_subaccounts(&[0]).await.is_err());
+    assert_eq!(transport.call_count(), 3);
+}
+
+#[tokio::test]
+async fn account_update_and_password_change_send_the_documented_keys() {
+    let transport = MockTransport::new();
+    transport.ok_empty();
+    transport.ok_empty();
+
+    let client = client(transport.clone());
+    let update = AccountUpdate::new()
+        .unwrap()
+        .with_firstname("Ada")
+        .unwrap()
+        .with_city("Leipzig")
+        .unwrap()
+        .with_summary_invoice(true);
+    client.update_account(&update).await.unwrap();
+
+    let request = AccountPasswordChange::new(
+        "test-user",
+        Password::new("old-secret").unwrap(),
+        Password::new("new-secret").unwrap(),
+    )
+    .unwrap();
+    client.change_account_password(&request).await.unwrap();
+
+    let calls = transport.calls();
+    assert_eq!(calls[0].method, "account.update");
+    assert_eq!(calls[0].params["firstname"], "Ada");
+    assert_eq!(calls[0].params["city"], "Leipzig");
+    assert_eq!(calls[0].params["summaryInvoice"], true);
+    assert_eq!(calls[1].method, "account.changepassword");
+    assert_eq!(calls[1].params["username"], "test-user");
+    assert_eq!(calls[1].params["currentpassword"], "old-secret");
+    assert_eq!(calls[1].params["password"], "new-secret");
+
+    // An empty update is refused before the wire.
+    assert!(AccountUpdate::new().unwrap().params().is_err());
 }
 
 #[test]

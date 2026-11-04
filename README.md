@@ -124,10 +124,13 @@ Every method below is implemented against the published INWX API documentation
 
 | Area | Methods / types | Notes |
 | --- | --- | --- |
-| Session | `account.login`, `account.logout`, `account.check` (implicit), `account.info`, `account.unlock` | cookie session, lazy login, one re-login on `2200`/`2201`/`2202`; `account.unlock` clears the lock of a sub-account and is never replayed |
-| Session | `account.login`, `account.logout`, `account.check` (implicit), `account.info`, `account.changepassword` | cookie session, lazy login, one re-login on `2200`/`2201`/`2202`; the new password is a `Password` that redacts and zeroizes itself |
+| Session | `account.login`, `account.logout`, `account.check`, `account.info`, `account.unlock` | cookie session, lazy login, one re-login on `2200`/`2201`/`2202`; `account.unlock` clears the lock of the current account and is never replayed |
+| Session | `account.login`, `account.logout`, `account.check`, `account.info`, `account.changepassword` | cookie session, lazy login, one re-login on `2200`/`2201`/`2202`; the new password is a `Password` that redacts and zeroizes itself |
+| Account | `account.update` | `AccountUpdate` builder sends only changed fields and refuses a no-op update |
+| Sub-accounts | `account.list`, `account.create`, `account.delete` | reseller sub-account management; `SubAccountCreate` validates every documented field before the wire |
+| Account roles | `account.getroles`, `account.addrole`, `account.removerole` | numeric role ids, with unknown ids carried as `AccountRoleId::Other` |
 | Domains | `domain.check`, `domain.create`, `domain.info`, `domain.list`, `domain.update`, `domain.renew`, `domain.delete`, `domain.whois` | auth code (`authCode`) via `domain.info wide=1`; renewal mode and transfer lock via `domain.update` |
-| Session | `account.login`, `account.logout`, `account.check` (implicit), `account.info` | cookie session, lazy login, one re-login on `2200`/`2201`/`2202` |
+| Session | `account.login`, `account.logout`, `account.check`, `account.info` | cookie session, lazy login, one re-login on `2200`/`2201`/`2202` |
 | Domains | `domain.check`, `domain.create`, `domain.info`, `domain.list`, `domain.update`, `domain.renew`, `domain.delete`, `domain.whois`, `domain.setClientHold`, `domain.removeClientHold` | auth code (`authCode`) via `domain.info wide=1`; renewal mode and transfer lock via `domain.update`; registry hold via `SetClientHold`/`RemoveClientHold` — released only by the account that set it, and never auto-retried |
 | Domains | `domain.setAuthInfo`, `domain.setDomainTransferCode`, `domain.block`, `domain.unblock` | transfer lock and auth codes: `domain.block`/`domain.unblock` are the reversible block of the domain object, which is not the `transferLock` flag, and `setAuthInfo` is not the `authinfo2.*` object; codes go through `AuthCode` — validated, capped at 255 characters on the caller's string before it is copied, redacted in `Debug`/`Display`, absent from error messages |
 | Ownership | `domain.transfer`, `domain.trade`, `domain.push`, `domain.restore`, `domain.transfercancel`, `domain.transferOut` | typed builders behind an `Irreversible` acknowledgement that names the action and the domain; auth codes redacted in `Debug` |
