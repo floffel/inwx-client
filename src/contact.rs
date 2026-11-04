@@ -1294,11 +1294,20 @@ mod tests {
         assert!(max_postcode.validate().is_ok());
         let long_postcode = complete().with_postcode("1".repeat(11));
         assert!(long_postcode.validate().is_err());
-        // `text64` street: 64 characters are the last valid value, 65 are rejected.
+        // `text64` street: 63 characters are just inside the limit, 64 is the
+        // documented maximum and 65 is rejected.
+        let short_street = complete().with_street("x".repeat(63));
+        assert!(short_street.validate().is_ok());
         let max_street = complete().with_street("x".repeat(64));
         assert!(max_street.validate().is_ok());
-        let long_street = complete().with_street("x".repeat(65));
-        assert!(long_street.validate().is_err());
+        match complete().with_street("x".repeat(65)).validate() {
+            Err(Error::Validation { field, .. }) => assert_eq!(field, "contact.street"),
+            other => panic!("a 65-character street must be rejected: {other:?}"),
+        }
+        // `text64` counts characters, not UTF-8 bytes: 64 two-byte characters
+        // fit and one more is refused.
+        assert!(complete().with_street("ü".repeat(64)).validate().is_ok());
+        assert!(complete().with_street("ü".repeat(65)).validate().is_err());
     }
 
     #[test]
