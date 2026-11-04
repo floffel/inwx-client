@@ -1250,19 +1250,28 @@ mod tests {
         assert!(check("a@@b.test").is_err());
         assert!(check("ab").is_err());
         assert!(check(&format!("{}@b.test", "x".repeat(300))).is_err());
+        // A 64-character local part is accepted and 65 is rejected: the total
+        // address stays far below the length limit, so only the local-part
+        // boundary can decide these two.
+        let local = |len: usize| format!("{}@b.test", "x".repeat(len));
+        assert!(check(&local(64)).is_ok());
+        assert!(check(&local(65)).is_err());
         // 255 bytes are the last accepted length, 256 are rejected.
-        let long_domain = |last: usize| {
+        let total = |last: usize| {
             format!(
-                "a@{}.{}.{}.{}",
+                "{}@{}.{}.{}",
+                "a".repeat(64),
                 "b".repeat(63),
                 "c".repeat(63),
-                "d".repeat(63),
-                "e".repeat(last)
+                "d".repeat(last)
             )
         };
-        assert_eq!(long_domain(61).len(), 255);
-        assert!(check(&long_domain(61)).is_ok());
-        assert!(check(&long_domain(62)).is_err());
+        assert_eq!(total(61).len(), 254);
+        assert_eq!(total(62).len(), 255);
+        assert_eq!(total(63).len(), 256);
+        assert!(check(&total(61)).is_ok());
+        assert!(check(&total(62)).is_ok());
+        assert!(check(&total(63)).is_err());
     }
 
     #[test]
