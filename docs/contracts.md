@@ -78,6 +78,10 @@ own). Rules the crate enforces, with the reason:
 - The page that crosses `with_max_items` is truncated, so a walk never yields
   more objects than it promised, and `bound_reached()` distinguishes "stopped at
   the bound" from "reached the end".
+- A `contact.list` answer that carries one object where the array belongs is a
+  page of one handle, and a row that does not fit `Contact` is skipped rather
+  than failing the page (issue #114) — the same tolerance the other list answers
+  get from `parse_rows`. `count` is read independently of the rows.
 - A rejected page is terminal: `Error::Api` is returned as-is and the request is
   not repeated (a list command is idempotent, but retrying a rejected command is
   the client's business, not the walker's). A transport failure is returned too

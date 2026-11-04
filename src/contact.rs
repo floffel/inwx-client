@@ -627,6 +627,11 @@ impl Contact {
 
 /// One page of `contact.list`.
 ///
+/// The `contact` rows are read the way every other list answer in this crate is
+/// read: an array, or a single object where the array belongs (one handle), and
+/// a row that does not fit [`Contact`] is skipped instead of failing the page.
+/// `count` is `None` when the answer does not carry a usable total.
+///
 /// ```
 /// use inwx_client::ContactListPage;
 ///
@@ -634,6 +639,16 @@ impl Contact {
 ///     r#"{"count":1,"contact":[{"roId":991,"name":"Erika"}]}"#,
 /// )?;
 /// assert_eq!(page.contacts.len(), 1);
+///
+/// // A single handle in the place of the array is a page of one, and one row
+/// // that does not fit the handle costs that row rather than the page.
+/// let single: ContactListPage =
+///     serde_json::from_str(r#"{"count":2,"contact":{"roId":991}}"#)?;
+/// assert_eq!(single.contacts.len(), 1);
+/// let mixed: ContactListPage = serde_json::from_str(
+///     r#"{"count":2,"contact":[{"roId":991},null]}"#,
+/// )?;
+/// assert_eq!(mixed.contacts.len(), 1);
 /// # Ok::<(), serde_json::Error>(())
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -642,7 +657,7 @@ pub struct ContactListPage {
     #[serde(default, deserialize_with = "de::opt_i64")]
     pub count: Option<i64>,
     /// The handles on this page.
-    #[serde(default, rename = "contact")]
+    #[serde(default, rename = "contact", deserialize_with = "de::rows")]
     pub contacts: Vec<Contact>,
 }
 
@@ -950,6 +965,12 @@ impl<T: Transport> InwxClient<T> {
     }
 
     /// Lists one page of handles (`contact.list`).
+    ///
+    /// The answer is read permissively, like every other list in this crate: a
+    /// single `contact` object instead of the array is a page of one handle, a
+    /// row that does not fit [`Contact`] is skipped rather than costing the
+    /// whole page, and a `count` that is not a number leaves [`ContactListPage::count`]
+    /// `None`. Only transport and API errors fail the call.
     ///
     /// For more than one page use
     /// [`InwxClient::list_all_contacts`], which walks them.
