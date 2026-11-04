@@ -5,7 +5,7 @@ mod common;
 
 use common::{client, client_without_retries, MockTransport};
 use inwx_client::{
-    ActionKind, AuthCode, DomainName, ExtData, Handle, Hostname, Irreversible, PushRequest,
+    ActionKind, AuthCode, DomainName, Error, ExtData, Handle, Hostname, Irreversible, PushRequest,
     RenewalMode, RestoreRequest, Timestamp, TradeRequest, TransferAnswer, TransferCancelRequest,
     TransferOutRequest, TransferRequest,
 };
@@ -131,6 +131,28 @@ async fn transfer_refuses_to_mix_takeover_and_explicit_nameservers() {
         .unwrap_err();
     assert!(error.is_validation());
     assert_eq!(transport.call_count(), 0);
+}
+
+/// `domain.transfer` is non-idempotent: a pending transfer is reported as a
+/// typed pending error carrying the domain, never replayed into a second order.
+#[tokio::test]
+async fn transfer_pending_is_typed_and_not_replayed() {
+    let transport = MockTransport::new();
+    transport.api_error(2300, "Object pending transfer");
+    transport.ok(json!({ "roId": 42 }));
+
+    let client = client(transport.clone());
+    let request = TransferRequest::new(ack(ActionKind::Transfer)).unwrap();
+    let error = client.transfer_domain(&request).await.unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::TransferPending { ref domain, .. } if domain.as_str() == "example.com"
+    ));
+    assert!(error.to_string().contains("example.com"));
+    assert!(error.to_string().contains("pending"));
+    assert!(!error.is_retryable());
+    assert_eq!(transport.call_count(), 1);
 }
 
 #[tokio::test]

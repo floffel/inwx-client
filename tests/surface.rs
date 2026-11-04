@@ -781,7 +781,7 @@ fn response_payload_types_are_constructible_and_comparable() {
     assert!(zones.is_empty());
     assert!(!zones.has_more());
 
-    let zone = ZoneInfo::default();
+    let zone: ZoneInfo = serde_json::from_str(r#"{"domain":"example.com"}"#).unwrap();
     assert!(!zone.is_master());
 
     let summary = ZoneSummary {

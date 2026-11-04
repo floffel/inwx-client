@@ -408,7 +408,7 @@ pub use nichandle::{NicHandle, NicHandleListPage, NicHandleListing, NicHandleQue
 pub use pagination::{
     Listing, Page, Pages, Pagination, DEFAULT_PAGE_SIZE, MAX_ITEMS, MAX_PAGES, MAX_PAGE_SIZE,
 };
-pub use pdf::{PdfFile, PdfHandle, PdfRender};
+pub use pdf::{PdfFile, PdfHandle, PdfRender, PdfStatus};
 pub use price::{DomainPriceQuote, ExtraDataRule, PriceChange, PriceList, PromoCode, TldPrice};
 pub use record::{
     DnsRecord, RecordId, RecordSet, RecordSpec, RecordType, RecordUpdate, DEFAULT_TTL, MAX_TTL,

@@ -14,7 +14,7 @@ use inwx_client::{
     ApplicationUpdate, AuthInfo2Order, ContactType, ContactVerificationSettingsUpdate,
     CustomerDownloadQuery, CustomerUpdate, DocumentFormat, DocumentKind, DocumentQuery,
     DocumentUpload, DocumentUploadOutcome, DomainName, Error, HostCheck, HostCreate, HostQuery,
-    HostUpdate, Hostname, MessageAck, NewsQuery, NicHandleQuery, Pagination, PdfRender,
+    HostUpdate, Hostname, MessageAck, NewsQuery, NicHandleQuery, Pagination, PdfRender, PdfStatus,
 };
 use serde_json::json;
 
@@ -1416,7 +1416,11 @@ async fn list_all_nichandles_counts_skipped_rows_as_part_of_the_page() {
 #[tokio::test]
 async fn render_pdf_sends_the_document_request() {
     let transport = MockTransport::new();
-    transport.ok(json!({ "pdfId": "99", "filename": "invoice-4711.pdf" }));
+    transport.ok(json!({
+        "pdfId": "99",
+        "filename": "invoice-4711.pdf",
+        "status": "READY"
+    }));
 
     let handle = client(transport.clone())
         .render_pdf(
@@ -1429,12 +1433,55 @@ async fn render_pdf_sends_the_document_request() {
         .unwrap();
 
     assert_eq!(handle.id, Some(99));
+    assert_eq!(handle.status().unwrap(), PdfStatus::Ready);
+    assert_eq!(handle.ready_id().unwrap(), 99);
 
     let call = transport.only_call();
     assert_eq!(call.method, "pdf.document");
     assert_eq!(call.params["type"], "INVOICE");
     assert_eq!(call.params["id"], 4711);
     assert_eq!(call.params["format"], "PDF");
+}
+
+#[tokio::test]
+async fn render_pdf_refuses_a_handle_without_a_usable_id() {
+    for answer in [
+        json!({ "status": "ERROR" }),
+        json!({ "pdfId": "abc", "status": "ERROR" }),
+        json!({ "pdfId": 0, "status": "READY" }),
+        json!({ "pdfId": -1, "status": "READY" }),
+    ] {
+        let transport = MockTransport::new();
+        transport.ok(answer.clone());
+
+        let error = client(transport.clone())
+            .render_pdf(&PdfRender::new("invoice", 4711).unwrap())
+            .await
+            .unwrap_err();
+
+        match &error {
+            Error::UnexpectedAnswer { field, .. } => assert_eq!(*field, "pdfId"),
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert_eq!(transport.only_call().method, "pdf.document");
+    }
+}
+
+#[tokio::test]
+async fn a_rendered_handle_is_fetched_only_after_ready() {
+    let pending: inwx_client::PdfHandle =
+        serde_json::from_str(r#"{"pdfId":"99","status":"PENDING"}"#).unwrap();
+    assert!(matches!(
+        pending.ready_id(),
+        Err(Error::UnexpectedAnswer {
+            field: "status",
+            ..
+        })
+    ));
+
+    let ready: inwx_client::PdfHandle =
+        serde_json::from_str(r#"{"pdfId":"99","status":"READY"}"#).unwrap();
+    assert_eq!(ready.ready_id().unwrap(), 99);
 }
 
 #[tokio::test]

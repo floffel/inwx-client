@@ -32,6 +32,7 @@ use thiserror::Error;
 
 use crate::rpc::Detail;
 use crate::transport::TransportStage;
+use crate::types::DomainName;
 
 /// A boxed cause carried by one of the transport-shaped [`enum@Error`]
 /// variants, so `err.source()` walks down to the failure that really happened:
@@ -98,6 +99,33 @@ pub enum Error {
         reason: Option<String>,
         /// Per-parameter detail entries, when the API sent any.
         details: Vec<Detail>,
+    },
+
+    /// A domain transfer is already pending, so it cannot be submitted again.
+    ///
+    /// `domain.transfer` maps API code `2300` (`Object pending transfer`) to
+    /// this variant instead of the generic [`Error::Api`]. The transfer path is
+    /// not replayed: a second `domain.transfer` can spend money twice. The
+    /// caller can poll `domain.info` or list requests to follow the pending
+    /// transfer before deciding what to do next.
+    ///
+    /// ```
+    /// use inwx_client::{DomainName, Error};
+    ///
+    /// let err = Error::transfer_pending(
+    ///     DomainName::parse("example.com")?,
+    ///     "Object pending transfer",
+    /// );
+    /// assert!(matches!(err, Error::TransferPending { .. }));
+    /// assert!(!err.is_retryable());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[error("transfer for `{domain}` is pending: {message}")]
+    TransferPending {
+        /// Domain whose transfer is already pending.
+        domain: DomainName,
+        /// API message explaining the pending-transfer answer.
+        message: String,
     },
 
     /// A body that arrived intact could not be decoded: it was not JSON, or a
@@ -288,6 +316,44 @@ pub enum Error {
         /// What was expected, and which entry failed when the list itself was
         /// the right shape.
         detail: String,
+    },
+
+    /// A successful response described a different zone than the one that was
+    /// requested.
+    ///
+    /// The answer parsed, but it names another repository object than the one
+    /// the caller asked for. A misrouted or cached answer must not be reported
+    /// as the requested zone, because records read from it would otherwise drive
+    /// writes against the wrong zone.
+    ///
+    /// This is terminal, not retryable: replaying the same read would only make
+    /// the same mismatch visible again.
+    ///
+    /// ```
+    /// use inwx_client::Error;
+    ///
+    /// let err = Error::zone_mismatch(
+    ///     "nameserver.info",
+    ///     "domain",
+    ///     "example.com",
+    ///     "example.net",
+    /// );
+    /// assert!(matches!(err, Error::ZoneMismatch { .. }));
+    /// assert!(!err.is_retryable());
+    /// assert!(!err.is_uncertain());
+    /// ```
+    #[error(
+        "response for `{method}` has a mismatched `{field}`: expected `{expected}`, got `{actual}`"
+    )]
+    ZoneMismatch {
+        /// The method that was called.
+        method: &'static str,
+        /// The field that identified the object, for example `domain`.
+        field: &'static str,
+        /// The object the caller requested.
+        expected: String,
+        /// The object named by the answer.
+        actual: String,
     },
 
     /// The command ran and its answer carried no error, yet the answer does not
@@ -571,6 +637,28 @@ pub enum Error {
 }
 
 impl Error {
+    /// Builds an [`Error::TransferPending`] for a `domain.transfer` that found
+    /// an object already in transfer.
+    ///
+    /// ```
+    /// use inwx_client::{DomainName, Error};
+    ///
+    /// let err = Error::transfer_pending(
+    ///     DomainName::parse("example.com")?,
+    ///     "Object pending transfer",
+    /// );
+    /// assert!(err.to_string().contains("example.com"));
+    /// assert!(!err.is_retryable());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    #[must_use]
+    pub fn transfer_pending(domain: DomainName, message: impl Into<String>) -> Self {
+        Self::TransferPending {
+            domain,
+            message: message.into(),
+        }
+    }
+
     /// Builds a validation error. `field` is the dotted path, `message` the
     /// human readable detail.
     ///
@@ -617,6 +705,34 @@ impl Error {
             method,
             field,
             detail: detail.into(),
+        }
+    }
+
+    /// Builds an [`Error::ZoneMismatch`] for an answer that parsed into a
+    /// different zone than the caller requested.
+    ///
+    /// ```
+    /// use inwx_client::Error;
+    ///
+    /// let err = Error::zone_mismatch("nameserver.info", "domain", "a.de", "b.de");
+    /// assert_eq!(
+    ///     err.to_string(),
+    ///     "response for `nameserver.info` has a mismatched `domain`: expected `a.de`, got `b.de`",
+    /// );
+    /// assert!(!err.is_retryable());
+    /// ```
+    #[must_use]
+    pub fn zone_mismatch(
+        method: &'static str,
+        field: &'static str,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) -> Self {
+        Self::ZoneMismatch {
+            method,
+            field,
+            expected: expected.into(),
+            actual: actual.into(),
         }
     }
 
