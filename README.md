@@ -176,8 +176,13 @@ Every method below is implemented against the published INWX API documentation
   pending registration into an error.
 * **Sessions, not tokens.** `account.login` returns a cookie; the client replays
   it, and on `2200`/`2201`/`2202` (or HTTP 401/403) it logs in once more before
-  giving up. Concurrent first calls may each open a session — harmless, and the
-  alternative (holding a lock across an await) buys nothing here.
+  giving up. The transition is single-flight: one login is on the wire at a time
+  and the callers that lose the race wait for its cookie and reuse it, so thirty
+  tasks that lose the session at once cost one `account.login` — not thirty
+  credential POSTs, each of which invalidates the cookie of the one before and
+  counts against an account that locks after repeated failures. A login never
+  replaces a session that is already installed; `logout`/`clear_session` is what
+  asks for a new one.
 * **Bounded retries.** Three attempts, exponential backoff from 500 ms to 8 s,
   each wait drawn uniformly from `[0, ceiling]` (full jitter) so the tasks of one
   client, or a fleet of clients that failed together, do not retry in lockstep;

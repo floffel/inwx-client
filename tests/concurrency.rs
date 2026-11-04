@@ -1,15 +1,101 @@
 //! 32 tasks on one client: the session cookie must be shared, every call must
 //! reach the transport exactly once, and nothing may deadlock.
+//!
+//! The session is one state machine (see `src/session.rs`): one `account.login`
+//! is on the wire at a time and the callers that lose the race reuse its cookie,
+//! so a session that dies under thirty-two tasks costs one login — not
+//! thirty-two credential POSTs that invalidate each other.
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use common::{anonymous_client, client, MockTransport};
-use inwx_client::{DomainListQuery, DomainName, InwxClient, RecordSpec, RecordType};
-use serde_json::json;
+use inwx_client::transport::{Request, Response, Transport};
+use inwx_client::{DomainListQuery, DomainName, InwxClient, RecordSpec, RecordType, Result};
+use serde_json::{json, Value};
 
 const TASKS: usize = 32;
+
+/// A server that keeps exactly one session, the way INWX does: a login replaces
+/// the cookie and invalidates the previous one, a dead cookie is answered with
+/// `401`, and every login is a credential POST.
+#[derive(Clone)]
+struct OneSessionServer {
+    state: Arc<Mutex<ServerState>>,
+}
+
+#[derive(Default)]
+struct ServerState {
+    /// The only cookie the server accepts; a login replaces it and kills the
+    /// one before, exactly like the API.
+    live: Option<String>,
+    logins: usize,
+}
+
+impl OneSessionServer {
+    /// A server whose only valid session is `live`.
+    fn new(live: Option<&str>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ServerState {
+                live: live.map(str::to_owned),
+                logins: 0,
+            })),
+        }
+    }
+
+    fn logins(&self) -> usize {
+        self.state.lock().unwrap().logins
+    }
+
+    fn live(&self) -> Option<String> {
+        self.state.lock().unwrap().live.clone()
+    }
+}
+
+impl Transport for OneSessionServer {
+    async fn execute(&self, request: Request<'_>) -> Result<Response> {
+        let body: Value = serde_json::from_slice(request.body).unwrap_or(Value::Null);
+        let method = body
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let cookie = request.header("cookie").map(str::to_owned);
+
+        if method == "account.login" {
+            // A login is a round trip, not an instant: without the pause the
+            // callers would not overlap and the test would pass unchanged.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let mut state = self.state.lock().unwrap();
+            state.logins += 1;
+            let cookie = format!("domrobot=session-{}", state.logins);
+            state.live = Some(cookie.clone());
+            return Ok(Response::new(
+                200,
+                [(
+                    "Set-Cookie".to_owned(),
+                    format!("{cookie}; Path=/; HttpOnly"),
+                )],
+                br#"{"code":1000,"msg":"Login successful","resData":{}}"#.to_vec(),
+            ));
+        }
+
+        let live = self.live();
+        if cookie.is_some() && cookie == live {
+            Ok(Response::new(
+                200,
+                [("content-type".to_owned(), "application/json".to_owned())],
+                br#"{"code":1000,"msg":"ok","resData":{"domain":[]}}"#.to_vec(),
+            ))
+        } else {
+            // A session the server dropped: the answer that makes callers
+            // relogin.
+            Ok(Response::new(401, std::iter::empty(), Vec::new()))
+        }
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn thirty_two_tasks_share_one_client_with_an_existing_session() {
@@ -50,8 +136,9 @@ async fn thirty_two_tasks_share_one_client_with_an_existing_session() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_first_calls_do_not_deadlock_while_logging_in() {
-    // One login per concurrent caller is possible and harmless: each stores a
-    // valid session. What must not happen is a deadlock or a lost call.
+    // One login for all of them: the first caller claims the transition, the
+    // rest wait for its cookie. Each extra login would invalidate the cookie
+    // the others are about to replay.
     let transport = MockTransport::new();
     // Every reply is a success envelope that also sets a cookie, so any
     // interleaving of login and command replies is valid.
@@ -85,8 +172,84 @@ async fn concurrent_first_calls_do_not_deadlock_while_logging_in() {
         .filter(|call| call.method == "domain.list")
         .count();
     assert_eq!(listings, TASKS);
-    assert!(logins >= 1, "at least one login is required");
-    assert!(logins <= TASKS, "no caller may log in more than once");
+    assert_eq!(logins, 1, "thirty-two tasks must cost one login");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_first_calls_post_credentials_once() {
+    // The mock above answers every request with a fresh cookie, so it cannot
+    // tell a shared session from thirty-two. This server keeps one: it accepts
+    // only the cookie of the newest login.
+    let server = OneSessionServer::new(None);
+    let client = Arc::new(
+        InwxClient::new(server.clone())
+            .with_credentials("test-user", "test-pass")
+            .unwrap()
+            .with_retry(common::no_wait()),
+    );
+
+    let mut handles = Vec::with_capacity(TASKS);
+    for _ in 0..TASKS {
+        let client = Arc::clone(&client);
+        handles.push(tokio::spawn(async move {
+            client.list_domains(&DomainListQuery::default()).await
+        }));
+    }
+
+    for handle in handles {
+        handle.await.unwrap().unwrap();
+    }
+
+    assert_eq!(server.logins(), 1, "thirty-two tasks must cost one login");
+    // What is stored has to be what the server accepts: a login that stored the
+    // loser's cookie would 401 here and log in a second time.
+    client
+        .list_domains(&DomainListQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(server.logins(), 1);
+    assert_eq!(
+        server.live(),
+        Some("domrobot=session-1".to_owned()),
+        "the server must still accept one session"
+    );
+}
+
+/// An expired session under load: every task sees `401`, and the client must
+/// renew it once — not thirty-two times.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn thirty_two_expired_sessions_cost_one_relogin() {
+    let server = OneSessionServer::new(Some("domrobot=expired"));
+    let client = Arc::new(
+        InwxClient::new(server.clone())
+            .with_credentials("test-user", "test-pass")
+            .unwrap()
+            .with_session("domrobot=stale")
+            .unwrap()
+            .with_retry(common::no_wait()),
+    );
+
+    let mut handles = Vec::with_capacity(TASKS);
+    for _ in 0..TASKS {
+        let client = Arc::clone(&client);
+        handles.push(tokio::spawn(async move {
+            client.list_domains(&DomainListQuery::default()).await
+        }));
+    }
+
+    for handle in handles {
+        handle.await.unwrap().unwrap();
+    }
+
+    assert_eq!(server.logins(), 1, "one login renews the session for all");
+    assert!(client.is_authenticated());
+    // The renewed cookie is the live one: a second login here would mean the
+    // client kept a session the server had already dropped.
+    client
+        .list_domains(&DomainListQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(server.logins(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

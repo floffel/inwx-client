@@ -163,6 +163,34 @@ async fn login_without_a_cookie_is_an_authentication_error() {
     }
 }
 
+/// A login is one transition of one session: a second login would invalidate
+/// the cookie the first one handed out, so an installed session is reused
+/// instead of replaced. Dropping it is what asks for a new one.
+#[tokio::test]
+async fn login_reuses_the_installed_session() {
+    let transport = MockTransport::new();
+    transport.login("domrobot=abc123");
+
+    let client = InwxClient::new(transport.clone())
+        .with_credentials("test-user", "test-pass")
+        .unwrap()
+        .with_retry(no_wait());
+
+    client.login().await.unwrap();
+    assert!(client.is_authenticated());
+    client.login().await.unwrap();
+    assert_eq!(transport.call_count(), 1, "the second login posted again");
+
+    // An explicit drop is what makes the next login open a session of its own.
+    client.clear_session();
+    transport.login("domrobot=def456");
+    client.login().await.unwrap();
+    let calls = transport.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[1].method, "account.login");
+    assert_eq!(calls[1].header("cookie"), None);
+}
+
 #[tokio::test]
 async fn a_rejected_login_is_an_api_error() {
     let transport = MockTransport::new();
