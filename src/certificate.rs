@@ -25,6 +25,8 @@ use std::str::FromStr;
 
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+use x509_cert::der::Decode;
+use x509_cert::request::CertReq;
 
 use crate::client::InwxClient;
 use crate::error::{Error, HttpBody, Result};
@@ -616,8 +618,9 @@ impl CertificateLogEntry {
 /// ```
 /// use inwx_client::{CertificateOrder, CertificateTerm, DomainName};
 ///
+/// # const CSR: &str = "-----BEGIN CERTIFICATE REQUEST-----\nMIHRMHgCAQAwFjEUMBIGA1UEAwwLZXhhbXBsZS5jb20wWTATBgcqhkjOPQIBBggq\nhkjOPQMBBwNCAASnomqdhePywSDnoxxGceZanZoUVN+xr37+NXVIZoYa3RZfX4Rh\ngItWma5hoUiROBxc+Grb4SNOjH8j2vkTniT2oAAwCgYIKoZIzj0EAwIDSQAwRgIh\nALNr10T/I0j0TCKeKWXCsmtLIZnk4kpQSjG01LbgkvbhAiEAuz/15JiDHOIK/Ddg\n9ze6r22cB9PjJ8Ox0QRNZeDJrfc=\n-----END CERTIFICATE REQUEST-----";
 /// let order = CertificateOrder::new(17)?
-///     .with_csr("-----BEGIN CERTIFICATE REQUEST-----\nMIIB\n-----END CERTIFICATE REQUEST-----")?
+///     .with_csr(CSR)?
 ///     .with_sans(&[DomainName::parse("www.example.com")?])?
 ///     .with_term(CertificateTerm::OneYear);
 ///
@@ -693,9 +696,10 @@ impl CertificateOrder {
     /// ```
     /// use inwx_client::{CertificateOrder, DomainName};
     ///
+    /// # const CSR: &str = "-----BEGIN CERTIFICATE REQUEST-----\nMIHRMHgCAQAwFjEUMBIGA1UEAwwLZXhhbXBsZS5jb20wWTATBgcqhkjOPQIBBggq\nhkjOPQMBBwNCAASnomqdhePywSDnoxxGceZanZoUVN+xr37+NXVIZoYa3RZfX4Rh\ngItWma5hoUiROBxc+Grb4SNOjH8j2vkTniT2oAAwCgYIKoZIzj0EAwIDSQAwRgIh\nALNr10T/I0j0TCKeKWXCsmtLIZnk4kpQSjG01LbgkvbhAiEAuz/15JiDHOIK/Ddg\n9ze6r22cB9PjJ8Ox0QRNZeDJrfc=\n-----END CERTIFICATE REQUEST-----";
     /// let order = CertificateOrder::new(17)?;
     /// assert!(order.clone().with_csr("-----BEGIN PRIVATE KEY-----\nMIIB").is_err());
-    /// assert!(order.with_csr("-----BEGIN CERTIFICATE REQUEST-----\nMIIB").is_ok());
+    /// assert!(order.with_csr(CSR).is_ok());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
     pub fn with_csr(mut self, csr: impl Into<String>) -> Result<Self> {
@@ -1129,8 +1133,9 @@ impl CertificateUpdate {
     /// ```
     /// use inwx_client::{CertificateId, CertificateUpdate};
     ///
+    /// # const CSR: &str = "-----BEGIN CERTIFICATE REQUEST-----\nMIHRMHgCAQAwFjEUMBIGA1UEAwwLZXhhbXBsZS5jb20wWTATBgcqhkjOPQIBBggq\nhkjOPQMBBwNCAASnomqdhePywSDnoxxGceZanZoUVN+xr37+NXVIZoYa3RZfX4Rh\ngItWma5hoUiROBxc+Grb4SNOjH8j2vkTniT2oAAwCgYIKoZIzj0EAwIDSQAwRgIh\nALNr10T/I0j0TCKeKWXCsmtLIZnk4kpQSjG01LbgkvbhAiEAuz/15JiDHOIK/Ddg\n9ze6r22cB9PjJ8Ox0QRNZeDJrfc=\n-----END CERTIFICATE REQUEST-----";
     /// let update = CertificateUpdate::new(CertificateId::new(9)?)?
-    ///     .with_csr("-----BEGIN CERTIFICATE REQUEST-----\nMIIB")?;
+    ///     .with_csr(CSR)?;
     /// assert!(update.params()?.get("csr").is_some());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
@@ -1647,7 +1652,8 @@ fn insert_handles(params: &mut Map<String, Value>, handles: [Option<Handle>; 3])
     }
 }
 
-/// Validates a CSR: non-empty, bounded, and never a private key.
+/// Validates a CSR: non-empty, bounded, PEM-encoded PKCS#10, and never a
+/// private key.
 fn validate_csr(csr: &str) -> Result<String> {
     let trimmed = csr.trim();
     if trimmed.is_empty() {
@@ -1659,20 +1665,31 @@ fn validate_csr(csr: &str) -> Result<String> {
             format!("must be at most {MAX_CSR_LEN} characters"),
         ));
     }
-    // A private key in this field would upload a secret to a third party.
-    if trimmed.contains("PRIVATE KEY") {
+    reject_control(trimmed)?;
+    let (label, der) = x509_cert::der::pem::decode_vec(trimmed.as_bytes()).map_err(|_| {
+        Error::validation(
+            "certificate.csr",
+            "must be a single PEM-encoded certificate signing request",
+        )
+    })?;
+    if label.to_ascii_uppercase().contains("PRIVATE KEY") {
         return Err(Error::validation(
             "certificate.csr",
             "must be a certificate signing request, not a private key",
         ));
     }
-    if !trimmed.contains("CERTIFICATE REQUEST") && !trimmed.contains("BEGIN NEW CERTIFICATE") {
+    if label != "CERTIFICATE REQUEST" {
         return Err(Error::validation(
             "certificate.csr",
-            "does not look like a PEM certificate signing request",
+            "must be a PEM certificate signing request",
         ));
     }
-    reject_control(trimmed)?;
+    CertReq::from_der(&der).map_err(|_| {
+        Error::validation(
+            "certificate.csr",
+            "must contain a valid PKCS#10 certificate signing request",
+        )
+    })?;
     Ok(trimmed.to_owned())
 }
 
@@ -2057,12 +2074,13 @@ impl<T: Transport> InwxClient<T> {
     /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
     /// use inwx_client::{CertificateId, InwxClient, ReqwestTransport};
     ///
+    /// # const CSR: &str = "-----BEGIN CERTIFICATE REQUEST-----\nMIHRMHgCAQAwFjEUMBIGA1UEAwwLZXhhbXBsZS5jb20wWTATBgcqhkjOPQIBBggq\nhkjOPQMBBwNCAASnomqdhePywSDnoxxGceZanZoUVN+xr37+NXVIZoYa3RZfX4Rh\ngItWma5hoUiROBxc+Grb4SNOjH8j2vkTniT2oAAwCgYIKoZIzj0EAwIDSQAwRgIh\nALNr10T/I0j0TCKeKWXCsmtLIZnk4kpQSjG01LbgkvbhAiEAuz/15JiDHOIK/Ddg\n9ze6r22cB9PjJ8Ox0QRNZeDJrfc=\n-----END CERTIFICATE REQUEST-----";
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
     /// let result = client
     ///     .reissue_certificate(
     ///         CertificateId::new(9)?,
-    ///         "-----BEGIN CERTIFICATE REQUEST-----\nMIIB",
+    ///         CSR,
     ///     )
     ///     .await?;
     /// println!("{:?}", result.status);
@@ -2099,6 +2117,7 @@ impl<T: Transport> InwxClient<T> {
     /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
     /// use inwx_client::{CertificateId, CertificateUpdate, InwxClient, ReqwestTransport};
     ///
+    /// # const CSR: &str = "-----BEGIN CERTIFICATE REQUEST-----\nMIHRMHgCAQAwFjEUMBIGA1UEAwwLZXhhbXBsZS5jb20wWTATBgcqhkjOPQIBBggq\nhkjOPQMBBwNCAASnomqdhePywSDnoxxGceZanZoUVN+xr37+NXVIZoYa3RZfX4Rh\ngItWma5hoUiROBxc+Grb4SNOjH8j2vkTniT2oAAwCgYIKoZIzj0EAwIDSQAwRgIh\nALNr10T/I0j0TCKeKWXCsmtLIZnk4kpQSjG01LbgkvbhAiEAuz/15JiDHOIK/Ddg\n9ze6r22cB9PjJ8Ox0QRNZeDJrfc=\n-----END CERTIFICATE REQUEST-----";
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
     /// let renew = CertificateUpdate::new(CertificateId::new(9)?)?
@@ -2196,10 +2215,11 @@ impl<T: Transport> InwxClient<T> {
     /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
     /// use inwx_client::{CertificateId, CertificateUpdate, InwxClient, ReqwestTransport};
     ///
+    /// # const CSR: &str = "-----BEGIN CERTIFICATE REQUEST-----\nMIHRMHgCAQAwFjEUMBIGA1UEAwwLZXhhbXBsZS5jb20wWTATBgcqhkjOPQIBBggq\nhkjOPQMBBwNCAASnomqdhePywSDnoxxGceZanZoUVN+xr37+NXVIZoYa3RZfX4Rh\ngItWma5hoUiROBxc+Grb4SNOjH8j2vkTniT2oAAwCgYIKoZIzj0EAwIDSQAwRgIh\nALNr10T/I0j0TCKeKWXCsmtLIZnk4kpQSjG01LbgkvbhAiEAuz/15JiDHOIK/Ddg\n9ze6r22cB9PjJ8Ox0QRNZeDJrfc=\n-----END CERTIFICATE REQUEST-----";
     /// let client = InwxClient::new(ReqwestTransport::new())
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
     /// let update = CertificateUpdate::new(CertificateId::new(9)?)?
-    ///     .with_csr("-----BEGIN CERTIFICATE REQUEST-----\nMIIB")?;
+    ///     .with_csr(CSR)?;
     /// let result = client.update_certificate_order(&update).await?;
     /// println!("{:?}", result.missing);
     /// # Ok(())
@@ -2226,6 +2246,8 @@ impl<T: Transport> InwxClient<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CSR: &str = "-----BEGIN CERTIFICATE REQUEST-----\nMIHRMHgCAQAwFjEUMBIGA1UEAwwLZXhhbXBsZS5jb20wWTATBgcqhkjOPQIBBggq\nhkjOPQMBBwNCAASnomqdhePywSDnoxxGceZanZoUVN+xr37+NXVIZoYa3RZfX4Rh\ngItWma5hoUiROBxc+Grb4SNOjH8j2vkTniT2oAAwCgYIKoZIzj0EAwIDSQAwRgIh\nALNr10T/I0j0TCKeKWXCsmtLIZnk4kpQSjG01LbgkvbhAiEAuz/15JiDHOIK/Ddg\n9ze6r22cB9PjJ8Ox0QRNZeDJrfc=\n-----END CERTIFICATE REQUEST-----";
 
     #[test]
     fn the_id_of_an_unreadable_answer_is_read_out_of_both_shapes() {
@@ -2298,12 +2320,14 @@ mod tests {
     fn a_csr_must_never_carry_a_private_key() {
         let err = validate_csr("-----BEGIN PRIVATE KEY-----\nMIIB").unwrap_err();
         assert!(err.is_validation());
-        assert!(validate_csr("-----BEGIN CERTIFICATE REQUEST-----\nMIIB").is_ok());
+        assert!(validate_csr(CSR).is_ok());
     }
 
     #[test]
     fn a_csr_must_look_like_a_request() {
         assert!(validate_csr("MIIBbase64").is_err());
+        assert!(validate_csr("not a pem certificate request").is_err());
+        assert!(validate_csr(&format!("{CSR}\nPRIVATE KEY")).is_err());
         assert!(validate_csr("").is_err());
         assert!(validate_csr(&"x".repeat(MAX_CSR_LEN + 1)).is_err());
     }
