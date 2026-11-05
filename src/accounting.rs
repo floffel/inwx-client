@@ -29,7 +29,9 @@ use crate::client::InwxClient;
 use crate::error::{Error, Result};
 use crate::transfer::{ActionKind, Irreversible};
 use crate::transport::Transport;
-use crate::types::{de, validate_text, validate_token, DocumentFormat, Timestamp};
+use crate::types::{
+    de, validate_page_params, validate_text, validate_token, DocumentFormat, Timestamp,
+};
 
 /// A document returned by the API (`pdf` base64 or `raw` text).
 ///
@@ -554,6 +556,11 @@ impl StatementQuery {
 
     /// Sets paging.
     ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `page` is `0` (INWX pages start at `1`), or
+    /// `limit` is `0` or above [`crate::MAX_PAGE_SIZE`].
+    ///
     /// ```
     /// use inwx_client::{StatementQuery, Timestamp};
     ///
@@ -561,15 +568,19 @@ impl StatementQuery {
     ///     Timestamp::parse("2026-01-01T00:00:00")?,
     ///     Timestamp::parse("2026-02-01T00:00:00")?,
     /// )?
-    /// .with_page(2, 50);
+    /// .with_page(2, 50)?;
     /// assert_eq!(query.params()["page"], 2);
+    /// assert!(StatementQuery::new(
+    ///     Timestamp::parse("2026-01-01T00:00:00")?,
+    ///     Timestamp::parse("2026-02-01T00:00:00")?,
+    /// )?
+    /// .with_page(0, 50)
+    /// .is_err());
     /// # Ok::<(), inwx_client::Error>(())
     /// ```
-    #[must_use]
-    pub fn with_page(mut self, page: u32, limit: u32) -> Self {
-        self.page = page.max(1);
-        self.limit = limit;
-        self
+    pub fn with_page(mut self, page: u32, limit: u32) -> Result<Self> {
+        (self.page, self.limit) = validate_page_params(page, limit)?;
+        Ok(self)
     }
 
     /// The `accounting.getstatement` parameters.
@@ -604,7 +615,7 @@ impl StatementQuery {
 ///
 /// let query = TransactionLogQuery::new()
 ///     .with_prices(0.0, 100.0)?
-///     .with_page(1, 25);
+///     .with_page(1, 25)?;
 /// assert_eq!(query.params()["priceMax"], 100.0);
 /// # Ok::<(), inwx_client::Error>(())
 /// ```
@@ -696,15 +707,20 @@ impl TransactionLogQuery {
 
     /// Sets paging.
     ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when `page` is `0` (INWX pages start at `1`), or
+    /// `limit` is `0` or above [`crate::MAX_PAGE_SIZE`].
+    ///
     /// ```
     /// use inwx_client::TransactionLogQuery;
-    /// assert_eq!(TransactionLogQuery::new().with_page(3, 5).params()["page"], 3);
+    /// assert_eq!(TransactionLogQuery::new().with_page(3, 5)?.params()["page"], 3);
+    /// assert!(TransactionLogQuery::new().with_page(1, 0).is_err());
+    /// # Ok::<(), inwx_client::Error>(())
     /// ```
-    #[must_use]
-    pub fn with_page(mut self, page: u32, limit: u32) -> Self {
-        self.page = page.max(1);
-        self.limit = limit;
-        self
+    pub fn with_page(mut self, page: u32, limit: u32) -> Result<Self> {
+        (self.page, self.limit) = validate_page_params(page, limit)?;
+        Ok(self)
     }
 
     /// The `accounting.log` parameters.
@@ -1226,8 +1242,9 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] when a range is reversed or the page limit is zero,
-    /// plus the usual transport and API errors.
+    /// [`Error::Validation`] when a range is reversed, `page` is zero, or
+    /// `limit` is zero or above the crate's page-size ceiling, plus the usual
+    /// transport and API errors.
     pub async fn locked_funds(
         &self,
         from: Option<Timestamp>,
@@ -1240,9 +1257,7 @@ impl<T: Transport> InwxClient<T> {
                 return Err(Error::validation("dateTo", "must be after dateFrom"));
             }
         }
-        if limit == 0 {
-            return Err(Error::validation("pagelimit", "must be at least 1"));
-        }
+        let (page, limit) = validate_page_params(page, limit)?;
         let mut params = Map::new();
         if let Some(from) = &from {
             params.insert("dateFrom".to_owned(), json!(from));
@@ -1250,7 +1265,7 @@ impl<T: Transport> InwxClient<T> {
         if let Some(to) = &to {
             params.insert("dateTo".to_owned(), json!(to));
         }
-        params.insert("page".to_owned(), json!(page.max(1)));
+        params.insert("page".to_owned(), json!(page));
         params.insert("pagelimit".to_owned(), json!(limit));
         let data = self
             .call("accounting.lockedFunds", Value::Object(params))

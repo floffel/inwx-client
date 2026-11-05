@@ -423,7 +423,8 @@ async fn accounting_reads_send_their_parameters() {
             )
             .unwrap()
             .with_format(DocumentFormat::Raw)
-            .with_page(2, 10),
+            .with_page(2, 10)
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -618,7 +619,12 @@ async fn accounting_validation_short_circuits() {
     assert!(client.preview_invoice(1999, 1).await.is_err());
     assert!(client.receipt(0, "1.00", "x", "2026-01-01").await.is_err());
     assert!(client.receipt(7, "", "x", "2026-01-01").await.is_err());
+    assert!(client.locked_funds(None, None, 0, 20).await.is_err());
     assert!(client.locked_funds(None, None, 1, 0).await.is_err());
+    assert!(client
+        .locked_funds(None, None, 1, inwx_client::MAX_PAGE_SIZE + 1)
+        .await
+        .is_err());
     assert!(PostalDelivery::new("", true).is_err());
     assert_eq!(transport.call_count(), 0);
 }
