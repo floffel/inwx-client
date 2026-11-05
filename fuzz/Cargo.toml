@@ -57,4 +57,13 @@ test = false
 doc = false
 bench = false
 
+# The permissive application decoders: `Application` and
+# `ApplicationCheckResult` must never panic on remote bytes.
+[[bin]]
+name = "parse_application"
+path = "fuzz_targets/parse_application.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
