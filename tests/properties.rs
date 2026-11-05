@@ -11,6 +11,7 @@ use inwx_client::{
     MAX_HTTP_BODY_CHARS, MAX_ITEMS, MAX_PAGES, MAX_PAGE_SIZE, MAX_TTL,
 };
 use proptest::prelude::*;
+use rust_decimal::Decimal;
 use serde_json::Value;
 use std::time::Duration;
 
@@ -326,9 +327,11 @@ proptest! {
     /// is only the named convenience.
     #[test]
     fn ssl_fund_gross_is_none_until_both_amounts_are_known(
-        netto in proptest::option::of(-1.0e6f64..1.0e6),
-        vat in proptest::option::of(-1.0e6f64..1.0e6),
+        netto_cents in proptest::option::of(-100_000_000i64..100_000_000),
+        vat_cents in proptest::option::of(-100_000_000i64..100_000_000),
     ) {
+        let netto = netto_cents.map(|cents| Decimal::new(cents, 2));
+        let vat = vat_cents.map(|cents| Decimal::new(cents, 2));
         let fund = SslFund {
             netto,
             vat,
@@ -339,7 +342,7 @@ proptest! {
             prop_assert_eq!(fund.gross(), Some(net + tax));
         } else {
             prop_assert_eq!(fund.gross(), None);
-            prop_assert!(fund.gross_or_zero() < f64::EPSILON);
+            prop_assert_eq!(fund.gross_or_zero(), Decimal::ZERO);
         }
     }
 
@@ -347,16 +350,18 @@ proptest! {
     /// amount cannot be read.
     #[test]
     fn locked_funds_count_incomplete_ssl_entries(
-        netto in proptest::option::of(0.0f64..10_000.0),
-        vat in proptest::option::of(0.0f64..10_000.0),
+        netto_cents in proptest::option::of(0i64..1_000_000),
+        vat_cents in proptest::option::of(0i64..1_000_000),
         complete in 0usize..8,
         incomplete in 0usize..8,
     ) {
+        let netto = netto_cents.map(|cents| Decimal::new(cents, 2));
+        let vat = vat_cents.map(|cents| Decimal::new(cents, 2));
         let mut ssl_funds = Vec::new();
         for _ in 0..complete {
             ssl_funds.push(SslFund {
-                netto: Some(netto.unwrap_or(10.0)),
-                vat: Some(vat.unwrap_or(1.0)),
+                netto: Some(netto.unwrap_or_else(|| Decimal::new(10, 0))),
+                vat: Some(vat.unwrap_or_else(|| Decimal::new(1, 0))),
                 ..SslFund::default()
             });
         }

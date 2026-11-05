@@ -50,6 +50,9 @@ idna = "1"
 # hand every process started in the same nanosecond the same sequence, which is
 # exactly the lockstep the jitter exists to break.
 rand = { version = "0.10", default-features = false, features = ["thread_rng"], optional = true }
+# Currency amounts are fixed-point values; `Decimal` keeps accounting sums and
+# comparisons exact instead of rounding through `f64`.
+rust_decimal = { version = "1.43.0", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 subtle = "2.6"
