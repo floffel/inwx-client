@@ -554,6 +554,51 @@ async fn refund_requires_the_refund_acknowledgement() {
     assert_eq!(call.params["amount"], 25.0);
 }
 
+/// Regression for #79: `accounting.refund` moves money, so a 5xx after the
+/// request was written must stop after one attempt and surface as uncertain
+/// instead of replaying the refund and moving the money twice.
+#[tokio::test]
+async fn a_transient_status_never_replays_a_refund() {
+    let transport = MockTransport::new();
+    transport.status(503, "upstream failed");
+    transport.ok_empty();
+
+    let domain = domain("example.com");
+    let refund = RefundRequest::new(
+        Irreversible::acknowledge(ActionKind::Refund, &domain),
+        7,
+        25.0,
+    )
+    .unwrap();
+    let error = client(transport.clone())
+        .refund(&refund)
+        .await
+        .expect_err("a 503 on a refund is uncertain, not successful");
+    assert!(error.is_uncertain(), "{error:?}");
+    assert_eq!(transport.call_count(), 1, "the refund must not be replayed");
+}
+
+/// Regression for #79: postal delivery is non-idempotent too (it can send, and
+/// charge for, a letter twice), so a 5xx must not be replayed.
+#[tokio::test]
+async fn a_transient_status_never_replays_postal_delivery() {
+    let transport = MockTransport::new();
+    transport.status(503, "upstream failed");
+    transport.ok_empty();
+
+    let delivery = PostalDelivery::new("2026-0042", true).unwrap();
+    let error = client(transport.clone())
+        .send_invoice_by_post(&delivery)
+        .await
+        .expect_err("a 503 on a postal delivery is uncertain, not successful");
+    assert!(error.is_uncertain(), "{error:?}");
+    assert_eq!(
+        transport.call_count(),
+        1,
+        "the postal delivery must not be replayed"
+    );
+}
+
 #[tokio::test]
 async fn accounting_validation_short_circuits() {
     let transport = MockTransport::new();
