@@ -100,6 +100,28 @@ async fn create_application_sends_the_typed_request() {
 }
 
 #[tokio::test]
+async fn create_application_without_an_id_is_a_missing_field_error() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "status": "PENDING" }));
+
+    let request =
+        ApplicationCreate::new(ApplicationType::parse("renew").unwrap(), "example.com").unwrap();
+
+    let error = client(transport)
+        .create_application(&request)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::MissingField {
+            method: "application.create",
+            field: "id",
+        }
+    ));
+}
+
+#[tokio::test]
 async fn application_id_calls_carry_applicationid() {
     let transport = MockTransport::new();
     transport.ok_empty();
@@ -120,6 +142,22 @@ async fn application_id_calls_carry_applicationid() {
     assert_eq!(calls[0].params["applicationId"], 4711);
     assert_eq!(calls[1].method, "application.info");
     assert_eq!(calls[1].params["applicationId"], 4711);
+}
+
+#[tokio::test]
+async fn application_info_without_an_id_is_a_missing_field_error() {
+    let transport = MockTransport::new();
+    transport.ok(json!({ "status": "PENDING" }));
+
+    let error = client(transport).application_info(4711).await.unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::MissingField {
+            method: "application.info",
+            field: "id",
+        }
+    ));
 }
 
 #[tokio::test]
@@ -172,6 +210,34 @@ async fn list_applications_pages_and_reads_rows() {
     assert_eq!(call.params["customerNumber"], 123_456);
     assert_eq!(call.params["page"], 2);
     assert_eq!(call.params["pagelimit"], 5);
+}
+
+#[tokio::test]
+async fn list_applications_skips_rows_without_an_id() {
+    let transport = MockTransport::new();
+    transport.ok(json!({
+        "count": 3,
+        "application": [
+            {"id": 1, "status": "DONE"},
+            {"status": "PENDING"},
+            {"id": 3, "status": "PENDING"},
+        ],
+    }));
+
+    let page = client(transport)
+        .list_applications(&ApplicationQuery::new())
+        .await
+        .unwrap();
+
+    assert_eq!(page.count, Some(3));
+    assert_eq!(page.len(), 2);
+    assert_eq!(
+        page.applications
+            .iter()
+            .filter_map(|application| application.id)
+            .collect::<Vec<_>>(),
+        [1, 3]
+    );
 }
 
 #[tokio::test]
