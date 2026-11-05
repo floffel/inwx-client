@@ -6,9 +6,9 @@ mod common;
 use inwx_client::{
     retry_after_from_header, ContactListing, ContactQuery, ContactRequest, ContactType,
     ContactUpdate, Credentials, DomainListQuery, DomainListing, DomainName, Hostname, HttpBody,
-    Listing, NewsDate, Pagination, Period, RecordId, RecordSpec, RecordType, RemoveClientHold,
-    RpcResponse, SetClientHold, ZoneListPage, ZoneListing, MAX_HTTP_BODY_CHARS, MAX_ITEMS,
-    MAX_PAGES, MAX_PAGE_SIZE, MAX_TTL,
+    Listing, LockedFunds, NewsDate, Pagination, Period, RecordId, RecordSpec, RecordType,
+    RemoveClientHold, RpcResponse, SetClientHold, SslFund, ZoneListPage, ZoneListing,
+    MAX_HTTP_BODY_CHARS, MAX_ITEMS, MAX_PAGES, MAX_PAGE_SIZE, MAX_TTL,
 };
 use proptest::prelude::*;
 use serde_json::Value;
@@ -315,6 +315,69 @@ proptest! {
         if let Ok(record) = serde_json::from_value::<inwx_client::DnsRecord>(value) {
             prop_assert_eq!(record.record_type, RecordType::Txt);
         }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// A certificate lock reports its gross amount exactly when both amounts
+    /// are readable; either missing amount stays `None`, and the zero default
+    /// is only the named convenience.
+    #[test]
+    fn ssl_fund_gross_is_none_until_both_amounts_are_known(
+        netto in proptest::option::of(-1.0e6f64..1.0e6),
+        vat in proptest::option::of(-1.0e6f64..1.0e6),
+    ) {
+        let fund = SslFund {
+            netto,
+            vat,
+            ..SslFund::default()
+        };
+
+        if let (Some(net), Some(tax)) = (netto, vat) {
+            prop_assert_eq!(fund.gross(), Some(net + tax));
+        } else {
+            prop_assert_eq!(fund.gross(), None);
+            prop_assert!(fund.gross_or_zero() < f64::EPSILON);
+        }
+    }
+
+    /// The incomplete count is exactly the number of SSL locks whose gross
+    /// amount cannot be read.
+    #[test]
+    fn locked_funds_count_incomplete_ssl_entries(
+        netto in proptest::option::of(0.0f64..10_000.0),
+        vat in proptest::option::of(0.0f64..10_000.0),
+        complete in 0usize..8,
+        incomplete in 0usize..8,
+    ) {
+        let mut ssl_funds = Vec::new();
+        for _ in 0..complete {
+            ssl_funds.push(SslFund {
+                netto: Some(netto.unwrap_or(10.0)),
+                vat: Some(vat.unwrap_or(1.0)),
+                ..SslFund::default()
+            });
+        }
+        for _ in 0..incomplete {
+            ssl_funds.push(SslFund {
+                netto,
+                vat,
+                ..SslFund::default()
+            });
+        }
+        let funds = LockedFunds {
+            ssl_funds,
+            ..LockedFunds::default()
+        };
+
+        let expected = funds
+            .ssl_funds
+            .iter()
+            .filter(|fund| fund.gross().is_none())
+            .count();
+        prop_assert_eq!(funds.incomplete_ssl_funds(), expected);
     }
 }
 
