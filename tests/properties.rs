@@ -935,13 +935,18 @@ proptest! {
 // --------------------------------------------------- reseller objects (#22)
 
 use inwx_client::{
-    Application, ApplicationCheckResult, ApplicationQuery, ApplicationType, AuthInfo2Order,
-    AuthInfo2OrderResult, AuthInfo2PriceQuote, ContactVerificationSettings, Customer,
-    CustomerDownload, CustomerDownloadQuery, CustomerUpdate, DataExport, DocumentEntry,
-    DocumentQuery, DocumentUpload, DownloadedDocument, HostCheckResult, HostCreate, HostQuery,
-    HostRecord, HostUpdate, Message, MessageAck, NicHandle, NicHandleQuery, PdfFile, PdfHandle,
-    PdfRender, PolledMessage, SavedName, MAX_HOST_ADDRESSES,
+    Application, ApplicationCheck, ApplicationCheckResult, ApplicationCreate, ApplicationQuery,
+    ApplicationType, ApplicationUpdate, AuthInfo2Order, AuthInfo2OrderResult, AuthInfo2PriceQuote,
+    ContactVerificationSettings, Customer, CustomerDownload, CustomerDownloadQuery, CustomerUpdate,
+    DataExport, DocumentEntry, DocumentQuery, DocumentUpload, DownloadedDocument, HostCheckResult,
+    HostCreate, HostQuery, HostRecord, HostUpdate, Message, MessageAck, NicHandle, NicHandleQuery,
+    PdfFile, PdfHandle, PdfRender, PolledMessage, SavedName, MAX_HOST_ADDRESSES,
 };
+
+/// Arbitrary application tokens, including Unicode and control characters.
+fn application_input() -> impl Strategy<Value = String> {
+    proptest::collection::vec(any::<char>(), 0..80).prop_map(|chars| chars.into_iter().collect())
+}
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
@@ -962,6 +967,175 @@ proptest! {
             ApplicationType::parse(&outside).is_ok(),
             outside.chars().count() <= 64
         );
+    }
+
+    /// `ApplicationType::parse` is total for arbitrary input: it either returns
+    /// the canonical token or a validation error, never panics, and any token
+    /// it accepts parses back to itself.
+    #[test]
+    fn arbitrary_application_types_parse_or_are_refused(input in application_input()) {
+        match ApplicationType::parse(&input) {
+            Ok(parsed) => {
+                let expected = input.trim().to_ascii_uppercase();
+                prop_assert_eq!(parsed.as_str(), expected.as_str());
+                prop_assert!(!parsed.as_str().is_empty());
+                prop_assert!(parsed.as_str().chars().count() <= 64);
+                prop_assert!(parsed
+                    .as_str()
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c)));
+                prop_assert_eq!(ApplicationType::parse(parsed.as_str()).unwrap(), parsed);
+            }
+            Err(error) => prop_assert!(error.is_validation()),
+        }
+    }
+
+    /// `application.check` carries every accepted selector, with the id kept
+    /// positive and the name/type in canonical form.
+    #[test]
+    fn application_check_params_echo_validated_values(
+        type_input in application_input(),
+        name in application_input(),
+        id in 1i64..=i64::from(i32::MAX),
+    ) {
+        let Ok(application_type) = ApplicationType::parse(&type_input) else {
+            return Ok(());
+        };
+        let check = ApplicationCheck::new()
+            .with_id(id)
+            .unwrap()
+            .with_type(application_type.clone())
+            .with_country_code("de")
+            .unwrap();
+        let check = match check.with_name(&name) {
+            Ok(check) => check,
+            Err(error) => {
+                prop_assert!(error.is_validation());
+                return Ok(());
+            }
+        };
+
+        let params = check.params().unwrap();
+        prop_assert!(params["applicationId"].as_i64().unwrap() > 0);
+        prop_assert_eq!(params["applicationId"].as_i64(), Some(id));
+        prop_assert_eq!(params["type"].as_str(), Some(application_type.as_str()));
+        prop_assert_eq!(params["name"].as_str(), Some(name.trim()));
+        prop_assert_eq!(&params["cc"], "DE");
+    }
+
+    /// `application.create` always carries the accepted type and name, and it
+    /// carries the comment exactly when the comment setter accepted it.
+    #[test]
+    fn application_create_params_echo_validated_values(
+        type_input in application_input(),
+        name in application_input(),
+        comment in application_input(),
+        testing in proptest::bool::ANY,
+    ) {
+        let Ok(application_type) = ApplicationType::parse(&type_input) else {
+            return Ok(());
+        };
+        let create = match ApplicationCreate::new(application_type.clone(), &name) {
+            Ok(create) => create,
+            Err(error) => {
+                prop_assert!(error.is_validation());
+                return Ok(());
+            }
+        };
+        let create = match create.with_comment(&comment) {
+            Ok(create) => create,
+            Err(error) => {
+                prop_assert!(error.is_validation());
+                return Ok(());
+            }
+        }
+        .with_testing(testing);
+
+        let params = create.params();
+        prop_assert_eq!(params["type"].as_str(), Some(application_type.as_str()));
+        prop_assert_eq!(params["name"].as_str(), Some(name.trim()));
+        prop_assert_eq!(params["comment"].as_str(), Some(comment.as_str()));
+        prop_assert_eq!(params.get("testing").is_some(), testing);
+        if testing {
+            prop_assert_eq!(&params["testing"], &Value::Bool(true));
+        }
+    }
+
+    /// `application.list` always sends a positive id when one is set, clamps a
+    /// zero page to one, and echoes the accepted status in canonical form.
+    #[test]
+    fn application_query_params_echo_validated_values(
+        status in application_input(),
+        id in 1i64..=i64::from(i32::MAX),
+        page in any::<u32>(),
+        limit in 1u32..=MAX_PAGE_SIZE,
+    ) {
+        let query = ApplicationQuery::new()
+            .with_id(id)
+            .unwrap()
+            .with_customer_number(id)
+            .unwrap()
+            .with_page(page, limit)
+            .unwrap();
+        let query = match query.with_status(&status) {
+            Ok(query) => query,
+            Err(error) => {
+                prop_assert!(error.is_validation());
+                return Ok(());
+            }
+        };
+
+        let params = query.params().unwrap();
+        prop_assert!(params["applicationId"].as_i64().unwrap() > 0);
+        prop_assert_eq!(params["applicationId"].as_i64(), Some(id));
+        prop_assert_eq!(params["customerNumber"].as_i64(), Some(id));
+        let expected_status = status.trim().to_ascii_uppercase();
+        prop_assert_eq!(params["status"].as_str(), Some(expected_status.as_str()));
+        prop_assert_eq!(params["page"].as_u64().unwrap(), u64::from(page.max(1)));
+        prop_assert_eq!(params["pagelimit"].as_u64().unwrap(), u64::from(limit));
+    }
+
+    /// `application.update` refuses an update with no changes; otherwise it
+    /// carries the positive id and each accepted change in canonical form.
+    #[test]
+    fn application_update_params_echo_validated_values(
+        name in application_input(),
+        comment in application_input(),
+        id in 1i64..=i64::from(i32::MAX),
+        testing in proptest::bool::ANY,
+    ) {
+        let base = ApplicationUpdate::new(id).unwrap().with_testing(testing);
+        let (update, expected_name) = match base.clone().with_name(&name) {
+            Ok(update) => (update, Some(name.trim().to_owned())),
+            Err(error) => {
+                prop_assert!(error.is_validation());
+                (base.clone(), None)
+            }
+        };
+        let (update, expected_comment) = match update.clone().with_comment(&comment) {
+            Ok(update) => (update, Some(comment)),
+            Err(error) => {
+                prop_assert!(error.is_validation());
+                (update, None)
+            }
+        };
+        if expected_name.is_none() && expected_comment.is_none() {
+            prop_assert!(update.params().is_err());
+            return Ok(());
+        }
+
+        let params = update.params().unwrap();
+        prop_assert!(params["applicationId"].as_i64().unwrap() > 0);
+        prop_assert_eq!(params["applicationId"].as_i64(), Some(id));
+        prop_assert_eq!(params.get("name").and_then(Value::as_str), expected_name.as_deref());
+        prop_assert_eq!(
+            params.get("comment").and_then(Value::as_str),
+            expected_comment.as_deref()
+        );
+        prop_assert_eq!(params.get("testing").is_some(), testing);
+        if testing {
+            prop_assert_eq!(&params["testing"], &Value::Bool(true));
+        }
     }
 
     /// A handle class is validated against the `text064` field: an unknown
