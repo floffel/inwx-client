@@ -7,8 +7,9 @@
 //! endpoint (`https://api.domrobot.com/jsonrpc/`, or the free OTE sandbox at
 //! `https://api.ote.domrobot.com/jsonrpc/`) where every command returns HTTP 200
 //! and reports failure in the body: `{"code": 2303, "msg": "Object does not
-//! exist"}`. This crate models that correctly — a non-`1000` code is an
-//! [`Error::Api`], not a parse problem.
+//! exist"}`. This crate models that correctly — a rejected command is an
+//! [`Error::Api`], not a parse problem, while accepted-but-incomplete codes
+//! surface as [`Error::Pending`].
 //!
 //! # Quickstart
 //!

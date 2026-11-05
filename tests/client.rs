@@ -900,6 +900,41 @@ async fn an_api_error_is_terminal() {
     assert_eq!(transport.call_count(), 1);
 }
 
+/// `1001` means the API accepted the command but has not completed it. A
+/// mutating caller must see that as `Error::Pending`, not as a completed command
+/// that carries no payload, and the command must not be replayed.
+#[tokio::test]
+async fn a_pending_mutation_is_typed_and_not_replayed() {
+    let transport = MockTransport::new();
+    transport.push(Reply::Body(
+        json!({
+            "code": 1001,
+            "msg": "Command completed successfully; action pending",
+            "svTRID": "trid-1"
+        })
+        .to_string(),
+    ));
+    transport.ok_empty();
+
+    let client = client(transport.clone());
+    let error = client
+        .call("domain.create", json!({"domain": "example.com"}))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        &error,
+        Error::Pending {
+            code: 1001,
+            sv_trid: Some(trid),
+            ..
+        } if trid.as_str() == "trid-1"
+    ));
+    assert_eq!(error.code(), Some(1001));
+    assert!(!error.is_retryable());
+    assert_eq!(transport.call_count(), 1);
+}
+
 /// `2300` is "object pending transfer": a read only has to wait for the object
 /// to leave the transfer, so the replay is free and worth taking.
 #[tokio::test]

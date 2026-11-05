@@ -455,6 +455,10 @@ fn rpc_request_and_detail_types() {
 
     assert!(rpc::is_success_code(1500));
     assert!(!rpc::is_success_code(1501));
+    assert_eq!(rpc::classify_code(1001), Some(rpc::ResultCode::Pending));
+    assert_eq!(rpc::classify_code(1300), Some(rpc::ResultCode::Queued));
+    assert_eq!(rpc::classify_code(1301), Some(rpc::ResultCode::Queued));
+    assert_eq!(rpc::classify_code(1500), Some(rpc::ResultCode::Success));
     assert_eq!(rpc::CODE_SUCCESS, 1000);
 }
 

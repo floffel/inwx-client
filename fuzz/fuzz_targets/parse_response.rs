@@ -86,13 +86,21 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // Error conversion must not panic either, and success codes must agree with
-    // `is_success`.
+    // Error conversion must not panic either, and the result class must agree
+    // with the response code.
     let code = response.code;
     let result = response.into_result();
     debug_assert_eq!(
         result.is_ok(),
-        code.is_some_and(inwx_client::rpc::is_success_code)
+        code.and_then(inwx_client::rpc::classify_code)
+            == Some(inwx_client::rpc::ResultCode::Success)
+    );
+    debug_assert_eq!(
+        matches!(result, Err(inwx_client::Error::Pending { .. })),
+        matches!(
+            code.and_then(inwx_client::rpc::classify_code),
+            Some(inwx_client::rpc::ResultCode::Pending | inwx_client::rpc::ResultCode::Queued)
+        )
     );
 
     // Record types are parsed from user input, so feed them the same bytes.

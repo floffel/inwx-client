@@ -1686,7 +1686,8 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// The usual transport and API errors. A synchronous registration answers
     /// with code `1000`; an asynchronous one answers `1001` (action pending),
-    /// which this crate treats as success.
+    /// which this crate returns as [`Error::Pending`] with the server
+    /// transaction id instead of pretending it has completed.
     pub async fn register_domain(&self, request: &DomainCreate) -> Result<Registration> {
         let data = self.call("domain.create", request.params()).await?;
         serde_json::from_value(data).map_err(Error::from)
