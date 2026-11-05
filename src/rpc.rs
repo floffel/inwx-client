@@ -14,6 +14,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
 use crate::error::{Error, Result};
+use crate::transport::DEFAULT_MAX_RESPONSE_BYTES;
 use crate::types::de;
 
 /// Result code for "command completed successfully".
@@ -277,9 +278,15 @@ pub struct RpcResponse {
 }
 
 impl RpcResponse {
-    /// Parses a response body.
+    /// Parses a response body, up to the crate's default maximum size.
     ///
     /// # Errors
+    ///
+    /// [`Error::ResponseTooLarge`] when the body is larger than
+    /// [`DEFAULT_MAX_RESPONSE_BYTES`]. The size is checked before the JSON parser
+    /// sees the bytes, so an oversized body cannot drive allocation. Use
+    /// [`parse_with_max_bytes`](Self::parse_with_max_bytes) when the caller has
+    /// a different cap.
     ///
     /// [`Error::Json`] when the bytes are not a JSON object of the expected
     /// shape, or when the envelope states `code` or `resData` more than once.
@@ -299,18 +306,66 @@ impl RpcResponse {
     /// assert!(matches!(err, inwx_client::Error::Json { .. }));
     /// ```
     pub fn parse(bytes: &[u8]) -> Result<Self> {
+        Self::parse_with_max_bytes(bytes, DEFAULT_MAX_RESPONSE_BYTES)
+    }
+
+    /// Parses a response body, refusing input larger than `max_bytes` first.
+    ///
+    /// This is the same parser as [`parse`](Self::parse), with the caller's
+    /// size cap instead of [`DEFAULT_MAX_RESPONSE_BYTES`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ResponseTooLarge`] when `bytes` is longer than `max_bytes`.
+    /// [`Error::Json`] under the same conditions as [`parse`](Self::parse).
+    ///
+    /// ```
+    /// use inwx_client::{Error, RpcResponse};
+    ///
+    /// let body = br#"{"code":1000,"msg":"ok"}"#;
+    /// let limit = u64::try_from(body.len()).unwrap();
+    ///
+    /// // Just at the limit: accepted.
+    /// assert!(RpcResponse::parse_with_max_bytes(body, limit)?.is_success());
+    ///
+    /// // Just outside it: refused before parsing.
+    /// let error = RpcResponse::parse_with_max_bytes(body, limit - 1).unwrap_err();
+    /// assert!(matches!(
+    ///     error,
+    ///     Error::ResponseTooLarge {
+    ///         limit: seen,
+    ///         observed: Some(observed),
+    ///     } if seen == limit - 1 && observed == limit
+    /// ));
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    pub fn parse_with_max_bytes(bytes: &[u8], max_bytes: u64) -> Result<Self> {
+        let observed = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if observed > max_bytes {
+            return Err(Error::ResponseTooLarge {
+                limit: max_bytes,
+                observed: Some(observed),
+            });
+        }
         serde_json::from_slice(bytes).map_err(Error::from)
+    }
+
+    /// Parses a body already bounded by the transport that supplied it.
+    pub(crate) fn parse_body(bytes: &[u8]) -> Result<Self> {
+        Self::parse_with_max_bytes(bytes, u64::MAX)
     }
 
     /// Parses the body of an answer to a request that had already been written.
     ///
-    /// The framing rules are [`parse`](Self::parse)'s. The difference is what a
-    /// failure means: here the request is known to have left the process, so a
-    /// body that cannot be read is [`Error::Undecodable`] — the command may
-    /// already have run — instead of the local decode failure
-    /// [`Error::Json`]. Both keep the `serde_json` error as `source`.
+    /// The framing rules are [`parse_body`](Self::parse_body)'s: the transport
+    /// that supplied the body already enforced its configured cap. The
+    /// difference from the public parser is what a failure means: here the
+    /// request is known to have left the process, so a body that cannot be read
+    /// is [`Error::Undecodable`] — the command may already have run — instead of
+    /// the local decode failure [`Error::Json`]. Both keep the `serde_json`
+    /// error as `source`.
     pub(crate) fn parse_answer(bytes: &[u8]) -> Result<Self> {
-        Self::parse(bytes).map_err(|error| match error {
+        Self::parse_body(bytes).map_err(|error| match error {
             Error::Json { source } => Error::Undecodable { source },
             other => other,
         })

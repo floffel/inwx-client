@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 
 use common::{client, BufferChunks, MockTransport, Reply, CHUNK_LEN};
 use inwx_client::transport::Response;
-use inwx_client::{read_capped_body, Error, DEFAULT_MAX_RESPONSE_BYTES};
+use inwx_client::{read_capped_body, Error, RpcResponse, DEFAULT_MAX_RESPONSE_BYTES};
 use proptest::prelude::*;
 use serde_json::json;
 
@@ -196,6 +196,34 @@ async fn the_error_never_echoes_the_body() {
 #[test]
 fn the_documented_cap_is_four_mebibytes() {
     assert_eq!(DEFAULT_MAX_RESPONSE_BYTES, 4 * 1024 * 1024);
+}
+
+#[test]
+fn the_public_parser_caps_bytes_before_json_allocation() {
+    let limit = usize::try_from(DEFAULT_MAX_RESPONSE_BYTES).expect("the cap fits usize");
+    let prefix = br#"{"code":1000,"msg":"ok","resData":{"padding":""#;
+    let suffix = br#""}}"#;
+    let padding = limit
+        .checked_sub(prefix.len() + suffix.len())
+        .expect("the envelope is smaller than the cap");
+
+    let at_limit = [prefix, "x".repeat(padding).as_bytes(), suffix].concat();
+    assert_eq!(at_limit.len(), limit);
+    assert!(RpcResponse::parse(&at_limit)
+        .expect("exactly at the cap is inside it")
+        .is_success());
+
+    let over_limit = [at_limit, b" ".to_vec()].concat();
+    assert_eq!(over_limit.len(), limit + 1);
+    let error = RpcResponse::parse(&over_limit).unwrap_err();
+    assert!(
+        is_too_large(
+            &error,
+            DEFAULT_MAX_RESPONSE_BYTES,
+            Some(DEFAULT_MAX_RESPONSE_BYTES + 1)
+        ),
+        "{error}"
+    );
 }
 
 #[test]

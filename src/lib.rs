@@ -266,11 +266,10 @@
 //!   in `Debug` and `Display`, compares in constant time, is zeroized when it is
 //!   dropped and has no `Deserialize`: a secret is an input and is never parsed
 //!   back out of a response.
-//! * A response body is capped at [`DEFAULT_MAX_RESPONSE_BYTES`], checked against
-//!   `Content-Length` before the body is read and against a running total while
-//!   it streams, so neither a misbehaving nor a compromised endpoint can make
-//!   this process allocate without bound. Crossing the cap is
-//!   [`Error::ResponseTooLarge`], which is
+//! * A response body is capped at [`DEFAULT_MAX_RESPONSE_BYTES`]. The transport
+//!   checks `Content-Length` before the body is read and a running total while it
+//!   streams; [`RpcResponse::parse`] also checks the bytes it is handed before
+//!   JSON parsing. Crossing the cap is [`Error::ResponseTooLarge`], which is
 //!   terminal: the command behind it may already have run.
 
 #![forbid(unsafe_code)]
