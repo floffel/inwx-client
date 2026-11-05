@@ -226,7 +226,7 @@ fn permissive_scalars_cover_their_fallbacks() {
     let balance: AccountBalance =
         serde_json::from_str(r#"{"total":{},"available":"190.5"}"#).unwrap();
     assert!(balance.total.is_none());
-    assert_eq!(balance.available, Some(190.5));
+    assert_eq!(balance.available.unwrap().to_string(), "190.5");
 
     let zone: inwx_client::ZoneSummary =
         serde_json::from_str(r#"{"domain":"a.de","web":true,"mail":{"nested":1},"url":null}"#)

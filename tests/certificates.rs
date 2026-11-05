@@ -394,7 +394,7 @@ async fn accounting_reads_send_their_parameters() {
 
     let client = client(transport.clone());
     let balance = client.account_balance().await.unwrap();
-    assert_eq!(balance.available, Some(190.5));
+    assert_eq!(balance.available.unwrap().to_string(), "190.5");
 
     let log = client.credit_log(7).await.unwrap();
     assert_eq!(log.last4.as_deref(), Some("4242"));
@@ -607,10 +607,10 @@ fn documents_and_sums_behave() {
     assert!(broken.pdf_bytes().is_err());
 
     let fund: inwx_client::SslFund = serde_json::from_str(r#"{"netto":10.0,"vat":1.9}"#).unwrap();
-    assert!((fund.gross().unwrap() - 11.9).abs() < 1e-9);
+    assert_eq!(fund.gross().unwrap().to_string(), "11.9");
     let unknown: inwx_client::SslFund = serde_json::from_str(r#"{"netto":10.0}"#).unwrap();
     assert_eq!(unknown.gross(), None);
-    assert!(unknown.gross_or_zero() < f64::EPSILON);
+    assert_eq!(unknown.gross_or_zero().to_string(), "0");
 
     let entry: inwx_client::Transaction = serde_json::from_str(r"{}").unwrap();
     assert!(!entry.is_refundable());

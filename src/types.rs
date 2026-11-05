@@ -1831,6 +1831,7 @@ pub(crate) fn parse_rows<T: serde::de::DeserializeOwned>(data: &Value, key: &str
 /// the docs but occasionally come back as `"12.50"`. These helpers accept both
 /// shapes instead of failing the whole response.
 pub(crate) mod de {
+    use rust_decimal::Decimal;
     use serde::de::{Deserializer, Error as _};
     use serde::Deserialize;
     use serde_json::Value;
@@ -1871,6 +1872,24 @@ pub(crate) mod de {
             Value::String(text) => text.trim().parse().ok(),
             _ => None,
         })
+    }
+
+    /// An optional decimal money amount from a number or a numeric string.
+    pub(crate) fn opt_decimal<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Option<Decimal>, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        Ok(match value {
+            Value::Number(number) => decimal_from_str(&number.to_string()),
+            Value::String(text) => decimal_from_str(text.trim()),
+            _ => None,
+        })
+    }
+
+    fn decimal_from_str(text: &str) -> Option<Decimal> {
+        text.parse::<Decimal>()
+            .or_else(|_| Decimal::from_scientific(text))
+            .ok()
     }
 
     /// An optional boolean from `true`/`false`, `1`/`0`, or their string forms.

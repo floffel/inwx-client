@@ -21,6 +21,7 @@
 //! use.
 
 use base64::Engine as _;
+use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
@@ -124,23 +125,23 @@ impl Document {
 /// let balance: AccountBalance = serde_json::from_str(
 ///     r#"{"total":250.0,"available":190.5,"locked":59.5,"creditLimit":0}"#,
 /// )?;
-/// assert_eq!(balance.available, Some(190.5));
+/// assert_eq!(balance.available, "190.5".parse().ok());
 /// # Ok::<(), serde_json::Error>(())
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct AccountBalance {
     /// Accumulated received payments.
-    #[serde(default, deserialize_with = "de::opt_f64")]
-    pub total: Option<f64>,
+    #[serde(default, deserialize_with = "de::opt_decimal")]
+    pub total: Option<Decimal>,
     /// Deposit available for transactions.
-    #[serde(default, deserialize_with = "de::opt_f64")]
-    pub available: Option<f64>,
+    #[serde(default, deserialize_with = "de::opt_decimal")]
+    pub available: Option<Decimal>,
     /// Deposit locked by transactions in progress.
-    #[serde(default, deserialize_with = "de::opt_f64")]
-    pub locked: Option<f64>,
+    #[serde(default, deserialize_with = "de::opt_decimal")]
+    pub locked: Option<Decimal>,
     /// The account's credit limit.
-    #[serde(default, rename = "creditLimit", deserialize_with = "de::opt_f64")]
-    pub credit_limit: Option<f64>,
+    #[serde(default, rename = "creditLimit", deserialize_with = "de::opt_decimal")]
+    pub credit_limit: Option<Decimal>,
 }
 
 /// One credit log entry (`accounting.creditLogById`).
@@ -152,7 +153,7 @@ pub struct AccountBalance {
 ///     r#"{"id":7,"amount":100.0,"creditTime":"2026-10-01T10:00:00",
 ///         "creditType":"PAYPAL","currency":"EUR","last4":"4242"}"#,
 /// )?;
-/// assert_eq!(log.amount, Some(100.0));
+/// assert_eq!(log.amount, "100.0".parse().ok());
 /// assert_eq!(log.last4.as_deref(), Some("4242"));
 /// # Ok::<(), serde_json::Error>(())
 /// ```
@@ -162,8 +163,8 @@ pub struct CreditLog {
     #[serde(default, deserialize_with = "de::opt_i64")]
     pub id: Option<i64>,
     /// Amount credited.
-    #[serde(default, deserialize_with = "de::opt_f64")]
-    pub amount: Option<f64>,
+    #[serde(default, deserialize_with = "de::opt_decimal")]
+    pub amount: Option<Decimal>,
     /// When the credit arrived.
     #[serde(default, rename = "creditTime", deserialize_with = "de::opt_string")]
     pub credit_time: Option<String>,
@@ -215,11 +216,11 @@ pub struct Invoice {
     #[serde(default, deserialize_with = "de::opt_string")]
     pub date: Option<String>,
     /// Amount including tax.
-    #[serde(default, rename = "afterTax", deserialize_with = "de::opt_f64")]
-    pub after_tax: Option<f64>,
+    #[serde(default, rename = "afterTax", deserialize_with = "de::opt_decimal")]
+    pub after_tax: Option<Decimal>,
     /// Amount excluding tax.
-    #[serde(default, rename = "preTax", deserialize_with = "de::opt_f64")]
-    pub pre_tax: Option<f64>,
+    #[serde(default, rename = "preTax", deserialize_with = "de::opt_decimal")]
+    pub pre_tax: Option<Decimal>,
     /// Kind of invoice.
     #[serde(default, rename = "type", deserialize_with = "de::opt_string")]
     pub kind: Option<String>,
@@ -253,7 +254,7 @@ fn value_shape(value: &Value) -> &'static str {
 /// let fund: LockedFund = serde_json::from_str(
 ///     r#"{"date":"2026-10-01T10:00:00","domain":"example.com","amount":12.5,"status":"LOCKED"}"#,
 /// )?;
-/// assert_eq!(fund.amount, Some(12.5));
+/// assert_eq!(fund.amount, "12.5".parse().ok());
 /// # Ok::<(), serde_json::Error>(())
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -265,8 +266,8 @@ pub struct LockedFund {
     #[serde(default, deserialize_with = "de::opt_string")]
     pub domain: Option<String>,
     /// Locked amount.
-    #[serde(default, deserialize_with = "de::opt_f64")]
-    pub amount: Option<f64>,
+    #[serde(default, deserialize_with = "de::opt_decimal")]
+    pub amount: Option<Decimal>,
     /// Domain status at lock time.
     #[serde(default, deserialize_with = "de::opt_string")]
     pub status: Option<String>,
@@ -282,7 +283,7 @@ pub struct LockedFund {
 ///         "productId":17,"productName":"DomainValidation","status":"LOCKED"}"#,
 /// )?;
 /// assert_eq!(fund.certificate_id, Some(9));
-/// assert_eq!(fund.gross(), Some(39.9));
+/// assert_eq!(fund.gross(), "39.9".parse().ok());
 /// # Ok::<(), serde_json::Error>(())
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -297,11 +298,11 @@ pub struct SslFund {
     #[serde(default, rename = "commonName", deserialize_with = "de::opt_string")]
     pub common_name: Option<String>,
     /// Net amount.
-    #[serde(default, deserialize_with = "de::opt_f64")]
-    pub netto: Option<f64>,
+    #[serde(default, deserialize_with = "de::opt_decimal")]
+    pub netto: Option<Decimal>,
     /// VAT amount.
-    #[serde(default, deserialize_with = "de::opt_f64")]
-    pub vat: Option<f64>,
+    #[serde(default, deserialize_with = "de::opt_decimal")]
+    pub vat: Option<Decimal>,
     /// Product id.
     #[serde(default, rename = "productId", deserialize_with = "de::opt_i64")]
     pub product_id: Option<i64>,
@@ -314,46 +315,47 @@ pub struct SslFund {
 }
 
 impl SslFund {
-    /// Net plus VAT, or [`None`] when either amount is missing.
+    /// Net plus VAT, or [`None`] when either amount is missing or the sum is
+    /// outside [`Decimal`]'s range.
     ///
     /// Use this when an incomplete lock must be distinguishable from a lock of
-    /// `0.0`; [`SslFund::gross_or_zero`] is the explicit zero-defaulting
+    /// zero; [`SslFund::gross_or_zero`] is the explicit zero-defaulting
     /// convenience.
     ///
     /// ```
     /// use inwx_client::SslFund;
     ///
     /// let known: SslFund = serde_json::from_str(r#"{"netto":10.0,"vat":1.9}"#)?;
-    /// assert!(known.gross().is_some_and(|gross| (gross - 11.9).abs() < 1e-9));
+    /// assert_eq!(known.gross(), "11.9".parse().ok());
     ///
     /// let unknown: SslFund = serde_json::from_str(r#"{"netto":10.0}"#)?;
     /// assert_eq!(unknown.gross(), None);
     /// # Ok::<(), serde_json::Error>(())
     /// ```
     #[must_use]
-    pub fn gross(&self) -> Option<f64> {
+    pub fn gross(&self) -> Option<Decimal> {
         match (self.netto, self.vat) {
-            (Some(net), Some(vat)) => Some(net + vat),
+            (Some(net), Some(vat)) => net.checked_add(vat),
             _ => None,
         }
     }
 
-    /// Net plus VAT, or `0.0` when either amount is missing.
+    /// Net plus VAT, or zero when either amount is missing.
     ///
     /// This is the explicit zero-defaulting convenience; prefer
-    /// [`SslFund::gross`] unless `0.0` is the right presentation for an
+    /// [`SslFund::gross`] unless zero is the right presentation for an
     /// incomplete answer.
     ///
     /// ```
     /// use inwx_client::SslFund;
     ///
     /// let unknown: SslFund = serde_json::from_str(r#"{"netto":10.0}"#)?;
-    /// assert!(unknown.gross_or_zero() < f64::EPSILON);
+    /// assert_eq!(unknown.gross_or_zero().to_string(), "0");
     /// # Ok::<(), serde_json::Error>(())
     /// ```
     #[must_use]
-    pub fn gross_or_zero(&self) -> f64 {
-        self.gross().unwrap_or(0.0)
+    pub fn gross_or_zero(&self) -> Decimal {
+        self.gross().unwrap_or(Decimal::ZERO)
     }
 }
 
@@ -417,7 +419,7 @@ impl LockedFunds {
 ///     r#"{"date":"2026-10-01T10:00:00","amount":-8.9,"type":"RENEW",
 ///         "details":"example.com","refundable":true}"#,
 /// )?;
-/// assert_eq!(entry.amount, Some(-8.9));
+/// assert_eq!(entry.amount, "-8.9".parse().ok());
 /// assert!(entry.is_refundable());
 /// # Ok::<(), serde_json::Error>(())
 /// ```
@@ -427,8 +429,8 @@ pub struct Transaction {
     #[serde(default, deserialize_with = "de::opt_string")]
     pub date: Option<String>,
     /// Amount; negative for charges.
-    #[serde(default, deserialize_with = "de::opt_f64")]
-    pub amount: Option<f64>,
+    #[serde(default, deserialize_with = "de::opt_decimal")]
+    pub amount: Option<Decimal>,
     /// Kind of action.
     #[serde(default, rename = "type", deserialize_with = "de::opt_string")]
     pub kind: Option<String>,
@@ -464,7 +466,7 @@ impl Transaction {
 /// let log: TransactionLog = serde_json::from_str(
 ///     r#"{"count":1,"sum":-8.9,"log":[{"amount":-8.9,"type":"RENEW"}]}"#,
 /// )?;
-/// assert_eq!(log.sum, Some(-8.9));
+/// assert_eq!(log.sum, "-8.9".parse().ok());
 /// assert_eq!(log.entries.len(), 1);
 /// # Ok::<(), serde_json::Error>(())
 /// ```
@@ -474,8 +476,8 @@ pub struct TransactionLog {
     #[serde(default, deserialize_with = "de::opt_i64")]
     pub count: Option<i64>,
     /// Sum of the amounts on this page.
-    #[serde(default, deserialize_with = "de::opt_f64")]
-    pub sum: Option<f64>,
+    #[serde(default, deserialize_with = "de::opt_decimal")]
+    pub sum: Option<Decimal>,
     /// The entries.
     #[serde(default, rename = "log")]
     pub entries: Vec<Transaction>,
@@ -1393,10 +1395,25 @@ mod tests {
     #[test]
     fn ssl_fund_gross_needs_both_amounts() {
         let fund: SslFund = serde_json::from_str(r#"{"netto":10.0,"vat":1.9}"#).unwrap();
-        assert!((fund.gross().unwrap() - 11.9).abs() < 1e-9);
+        assert_eq!(fund.gross().unwrap().to_string(), "11.9");
 
         let unknown: SslFund = serde_json::from_str(r#"{"netto":10.0}"#).unwrap();
         assert_eq!(unknown.gross(), None);
-        assert!(unknown.gross_or_zero() < f64::EPSILON);
+        assert_eq!(unknown.gross_or_zero().to_string(), "0");
+    }
+
+    #[test]
+    fn money_amounts_are_exact_and_compare_by_value() {
+        let from_number: SslFund = serde_json::from_str(r#"{"netto":33.53,"vat":6.37}"#).unwrap();
+        let from_string: SslFund =
+            serde_json::from_str(r#"{"netto":"33.53","vat":"6.37"}"#).unwrap();
+
+        assert_eq!(from_number, from_string);
+        assert_eq!(from_number.gross(), "39.9".parse().ok());
+
+        let balance: AccountBalance =
+            serde_json::from_str(r#"{"available":"190.50","locked":59.5}"#).unwrap();
+        assert_eq!(balance.available.unwrap().to_string(), "190.50");
+        assert_eq!(balance.locked.unwrap().to_string(), "59.5");
     }
 }
