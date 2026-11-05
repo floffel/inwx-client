@@ -535,14 +535,17 @@ impl ApplicationCheck {
 ///
 /// let result: ApplicationCheckResult =
 ///     serde_json::from_str(r#"{"available":1,"reason":"name is free"}"#)?;
-/// assert!(result.is_available());
+/// assert!(result.is_available()?);
 /// assert_eq!(result.reason.as_deref(), Some("name is free"));
-/// # Ok::<(), serde_json::Error>(())
+/// # Ok::<(), inwx_client::Error>(())
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct ApplicationCheckResult {
     /// Whether the application would be accepted.
-    #[serde(default, deserialize_with = "de::opt_bool")]
+    ///
+    /// `None` means the answer omitted the decision or sent `null`. A present
+    /// value that is not bool-like fails decoding instead of becoming `None`.
+    #[serde(default, deserialize_with = "application_available")]
     pub available: Option<bool>,
     /// Explanation, when the API sends one.
     #[serde(default, deserialize_with = "de::opt_string")]
@@ -553,20 +556,59 @@ pub struct ApplicationCheckResult {
 }
 
 impl ApplicationCheckResult {
-    /// Whether the application would be accepted; unknown counts as not accepted.
+    /// Whether the application would be accepted.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::MissingField`] when the answer carried no `available` decision,
+    /// either because the field was absent or because it was `null`. A value
+    /// that is present but not bool-like fails decoding before this method is
+    /// reached.
     ///
     /// ```
-    /// use inwx_client::ApplicationCheckResult;
+    /// use inwx_client::{ApplicationCheckResult, Error};
     ///
     /// let yes: ApplicationCheckResult = serde_json::from_str(r#"{"available":"1"}"#)?;
     /// let silent = ApplicationCheckResult::default();
-    /// assert!(yes.is_available());
-    /// assert!(!silent.is_available());
-    /// # Ok::<(), serde_json::Error>(())
+    /// assert!(yes.is_available()?);
+    /// assert!(matches!(
+    ///     silent.is_available(),
+    ///     Err(Error::MissingField {
+    ///         method: "application.check",
+    ///         field: "available",
+    ///     })
+    /// ));
+    /// # Ok::<(), inwx_client::Error>(())
     /// ```
-    #[must_use]
-    pub fn is_available(&self) -> bool {
-        self.available.unwrap_or(false)
+    pub fn is_available(&self) -> Result<bool> {
+        self.available.ok_or(Error::MissingField {
+            method: "application.check",
+            field: "available",
+        })
+    }
+}
+
+/// Decodes the paid-action decision, refusing values that are present but not
+/// bool-like so a malformed answer cannot be read as "not available".
+fn application_available<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<bool>, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    match value {
+        Value::Null => Ok(None),
+        Value::Bool(flag) => Ok(Some(flag)),
+        Value::Number(number) => number
+            .as_i64()
+            .map(|number| Some(number != 0))
+            .ok_or_else(|| D::Error::custom("`available` must be a boolean or 0/1")),
+        Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" => Ok(Some(true)),
+            "0" | "false" | "no" => Ok(Some(false)),
+            _ => Err(D::Error::custom(
+                "`available` must be true/false, yes/no or 1/0",
+            )),
+        },
+        _ => Err(D::Error::custom("`available` must be a boolean")),
     }
 }
 
@@ -1142,7 +1184,7 @@ impl<T: Transport> InwxClient<T> {
     ///     .with_credentials("user", std::env::var("INWX_PASSWORD")?)?;
     /// let check = ApplicationCheck::new().with_type(ApplicationType::parse("renew")?)
     ///     .with_name("example.com")?;
-    /// println!("{}", client.check_application(&check).await?.is_available());
+    /// println!("{}", client.check_application(&check).await?.is_available()?);
     /// # Ok(())
     /// # }
     /// ```
