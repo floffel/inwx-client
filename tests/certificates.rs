@@ -597,9 +597,10 @@ fn documents_and_sums_behave() {
     assert!(broken.pdf_bytes().is_err());
 
     let fund: inwx_client::SslFund = serde_json::from_str(r#"{"netto":10.0,"vat":1.9}"#).unwrap();
-    assert!((fund.gross() - 11.9).abs() < 1e-9);
+    assert!((fund.gross().unwrap() - 11.9).abs() < 1e-9);
     let unknown: inwx_client::SslFund = serde_json::from_str(r#"{"netto":10.0}"#).unwrap();
-    assert!(unknown.gross() < f64::EPSILON);
+    assert_eq!(unknown.gross(), None);
+    assert!(unknown.gross_or_zero() < f64::EPSILON);
 
     let entry: inwx_client::Transaction = serde_json::from_str(r"{}").unwrap();
     assert!(!entry.is_refundable());

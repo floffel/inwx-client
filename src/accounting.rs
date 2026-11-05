@@ -282,7 +282,7 @@ pub struct LockedFund {
 ///         "productId":17,"productName":"DomainValidation","status":"LOCKED"}"#,
 /// )?;
 /// assert_eq!(fund.certificate_id, Some(9));
-/// assert!((fund.gross() - 39.9).abs() < 1e-9);
+/// assert_eq!(fund.gross(), Some(39.9));
 /// # Ok::<(), serde_json::Error>(())
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -314,21 +314,46 @@ pub struct SslFund {
 }
 
 impl SslFund {
-    /// Net plus VAT, or `0.0` when either is missing.
+    /// Net plus VAT, or [`None`] when either amount is missing.
+    ///
+    /// Use this when an incomplete lock must be distinguishable from a lock of
+    /// `0.0`; [`SslFund::gross_or_zero`] is the explicit zero-defaulting
+    /// convenience.
+    ///
+    /// ```
+    /// use inwx_client::SslFund;
+    ///
+    /// let known: SslFund = serde_json::from_str(r#"{"netto":10.0,"vat":1.9}"#)?;
+    /// assert!(known.gross().is_some_and(|gross| (gross - 11.9).abs() < 1e-9));
+    ///
+    /// let unknown: SslFund = serde_json::from_str(r#"{"netto":10.0}"#)?;
+    /// assert_eq!(unknown.gross(), None);
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
+    #[must_use]
+    pub fn gross(&self) -> Option<f64> {
+        match (self.netto, self.vat) {
+            (Some(net), Some(vat)) => Some(net + vat),
+            _ => None,
+        }
+    }
+
+    /// Net plus VAT, or `0.0` when either amount is missing.
+    ///
+    /// This is the explicit zero-defaulting convenience; prefer
+    /// [`SslFund::gross`] unless `0.0` is the right presentation for an
+    /// incomplete answer.
     ///
     /// ```
     /// use inwx_client::SslFund;
     ///
     /// let unknown: SslFund = serde_json::from_str(r#"{"netto":10.0}"#)?;
-    /// assert!(unknown.gross() < f64::EPSILON);
+    /// assert!(unknown.gross_or_zero() < f64::EPSILON);
     /// # Ok::<(), serde_json::Error>(())
     /// ```
     #[must_use]
-    pub fn gross(&self) -> f64 {
-        match (self.netto, self.vat) {
-            (Some(net), Some(vat)) => net + vat,
-            _ => 0.0,
-        }
+    pub fn gross_or_zero(&self) -> f64 {
+        self.gross().unwrap_or(0.0)
     }
 }
 
@@ -356,6 +381,31 @@ pub struct LockedFunds {
     /// Optional PDF of the statement.
     #[serde(default, deserialize_with = "de::opt_string")]
     pub pdf: Option<String>,
+}
+
+impl LockedFunds {
+    /// Number of certificate locks whose net amount or VAT is missing.
+    ///
+    /// A nonzero value means summing [`SslFund::gross`] over
+    /// [`LockedFunds::ssl_funds`] would be incomplete; sum
+    /// [`SslFund::gross_or_zero`] only when that zero default is intended.
+    ///
+    /// ```
+    /// use inwx_client::LockedFunds;
+    ///
+    /// let funds: LockedFunds = serde_json::from_str(
+    ///     r#"{"sslFunds":[{"netto":10.0,"vat":1.9},{"netto":10.0}]}"#,
+    /// )?;
+    /// assert_eq!(funds.incomplete_ssl_funds(), 1);
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
+    #[must_use]
+    pub fn incomplete_ssl_funds(&self) -> usize {
+        self.ssl_funds
+            .iter()
+            .filter(|fund| fund.gross().is_none())
+            .count()
+    }
 }
 
 /// One transaction log line (`accounting.log`).
@@ -1343,6 +1393,10 @@ mod tests {
     #[test]
     fn ssl_fund_gross_needs_both_amounts() {
         let fund: SslFund = serde_json::from_str(r#"{"netto":10.0,"vat":1.9}"#).unwrap();
-        assert!((fund.gross() - 11.9).abs() < 1e-9);
+        assert!((fund.gross().unwrap() - 11.9).abs() < 1e-9);
+
+        let unknown: SslFund = serde_json::from_str(r#"{"netto":10.0}"#).unwrap();
+        assert_eq!(unknown.gross(), None);
+        assert!(unknown.gross_or_zero() < f64::EPSILON);
     }
 }
