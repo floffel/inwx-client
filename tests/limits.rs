@@ -8,8 +8,8 @@ use inwx_client::{
     Handle, HostUpdate, HostingPeriod, Hostname, MessageAck, NameserverSetCreate,
     NameserverSetType, NicHandleQuery, Password, PdfRender, PostalDelivery, RefundRequest,
     RemoveClientHold, SetClientHold, StatementQuery, TagUpdate, Timestamp, TldGroup, TldRules,
-    TransferCodeUpdate, ZoneCreate, ZoneUpdate, MAX_AUTH_CODE_LEN, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
-    MAX_PAGE_LIMIT, MAX_PASSWORD_LEN,
+    TransactionLogQuery, TransferCodeUpdate, ZoneCreate, ZoneUpdate, MAX_AUTH_CODE_LEN,
+    MAX_DOMAIN_LEN, MAX_LABEL_LEN, MAX_PAGE_LIMIT, MAX_PASSWORD_LEN,
 };
 use zeroize::Zeroize as _;
 
@@ -810,6 +810,28 @@ fn statement_ranges_are_strict() {
     // Equal endpoints are not a range.
     assert!(StatementQuery::new(later.clone(), later.clone()).is_err());
     assert!(StatementQuery::new(later, earlier).is_err());
+}
+
+#[test]
+fn accounting_page_parameters_share_one_boundary() {
+    fn assert_boundaries<T>(build: impl Fn(u32, u32) -> inwx_client::Result<T>) {
+        assert!(build(1, 1).is_ok());
+        assert!(build(2, MAX_PAGE_LIMIT).is_ok());
+        assert!(build(u32::MAX, 1).is_ok());
+        assert!(build(0, 1).is_err());
+        assert!(build(1, 0).is_err());
+        assert!(build(1, MAX_PAGE_LIMIT + 1).is_err());
+    }
+
+    let from = Timestamp::parse("2026-01-01T00:00:00").unwrap();
+    let to = Timestamp::parse("2026-12-31T00:00:00").unwrap();
+
+    assert_boundaries(|page, limit| {
+        StatementQuery::new(from.clone(), to.clone())
+            .unwrap()
+            .with_page(page, limit)
+    });
+    assert_boundaries(|page, limit| TransactionLogQuery::new().with_page(page, limit));
 }
 
 #[test]

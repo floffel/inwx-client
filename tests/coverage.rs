@@ -654,21 +654,32 @@ fn accounting_query_branches() {
 
     let statement = StatementQuery::new(from.clone(), to.clone())
         .unwrap()
-        .with_page(0, 5);
-    assert_eq!(statement.params()["page"], 1);
+        .with_page(2, 5)
+        .unwrap();
+    assert_eq!(statement.params()["page"], 2);
+    assert_eq!(statement.params()["pagelimit"], 5);
+    assert!(StatementQuery::new(from.clone(), to.clone())
+        .unwrap()
+        .with_page(0, 5)
+        .is_err());
+    assert!(StatementQuery::new(from.clone(), to.clone())
+        .unwrap()
+        .with_page(1, 0)
+        .is_err());
 
     let log = inwx_client::TransactionLogQuery::new()
         .with_range(from, to)
         .unwrap()
         .with_prices(0.0, 99.9)
         .unwrap()
-        .with_page(0, 10);
+        .with_page(2, 10)
+        .unwrap();
     let params = log.params();
     assert_eq!(params["dateFrom"], "2026-01-01T00:00:00");
     assert_eq!(params["dateTo"], "2026-02-01T00:00:00");
     assert_eq!(params["priceMin"], 0.0);
     assert_eq!(params["priceMax"], 99.9);
-    assert_eq!(params["page"], 1);
+    assert_eq!(params["page"], 2);
     assert_eq!(params["pagelimit"], 10);
 }
 

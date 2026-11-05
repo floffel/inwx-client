@@ -1623,6 +1623,18 @@ pub(crate) fn validate_page_limit(limit: u32) -> Result<u32> {
     Ok(limit)
 }
 
+/// A 1-based page number and a page size, validated together so every paged
+/// request refuses the same values before a request is sent.
+pub(crate) fn validate_page_params(page: u32, limit: u32) -> Result<(u32, u32)> {
+    if page == 0 {
+        return Err(Error::validation(
+            "page",
+            "must be at least 1 (pages start at 1)",
+        ));
+    }
+    Ok((page, validate_page_limit(limit)?))
+}
+
 /// An upper-case code token such as a document type or a verification mode:
 /// `[A-Z0-9_.-]`, 1 to `max` characters. Input is trimmed and upper-cased, so a
 /// caller can write `"invoice"` and get `INVOICE` on the wire.
