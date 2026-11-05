@@ -695,11 +695,14 @@ fn certificate_limits() {
     };
 
     // 10 000 characters of CSR is the documented maximum.
-    let csr = format!(
-        "-----BEGIN CERTIFICATE REQUEST-----{}-----END CERTIFICATE REQUEST-----",
-        "A".repeat(9_900)
-    );
-    assert!(base().with_csr(&csr).is_ok());
+    let csr = "-----BEGIN CERTIFICATE REQUEST-----\n\
+MIHRMHgCAQAwFjEUMBIGA1UEAwwLZXhhbXBsZS5jb20wWTATBgcqhkjOPQIBBggq\n\
+hkjOPQMBBwNCAASnomqdhePywSDnoxxGceZanZoUVN+xr37+NXVIZoYa3RZfX4Rh\n\
+gItWma5hoUiROBxc+Grb4SNOjH8j2vkTniT2oAAwCgYIKoZIzj0EAwIDSQAwRgIh\n\
+ALNr10T/I0j0TCKeKWXCsmtLIZnk4kpQSjG01LbgkvbhAiEAuz/15JiDHOIK/Ddg\n\
+9ze6r22cB9PjJ8Ox0QRNZeDJrfc=\n\
+-----END CERTIFICATE REQUEST-----";
+    assert!(base().with_csr(csr).is_ok());
     let too_long = format!("-----BEGIN CERTIFICATE REQUEST-----{}", "A".repeat(10_001));
     assert!(base().with_csr(&too_long).is_err());
 

@@ -19,6 +19,20 @@ fn certificate_id() -> CertificateId {
     CertificateId::new(9).unwrap()
 }
 
+const CSR: &str = "-----BEGIN CERTIFICATE REQUEST-----\n\
+MIHRMHgCAQAwFjEUMBIGA1UEAwwLZXhhbXBsZS5jb20wWTATBgcqhkjOPQIBBggq\n\
+hkjOPQMBBwNCAASnomqdhePywSDnoxxGceZanZoUVN+xr37+NXVIZoYa3RZfX4Rh\n\
+gItWma5hoUiROBxc+Grb4SNOjH8j2vkTniT2oAAwCgYIKoZIzj0EAwIDSQAwRgIh\n\
+ALNr10T/I0j0TCKeKWXCsmtLIZnk4kpQSjG01LbgkvbhAiEAuz/15JiDHOIK/Ddg\n\
+9ze6r22cB9PjJ8Ox0QRNZeDJrfc=\n\
+-----END CERTIFICATE REQUEST-----";
+
+const PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgokfqjRBap4cOVCS7\n\
+0UQY+cUT1VgOoKQbQrwyL2ExXuWhRANCAASnomqdhePywSDnoxxGceZanZoUVN+x\n\
+r37+NXVIZoYa3RZfX4RhgItWma5hoUiROBxc+Grb4SNOjH8j2vkTniT2\n\
+-----END PRIVATE KEY-----";
+
 fn order() -> CertificateOrder {
     CertificateOrder::new(17)
         .unwrap()
@@ -76,7 +90,7 @@ async fn order_with_a_csr_and_email_validation() {
 
     let request = CertificateOrder::new(17)
         .unwrap()
-        .with_csr("-----BEGIN CERTIFICATE REQUEST-----\nMIIB\n-----END CERTIFICATE REQUEST-----")
+        .with_csr(CSR)
         .unwrap()
         .with_validation(
             CertificateValidationMethod::Email,
@@ -162,7 +176,7 @@ async fn certificate_commands_send_their_ids() {
         .update_certificate_order(
             &CertificateUpdate::new(certificate_id())
                 .unwrap()
-                .with_csr("-----BEGIN CERTIFICATE REQUEST-----\nMIIB")
+                .with_csr(CSR)
                 .unwrap(),
         )
         .await
@@ -197,10 +211,7 @@ async fn reissue_renew_and_settings_commands() {
 
     let client = client(transport.clone());
     let reissued = client
-        .reissue_certificate(
-            certificate_id(),
-            "-----BEGIN CERTIFICATE REQUEST-----\nMIIB",
-        )
+        .reissue_certificate(certificate_id(), CSR)
         .await
         .unwrap();
     assert_eq!(reissued.certificate_id, Some(10));
@@ -311,7 +322,7 @@ async fn certificate_validation_short_circuits() {
         .await
         .is_err());
     assert!(client
-        .reissue_certificate(certificate_id(), "-----BEGIN PRIVATE KEY-----\nMIIB")
+        .reissue_certificate(certificate_id(), PRIVATE_KEY)
         .await
         .is_err());
     assert!(client
@@ -354,13 +365,12 @@ fn certificate_order_builders_validate_before_the_wire() {
 
     // A private key is never a CSR; a CSR is never empty or huge.
     assert!(base().with_csr("").is_err());
-    assert!(base()
-        .with_csr("-----BEGIN PRIVATE KEY-----\nMIIB")
-        .is_err());
+    assert!(base().with_csr(PRIVATE_KEY).is_err());
+    assert!(base().with_csr(PRIVATE_KEY.to_ascii_lowercase()).is_err());
+    assert!(base().with_csr(format!("{CSR}\n{PRIVATE_KEY}")).is_err());
     assert!(base().with_csr("x".repeat(10_001)).is_err());
-    assert!(base()
-        .with_csr("-----BEGIN CERTIFICATE REQUEST-----\nMIIB")
-        .is_ok());
+    assert!(base().with_csr(CSR).is_ok());
+    assert!(base().with_csr("not a pem certificate request").is_err());
 
     // A product id must be positive.
     assert!(CertificateOrder::new(0).is_err());
@@ -730,10 +740,7 @@ async fn every_other_billed_order_command_keeps_the_id_too() {
     let client = client(transport.clone());
 
     let reissue = client
-        .reissue_certificate(
-            certificate_id(),
-            "-----BEGIN CERTIFICATE REQUEST-----\nMIIB",
-        )
+        .reissue_certificate(certificate_id(), CSR)
         .await
         .unwrap_err();
     let renew = client
@@ -748,7 +755,7 @@ async fn every_other_billed_order_command_keeps_the_id_too() {
         .update_certificate_order(
             &CertificateUpdate::new(certificate_id())
                 .unwrap()
-                .with_csr("-----BEGIN CERTIFICATE REQUEST-----\nMIIB")
+                .with_csr(CSR)
                 .unwrap(),
         )
         .await
