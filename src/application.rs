@@ -207,7 +207,8 @@ pub struct Application {
 /// The answer carries the applications on this page plus, usually, a total for
 /// the whole query. Compare that total with the page length, or call
 /// [`ApplicationListPage::has_more`], to tell whether more rows exist than this
-/// page returned. [`InwxClient::list_all_applications`] walks every page.
+/// page returned. Rows without an `id` are skipped: they would be handles the
+/// caller cannot use. [`InwxClient::list_all_applications`] walks every page.
 ///
 /// ```
 /// use inwx_client::ApplicationListPage;
@@ -220,14 +221,62 @@ pub struct Application {
 /// assert!(page.has_more());
 /// # Ok::<(), serde_json::Error>(())
 /// ```
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ApplicationListPage {
     /// Total number of applications matching the query, when the API reports one.
-    #[serde(default, alias = "total", deserialize_with = "de::opt_i64")]
     pub count: Option<i64>,
     /// The applications on this page.
-    #[serde(default, rename = "application", deserialize_with = "de::rows")]
     pub applications: Vec<Application>,
+    /// Number of rows received before id-less entries were skipped.
+    received: usize,
+}
+
+impl<'de> Deserialize<'de> for ApplicationListPage {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let mut fields = Map::<String, Value>::deserialize(deserializer)?;
+        let count = fields
+            .get("count")
+            .or_else(|| fields.get("total"))
+            .and_then(crate::types::opt_i64_value);
+        let rows = fields.remove("application");
+        let (applications, received) = application_rows(rows.as_ref());
+        Ok(Self {
+            count,
+            applications,
+            received,
+        })
+    }
+}
+
+/// Reads `application.create` and `application.info` answers, requiring the id
+/// the caller needs for later calls.
+fn required_application(method: &'static str, data: Value) -> Result<Application> {
+    let application: Application = serde_json::from_value(data).map_err(Error::from)?;
+    if application.id.is_none() {
+        return Err(Error::MissingField {
+            method,
+            field: "id",
+        });
+    }
+    Ok(application)
+}
+
+/// Reads `application.list` rows while dropping entries whose missing id would
+/// leave an unusable all-default [`Application`]. The row count is kept for the
+/// pagination walker, so a skipped row does not make a full page look short.
+fn application_rows(value: Option<&Value>) -> (Vec<Application>, usize) {
+    let rows = match value {
+        Some(Value::Array(rows)) => rows.clone(),
+        Some(single @ Value::Object(_)) => vec![single.clone()],
+        _ => Vec::new(),
+    };
+    let received = rows.len();
+    let applications = rows
+        .into_iter()
+        .filter_map(|row| serde_json::from_value(row).ok())
+        .filter(|application: &Application| application.id.is_some())
+        .collect();
+    (applications, received)
 }
 
 impl ApplicationListPage {
@@ -274,7 +323,7 @@ impl ApplicationListPage {
     #[must_use]
     pub fn has_more(&self) -> bool {
         self.count
-            .is_some_and(|count| i64::try_from(self.applications.len()).unwrap_or(i64::MAX) < count)
+            .is_some_and(|count| i64::try_from(self.received).unwrap_or(i64::MAX) < count)
     }
 }
 
@@ -301,8 +350,13 @@ impl Page for ApplicationListPage {
         self.applications.len()
     }
 
+    fn received_len(&self) -> usize {
+        self.received
+    }
+
     fn truncate_to(&mut self, len: usize) {
         self.applications.truncate(len);
+        self.received = self.received.min(len);
     }
 
     fn into_items(self) -> Vec<Application> {
@@ -1124,10 +1178,11 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// The usual transport and API errors; `2104` on a billing failure.
+    /// [`Error::MissingField`] when the answer carries no `id`, plus the usual
+    /// transport and API errors; `2104` on a billing failure.
     pub async fn create_application(&self, request: &ApplicationCreate) -> Result<Application> {
         let data = self.call("application.create", request.params()).await?;
-        serde_json::from_value(data).map_err(Error::from)
+        required_application("application.create", data)
     }
 
     /// Withdraws an application (`application.delete`).
@@ -1175,8 +1230,9 @@ impl<T: Transport> InwxClient<T> {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] for a non-positive id, plus the usual transport and
-    /// API errors — `2303` when the application does not exist.
+    /// [`Error::Validation`] for a non-positive id, [`Error::MissingField`]
+    /// when the answer carries no `id`, plus the usual transport and API errors
+    /// — `2303` when the application does not exist.
     pub async fn application_info(&self, application_id: i64) -> Result<Application> {
         validate_id("application.id", application_id)?;
         let data = self
@@ -1185,7 +1241,7 @@ impl<T: Transport> InwxClient<T> {
                 json!({ "applicationId": application_id }),
             )
             .await?;
-        serde_json::from_value(data).map_err(Error::from)
+        required_application("application.info", data)
     }
 
     /// Lists one page of applications (`application.list`).
@@ -1446,6 +1502,18 @@ mod tests {
             serde_json::from_str(r#"{"count":1,"application":null}"#).unwrap();
         assert!(null_rows.is_empty());
         assert!(null_rows.has_more());
+    }
+
+    #[test]
+    fn a_list_page_skips_rows_without_an_id_but_still_counts_them() {
+        let page: ApplicationListPage = serde_json::from_str(
+            r#"{"count":3,"application":[{"id":1},{"status":"PENDING"},{"id":3}]}"#,
+        )
+        .unwrap();
+        assert_eq!(page.len(), 2);
+        assert_eq!(page.received_len(), 3);
+        assert_eq!(page.total(), Some(3));
+        assert!(!page.has_more());
     }
 
     #[test]
