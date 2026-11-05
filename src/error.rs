@@ -356,6 +356,40 @@ pub enum Error {
         actual: String,
     },
 
+    /// A `nameserver.info` answer does not carry as many records as its
+    /// `count` field declares.
+    ///
+    /// The API reports the zone size next to the record list. If a transport or
+    /// proxy cut the answer short, the list deserialises into fewer records and
+    /// would otherwise look like a complete zone. The two counts are both known
+    /// after parsing, so this is a certain, terminal failure rather than
+    /// [`Error::Uncertain`].
+    ///
+    /// ```
+    /// use inwx_client::Error;
+    ///
+    /// let err = Error::record_count_mismatch("nameserver.info", 3, 2);
+    /// assert!(matches!(
+    ///     err,
+    ///     Error::RecordCountMismatch {
+    ///         declared: 3,
+    ///         actual: 2,
+    ///         ..
+    ///     }
+    /// ));
+    /// assert!(!err.is_retryable());
+    /// assert!(!err.is_uncertain());
+    /// ```
+    #[error("`{method}` declared {declared} records but the answer carries {actual}")]
+    RecordCountMismatch {
+        /// The method whose answer contradicted itself.
+        method: &'static str,
+        /// Number of records the answer declared, from the `count` field.
+        declared: i64,
+        /// Number of records the decoded answer actually carries.
+        actual: usize,
+    },
+
     /// The command ran and its answer carried no error, yet the answer does not
     /// name the result the caller needs: a `document.upload` that came back
     /// without a usable `documentId`, for example.
@@ -733,6 +767,28 @@ impl Error {
             field,
             expected: expected.into(),
             actual: actual.into(),
+        }
+    }
+
+    /// Builds an [`Error::RecordCountMismatch`] for an answer whose record list
+    /// is shorter than the `count` it declared.
+    ///
+    /// ```
+    /// use inwx_client::Error;
+    ///
+    /// let err = Error::record_count_mismatch("nameserver.info", 10, 2);
+    /// assert_eq!(
+    ///     err.to_string(),
+    ///     "`nameserver.info` declared 10 records but the answer carries 2",
+    /// );
+    /// assert!(!err.is_retryable());
+    /// ```
+    #[must_use]
+    pub fn record_count_mismatch(method: &'static str, declared: i64, actual: usize) -> Self {
+        Self::RecordCountMismatch {
+            method,
+            declared,
+            actual,
         }
     }
 

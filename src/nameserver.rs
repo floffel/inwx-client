@@ -76,6 +76,52 @@ impl ZoneInfo {
     pub fn is_master(&self) -> bool {
         self.zone_type.as_deref() == Some("MASTER")
     }
+
+    /// The zone's records after checking them against the API-reported
+    /// `count`.
+    ///
+    /// `nameserver.info` returns the number of records next to the record list.
+    /// A response truncated in transit or capped by an intermediary can still
+    /// deserialize, so this method refuses to hand back a short list as if it
+    /// were the whole zone. A missing `count` is not a claim and therefore not a
+    /// mismatch; the records are returned unchanged.
+    ///
+    /// ```
+    /// use inwx_client::ZoneInfo;
+    ///
+    /// let zone: ZoneInfo = serde_json::from_str(
+    ///     r#"{"domain":"example.com","count":1,"record":[
+    ///         {"id":"1","name":"@","type":"A","content":"203.0.113.7"}
+    ///     ]}"#,
+    /// )?;
+    /// assert_eq!(zone.checked_records()?.len(), 1);
+    ///
+    /// let short: ZoneInfo = serde_json::from_str(
+    ///     r#"{"domain":"example.com","count":2,"record":[
+    ///         {"id":"1","name":"@","type":"A","content":"203.0.113.7"}
+    ///     ]}"#,
+    /// )?;
+    /// assert!(short.checked_records().is_err());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::RecordCountMismatch`] when `count` reports more records than the
+    /// decoded list carries.
+    pub fn checked_records(&self) -> Result<&[DnsRecord]> {
+        if let Some(count) = self.count {
+            let actual = self.records.len();
+            if i64::try_from(actual).unwrap_or(i64::MAX) < count {
+                return Err(Error::record_count_mismatch(
+                    "nameserver.info",
+                    count,
+                    actual,
+                ));
+            }
+        }
+        Ok(&self.records)
+    }
 }
 
 /// Decodes an optional IP address, accepting the same scalar spellings as
@@ -471,6 +517,7 @@ impl<T: Transport> InwxClient<T> {
                 zone.domain.as_str(),
             ));
         }
+        zone.checked_records()?;
         Ok(zone)
     }
 
@@ -749,6 +796,35 @@ mod tests {
             r#"{"domain":"x.de","masterIp":"198.51.100.7/32"}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn zone_info_checks_the_declared_record_count() {
+        let exact: ZoneInfo = serde_json::from_str(
+            r#"{"domain":"x.de","count":1,"record":[
+                {"id":"1","name":"@","type":"A","content":"203.0.113.7"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(exact.checked_records().unwrap().len(), 1);
+
+        let short: ZoneInfo = serde_json::from_str(
+            r#"{"domain":"x.de","count":2,"record":[
+                {"id":"1","name":"@","type":"A","content":"203.0.113.7"}
+            ]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            short.checked_records(),
+            Err(Error::RecordCountMismatch {
+                method: "nameserver.info",
+                declared: 2,
+                actual: 1,
+            })
+        ));
+
+        let unchecked: ZoneInfo = serde_json::from_str(r#"{"domain":"x.de","record":[]}"#).unwrap();
+        assert_eq!(unchecked.checked_records().unwrap(), []);
     }
 
     #[test]
