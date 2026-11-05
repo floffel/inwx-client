@@ -562,7 +562,13 @@ charged — not a secret, so nothing in this module is redacted; the transfer-co
 secret is `AuthCode`. Because `create` is a paid, non-idempotent order it is not
 in `READ_ONLY_METHODS`: a 429, a 5xx or a mid-flight timeout answers
 `Error::Uncertain` after a single attempt, and the caller checks the state
-before ordering again.
+before ordering again. The confirmation
+itself is read permissively — unknown keys ignored, both spellings accepted, any
+single field may be absent — but an answer that yields none of the documented
+fields (an empty object, a scalar, a value no field decodes) is `Error::Ambiguous`
+rather than an empty `Ok`: the order was placed and paid for, so the caller is
+told the confirmation could not be read instead of being handed a result with
+nothing in it. That outcome is uncertain and is never replayed either.
 
 ### `customer.*` (`src/customer.rs`)
 

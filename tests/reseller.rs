@@ -410,6 +410,76 @@ async fn a_testing_order_sends_the_flag_and_a_real_one_does_not() {
 }
 
 #[tokio::test]
+async fn a_paid_order_without_a_readable_confirmation_is_an_ambiguous_error() {
+    // The order was placed, but the answer carries none of the documented
+    // fields: a paid creation must not come back as `Ok` with nothing in it.
+    let transport = MockTransport::new();
+    transport.ok(json!({ "unknown": 1 }));
+
+    let error = client(transport.clone())
+        .create_auth_info2(&AuthInfo2Order::new(domain("example.de"), false))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            Error::Ambiguous {
+                method: "authinfo2.create",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert!(error.is_uncertain(), "{error:?}");
+    assert!(!error.is_retryable(), "{error:?}");
+    // The billable order is not replayed.
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
+async fn a_paid_order_with_an_unreadable_answer_is_an_ambiguous_error() {
+    // A present-but-unreadable body — here a bare scalar where the confirmation
+    // object belongs — is the same certainty question as a missing one.
+    let transport = MockTransport::new();
+    transport.ok(json!("not-an-object"));
+
+    let error = client(transport.clone())
+        .create_auth_info2(&AuthInfo2Order::new(domain("example.de"), false))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            Error::Ambiguous {
+                method: "authinfo2.create",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert!(error.is_uncertain(), "{error:?}");
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
+async fn a_sparse_but_readable_confirmation_still_succeeds() {
+    // One documented field is enough: the decode stays permissive about the
+    // rest, and unknown keys do not turn a good order into an error.
+    let transport = MockTransport::new();
+    transport.ok(json!({ "product": "DE-AuthInfo2", "brandNew": true }));
+
+    let result = client(transport.clone())
+        .create_auth_info2(&AuthInfo2Order::new(domain("example.de"), false))
+        .await
+        .unwrap();
+
+    assert_eq!(result.product.as_deref(), Some("DE-AuthInfo2"));
+    assert_eq!(transport.call_count(), 1);
+}
+
+#[tokio::test]
 async fn auth_info2_price_sends_no_parameters() {
     let transport = MockTransport::new();
     transport.ok(json!({ "netPrice": "1.20", "currency": "EUR" }));

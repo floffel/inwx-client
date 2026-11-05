@@ -134,6 +134,12 @@ impl AuthInfo2Order {
 /// documented `float`s and arrive as numbers or as numeric strings; both spell-
 /// ings of each key (`net_price` and `netPrice`) are accepted.
 ///
+/// Deserializing this type is that permissive byte-for-byte, but the client
+/// does not hand it back that way for a placed order: see
+/// [`create_auth_info2`](crate::InwxClient::create_auth_info2) for why a
+/// billable answer that reads back no documented field at all is an error
+/// instead of an empty `Ok`.
+///
 /// The struct is `#[non_exhaustive]`: new fields can be modelled later without
 /// breaking downstream code, and callers build values with [`Default`] or
 /// deserialization.
@@ -169,6 +175,44 @@ pub struct AuthInfo2OrderResult {
     /// What the API has to say about the order.
     #[serde(default, deserialize_with = "de::opt_string")]
     pub message: Option<String>,
+}
+
+/// Reads the confirmation of a placed `authinfo2.create` order.
+///
+/// `authinfo2.create` is the one call in this module that costs money and
+/// cannot be replayed, so the confirmation *is* what the caller paid for. The
+/// decode stays permissive about unknown keys, both spellings of a documented
+/// key and any single documented field that is absent; but an answer that
+/// yields none of the documented fields at all — an empty object, a shape that
+/// is not an object, or one whose every documented value is unrepresentable —
+/// must not be flattened into an `Ok` whose fields are all `None`. That reads
+/// as a successful order with nothing to show, which is exactly the silent loss
+/// this path has to refuse: the order exists, so the error is
+/// [`Error::Ambiguous`] (uncertain, never retried) and names the method.
+fn read_create_result(data: Value) -> Result<AuthInfo2OrderResult> {
+    let result: AuthInfo2OrderResult = serde_json::from_value(data).map_err(|source| {
+        Error::ambiguous(
+            "authinfo2.create",
+            "the answer could not be read as an order confirmation, so the result of the \
+             order cannot be inspected; check the current state of the domain before \
+             ordering again",
+        )
+        .with_source(source)
+    })?;
+    if result.product.is_none()
+        && result.net_price.is_none()
+        && result.price.is_none()
+        && result.currency.is_none()
+        && result.message.is_none()
+    {
+        return Err(Error::ambiguous(
+            "authinfo2.create",
+            "the answer carries none of the documented order fields, so the result of the \
+             order cannot be inspected; check the current state of the domain before \
+             ordering again",
+        ));
+    }
+    Ok(result)
 }
 
 /// The answer of `authinfo2.getprice`: what an `AuthInfo2` order costs.
@@ -240,10 +284,13 @@ impl<T: Transport> InwxClient<T> {
     /// uncertain — the order may have been placed), [`Error::HttpUncertain`] for
     /// a transient HTTP answer, and [`Error::Uncertain`] when the request was
     /// written but the answer never arrived — those outcomes are never replayed,
-    /// because the order may already have been placed.
+    /// because the order may already have been placed. [`Error::Ambiguous`] when
+    /// the answer did arrive but carries no readable order confirmation: that
+    /// outcome is uncertain too and is likewise never replayed, because the
+    /// order it names may already have been placed.
     pub async fn create_auth_info2(&self, order: &AuthInfo2Order) -> Result<AuthInfo2OrderResult> {
         let data = self.call("authinfo2.create", order.params()).await?;
-        serde_json::from_value(data).map_err(Error::from)
+        read_create_result(data)
     }
 
     /// What an `AuthInfo2` order would cost (`authinfo2.getprice`).
@@ -358,5 +405,47 @@ mod tests {
             serde_json::from_str(r#"{"product":null,"net_price":null}"#).unwrap();
         assert_eq!(null.product, None);
         assert_eq!(null.net_price, None);
+    }
+
+    #[test]
+    fn a_created_order_must_carry_a_readable_confirmation() {
+        // A usable confirmation passes, however sparse: one documented field is
+        // enough, and unknown keys stay ignored.
+        let sparse =
+            read_create_result(json!({ "product": "DE-AuthInfo2", "brandNew": 1 })).unwrap();
+        assert_eq!(sparse.product.as_deref(), Some("DE-AuthInfo2"));
+
+        let full = read_create_result(json!({
+            "product": "DE-AuthInfo2",
+            "net_price": "1.20",
+            "price": 1.43,
+            "currency": "EUR",
+            "message": "order placed",
+        }))
+        .unwrap();
+        assert_eq!(full.net_price, Some(1.2));
+        assert_eq!(full.price, Some(1.43));
+
+        // Nothing documented at all is not an `Ok` with every field `None`: the
+        // billable order exists, so the outcome is uncertain and never replayed.
+        for payload in [json!({}), json!({ "unknown": 1 }), json!([])] {
+            let error = read_create_result(payload).unwrap_err();
+            assert!(error.is_uncertain(), "{error:?}");
+            assert!(!error.is_retryable(), "{error:?}");
+            assert!(matches!(
+                &error,
+                Error::Ambiguous {
+                    method: "authinfo2.create",
+                    ..
+                }
+            ));
+            assert!(error.to_string().contains("authinfo2.create"));
+        }
+
+        // A body that is not even an object stays an error too, with the parse
+        // failure kept walkable as the cause.
+        let not_an_object = read_create_result(Value::String("nope".to_owned())).unwrap_err();
+        assert!(not_an_object.is_uncertain(), "{not_an_object:?}");
+        assert!(std::error::Error::source(&not_an_object).is_some());
     }
 }
