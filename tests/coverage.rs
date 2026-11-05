@@ -879,8 +879,8 @@ fn reseller_value_types_run_their_trait_impls() {
         serde_json::to_string(&application_type).unwrap(),
         "\"DOMAIN-TRANSFER\""
     );
-    let carried: ApplicationType = serde_json::from_str("\"whatever else\"").unwrap();
-    assert_eq!(carried.as_str(), "WHATEVER ELSE");
+    let carried: ApplicationType = serde_json::from_str("\"whatever_else\"").unwrap();
+    assert_eq!(carried.as_str(), "WHATEVER_ELSE");
 
     // `AuthInfo2Order`: accessors, `params`, `Debug`, `Clone`, `PartialEq`, and
     // the two permissive answer types.

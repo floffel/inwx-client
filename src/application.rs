@@ -24,6 +24,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{json, Map, Value};
 
@@ -118,11 +119,14 @@ impl Serialize for ApplicationType {
     }
 }
 
-/// Decoded permissively: any string is carried, upper-cased.
+/// Decoded permissively: any legal token is carried, upper-cased.
+///
+/// Unknown values are kept so a response can carry a type this crate does not
+/// name yet. Values that could not be sent back as a request token are rejected.
 impl<'de> Deserialize<'de> for ApplicationType {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
         let raw = String::deserialize(deserializer)?;
-        Ok(Self(raw.trim().to_ascii_uppercase()))
+        Self::parse(&raw).map_err(D::Error::custom)
     }
 }
 
@@ -1316,6 +1320,28 @@ mod tests {
         let ok = "A".repeat(64);
         assert_eq!(ApplicationType::parse(&ok).unwrap().as_str(), ok.as_str());
         assert!(ApplicationType::parse(&format!("A{ok}")).is_err());
+    }
+
+    #[test]
+    fn deserialized_type_tokens_are_legal_to_resend() {
+        let unknown: Application = serde_json::from_str(r#"{"type":"brand_new"}"#).unwrap();
+        assert_eq!(
+            unknown
+                .application_type
+                .map(|application_type| application_type.to_string()),
+            Some("BRAND_NEW".to_owned())
+        );
+
+        let ok = "A".repeat(64);
+        let inside: Application = serde_json::from_str(&format!(r#"{{"type":"{ok}"}}"#)).unwrap();
+        assert_eq!(inside.application_type.unwrap().as_str(), ok.as_str());
+
+        let too_long = format!("{ok}A");
+        assert!(
+            serde_json::from_str::<Application>(&format!(r#"{{"type":"{too_long}"}}"#)).is_err()
+        );
+        assert!(serde_json::from_str::<Application>(r#"{"type":"bad\nvalue"}"#).is_err());
+        assert!(serde_json::from_str::<Application>(r#"{"type":"invalidé"}"#).is_err());
     }
 
     #[test]
