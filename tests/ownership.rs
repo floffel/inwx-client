@@ -286,6 +286,46 @@ async fn cancel_transfer_and_transfer_out_send_the_domain_and_testing_state() {
 }
 
 #[test]
+fn an_acknowledgement_cannot_authorise_another_domain() {
+    // An intent for a.de paired with a request meant for b.de is one of the
+    // two mistakes the module promises to catch locally; the request must be
+    // rejected before it can ever reach the client.
+    let intent = Irreversible::acknowledge(ActionKind::Transfer, &domain("a.de"));
+    assert!(TransferRequest::builder(intent.clone())
+        .for_domain(domain("b.de"))
+        .call()
+        .is_err());
+    assert!(TransferRequest::new_for_domain(intent, domain("b.de")).is_err());
+
+    let intent = Irreversible::acknowledge(ActionKind::Trade, &domain("a.de"));
+    assert!(TradeRequest::builder(intent)
+        .for_domain(domain("b.de"))
+        .with_registrant(Handle::new(1201).unwrap())
+        .build()
+        .is_err());
+
+    let intent = Irreversible::acknowledge(ActionKind::Push, &domain("a.de"));
+    assert!(PushRequest::builder(intent)
+        .for_domain(domain("b.de"))
+        .build()
+        .is_err());
+
+    let intent = Irreversible::acknowledge(ActionKind::Restore, &domain("a.de"));
+    assert!(RestoreRequest::builder(intent)
+        .for_domain(domain("b.de"))
+        .build()
+        .is_err());
+
+    let intent = Irreversible::acknowledge(ActionKind::TransferCancel, &domain("a.de"));
+    assert!(TransferCancelRequest::new_for_domain(intent, domain("b.de")).is_err());
+
+    let intent = Irreversible::acknowledge(ActionKind::TransferOut, &domain("a.de"));
+    assert!(
+        TransferOutRequest::new_for_domain(intent, domain("b.de"), TransferAnswer::Ack).is_err()
+    );
+}
+
+#[test]
 fn a_mismatched_acknowledgement_never_reaches_the_wire() {
     let transport = MockTransport::new();
 
