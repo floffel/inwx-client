@@ -58,7 +58,7 @@ pub struct ZoneInfo {
     #[serde(default, deserialize_with = "de::opt_i64")]
     pub count: Option<i64>,
     /// The records in the zone.
-    #[serde(default, rename = "record")]
+    #[serde(default, rename = "record", deserialize_with = "de::vec_or_null")]
     pub records: Vec<DnsRecord>,
 }
 
@@ -773,6 +773,38 @@ mod tests {
         let zone: ZoneInfo = serde_json::from_str(r#"{"domain":"x.de"}"#).unwrap();
         assert!(!zone.is_master());
         assert_eq!(zone.records.len(), 0);
+    }
+
+    #[test]
+    fn zone_info_treats_null_records_as_an_empty_zone() {
+        let zone: ZoneInfo = serde_json::from_str(r#"{"domain":"x.de","record":null}"#).unwrap();
+        assert_eq!(zone.records.len(), 0);
+    }
+
+    #[test]
+    fn zone_info_accepts_absent_null_and_empty_record_lists() {
+        for spelling in [
+            r#"{"domain":"x.de"}"#,
+            r#"{"domain":"x.de","record":null}"#,
+            r#"{"domain":"x.de","record":[]}"#,
+        ] {
+            let zone: ZoneInfo = serde_json::from_str(spelling).unwrap();
+            assert!(zone.records.is_empty(), "{spelling}");
+            assert!(zone.checked_records().unwrap().is_empty(), "{spelling}");
+        }
+    }
+
+    #[test]
+    fn zone_list_accepts_absent_null_and_empty_domain_lists() {
+        for spelling in [
+            r#"{"count":0}"#,
+            r#"{"count":0,"domains":null}"#,
+            r#"{"count":0,"domains":[]}"#,
+        ] {
+            let page: ZoneListPage = serde_json::from_str(spelling).unwrap();
+            assert!(page.is_empty(), "{spelling}");
+            assert_eq!(page.unparsed.len(), 0, "{spelling}");
+        }
     }
 
     #[test]
