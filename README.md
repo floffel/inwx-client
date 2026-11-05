@@ -350,10 +350,17 @@ cargo test --no-default-features  # the same, without reqwest/tokio
 cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --no-deps --all-features
 cargo llvm-cov --no-default-features --summary-only --fail-under-lines 95
+cargo check --manifest-path fuzz/Cargo.toml --bins
 cargo +nightly fuzz run parse_response
 cargo +nightly fuzz run parse_name
 cargo +nightly fuzz run parse_retry_after
 ```
+
+The fuzz targets live in their own cargo workspace under `fuzz/`, so the root
+`cargo clippy`, `cargo test` and `cargo doc` commands do not compile them. Any
+public API rename must be mirrored in `fuzz/fuzz_targets/`; run
+`cargo check --manifest-path fuzz/Cargo.toml --bins` locally, or the CI
+`fuzz-build` job is the first thing that sees the breakage.
 
 * **Unit** — permissive scalars, cookie collection, retry backoff, record and
   contact validation, error classification.
