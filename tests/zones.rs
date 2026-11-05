@@ -650,6 +650,36 @@ async fn create_record_set_refuses_an_empty_set() {
     assert_eq!(transport.call_count(), 0);
 }
 
+#[tokio::test]
+async fn create_record_set_revalidates_unbound_sets_for_the_zone_before_sending() {
+    let transport = MockTransport::new();
+    let set =
+        RecordSet::from_records(vec![RecordSpec::txt("www", "v=spf1 -all").unwrap()]).unwrap();
+    assert_eq!(set.len(), 1);
+
+    let transport_ok = MockTransport::new();
+    transport_ok.ok(json!({ "id": "1" }));
+    let ids = client(transport_ok.clone())
+        .create_record_set(&domain("example.com"), &set)
+        .await
+        .unwrap();
+    assert_eq!(ids.len(), 1);
+
+    let apex_cname = RecordSet::from_records(vec![RecordSpec::cname(
+        "example.com",
+        &host("edge.example.net"),
+    )
+    .unwrap()])
+    .unwrap();
+    let error = client_without_retries(transport.clone())
+        .create_record_set(&domain("example.com"), &apex_cname)
+        .await
+        .unwrap_err();
+
+    assert!(error.is_validation());
+    assert_eq!(transport.call_count(), 0);
+}
+
 #[test]
 fn record_set_rejects_the_combinations_dns_forbids() {
     // Apex CNAME, however it is spelled: refused either by the spec (empty
@@ -693,6 +723,34 @@ fn record_set_rejects_the_combinations_dns_forbids() {
     assert!(set
         .push(RecordSpec::cname("shop", &host("b.example.net")).unwrap())
         .is_err());
+}
+
+#[test]
+fn record_set_zone_binding_normalises_zone_name_apex_spellings() {
+    let zone = domain("example.com");
+    let mut set = RecordSet::for_zone(&zone).unwrap();
+
+    let apex_cname = RecordSpec::cname("example.com", &host("edge.example.net")).unwrap();
+    assert!(set.push(apex_cname).is_err());
+
+    let mut set = RecordSet::for_zone(&zone).unwrap();
+    set.push(RecordSpec::txt("example.com", "v=spf1 -all").unwrap())
+        .unwrap();
+    let apex_cname = RecordSpec::cname("@", &host("edge.example.net")).unwrap();
+    assert!(set.push(apex_cname).is_err());
+
+    let mut set = RecordSet::for_zone(&zone).unwrap();
+    set.push(RecordSpec::txt("EXAMPLE.COM", "v=spf1 -all").unwrap())
+        .unwrap();
+    let apex_cname = RecordSpec::cname("@", &host("edge.example.net")).unwrap();
+    assert!(set.push(apex_cname).is_err());
+
+    // A relative name that only looks like the zone name elsewhere is not apex.
+    let other_zone = domain("tenant.example.com");
+    let mut set = RecordSet::for_zone(&other_zone).unwrap();
+    set.push(RecordSpec::cname("example.com", &host("edge.example.net")).unwrap())
+        .unwrap();
+    assert_eq!(set.len(), 1);
 }
 
 #[test]
