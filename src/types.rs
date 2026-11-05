@@ -1831,7 +1831,7 @@ pub(crate) fn parse_rows<T: serde::de::DeserializeOwned>(data: &Value, key: &str
 /// the docs but occasionally come back as `"12.50"`. These helpers accept both
 /// shapes instead of failing the whole response.
 pub(crate) mod de {
-    use serde::de::Deserializer;
+    use serde::de::{Deserializer, Error as _};
     use serde::Deserialize;
     use serde_json::Value;
 
@@ -1952,6 +1952,29 @@ pub(crate) mod de {
             Value::String(text) if !text.is_empty() => vec![text],
             _ => Vec::new(),
         })
+    }
+
+    /// A sequence field, mapping `null` to an empty list.
+    ///
+    /// Absent fields are already covered by `#[serde(default)]`; this helper
+    /// makes an explicit JSON `null` behave the same way while preserving the
+    /// normal row errors for anything else.
+    pub(crate) fn vec_or_null<'de, T, D>(deserializer: D) -> std::result::Result<Vec<T>, D::Error>
+    where
+        T: serde::de::DeserializeOwned,
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        match value {
+            Value::Null => Ok(Vec::new()),
+            Value::Array(entries) => entries
+                .into_iter()
+                .map(|entry| serde_json::from_value(entry).map_err(D::Error::custom))
+                .collect(),
+            other => Err(D::Error::custom(format!(
+                "expected a sequence or null, got {other}"
+            ))),
+        }
     }
 
     /// The rows of a list field that is either an array or a single object,
