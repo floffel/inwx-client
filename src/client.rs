@@ -1246,6 +1246,9 @@ const READ_ONLY_METHODS: &[&str] = &[
     "accounting.listinvoices",
     "accounting.lockedfunds",
     "accounting.log",
+    "application.check",
+    "application.info",
+    "application.list",
     "authinfo2.getprice",
     "certificate.getproduct",
     "certificate.info",
@@ -1305,6 +1308,9 @@ const READ_ONLY_METHODS: &[&str] = &[
 /// assert!(is_read_only_method("domain.info"));
 /// assert!(is_read_only_method("  DOMAIN.LIST  "));
 /// assert!(!is_read_only_method("domain.create"));
+/// // Reading an application does not file or change anything.
+/// assert!(is_read_only_method("application.info"));
+/// assert!(!is_read_only_method("application.create"));
 /// // One character short of a known method is still unknown.
 /// assert!(!is_read_only_method("domain.inf"));
 /// ```
@@ -1824,6 +1830,18 @@ mod tests {
         assert!(!is_read_only_method(""));
         assert!(!is_read_only_method("   "));
         assert!(!is_read_only_method("list"));
+    }
+
+    #[test]
+    fn application_reads_are_replayable_but_writes_are_not() {
+        // Reading an application cannot file or change anything, so a timeout
+        // may be replayed. Filing, changing or withdrawing one may not.
+        assert!(is_read_only_method("application.check"));
+        assert!(is_read_only_method("application.info"));
+        assert!(is_read_only_method("application.list"));
+        assert!(!is_read_only_method("application.create"));
+        assert!(!is_read_only_method("application.update"));
+        assert!(!is_read_only_method("application.delete"));
     }
 
     #[test]
