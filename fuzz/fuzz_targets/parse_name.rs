@@ -1,6 +1,10 @@
-//! Fuzz target: DNS name parsing must never panic, whatever bytes arrive, and
-//! whatever it accepts must already be in the canonical ASCII form the client
-//! puts on the wire.
+//! Fuzz target: the string parsers must never panic, whatever bytes arrive, and
+//! whatever they accept must already be in the canonical form the client puts
+//! on the wire.
+//!
+//! Two layers of hand-rolled tokenizers are covered: `DomainName`/`Hostname`
+//! (labels, punycode-adjacent paths, IDN) and `RecordSpec::new` (record name and
+//! content, split from a caller's input, not from the wire).
 //!
 //! Run with `cargo +nightly fuzz run parse_name` (see the README for the
 //! corpus and how to reproduce a crash).
@@ -9,7 +13,9 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use inwx_client::{DomainName, Hostname, MAX_DOMAIN_LEN, MAX_LABEL_LEN};
+use inwx_client::{
+    DomainName, Hostname, RecordSet, RecordSpec, RecordType, MAX_DOMAIN_LEN, MAX_LABEL_LEN,
+};
 
 /// Everything the crate promises about a name it accepted.
 fn assert_canonical(ascii: &str) {
@@ -54,5 +60,17 @@ fuzz_target!(|data: &[u8]| {
         assert_eq!(domain.as_deref(), Some(host.as_str()), "domain {text:?}");
     } else {
         assert!(domain.is_none(), "{text:?} was accepted without a TLD");
+    }
+
+    // The record layer runs the same caller input through its validated
+    // constructor: a name and a content, checked against every record type.
+    // `RecordSpec::new` must never panic, and a spec it accepts must survive a
+    // re-validation and the set-level rules.
+    for record_type in RecordType::ALL {
+        if let Ok(spec) = RecordSpec::new(record_type.clone(), text, text) {
+            assert!(spec.name().len() <= MAX_DOMAIN_LEN);
+            assert!(spec.validate().is_ok(), "re-validating {spec:?}");
+            let _ = RecordSet::from_records(vec![spec]);
+        }
     }
 });
