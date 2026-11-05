@@ -1129,7 +1129,7 @@ impl<T: Transport> InwxClient<T> {
                             continue;
                         }
                     }
-                    let parse = RpcResponse::parse(response.body());
+                    let parse = RpcResponse::parse_body(response.body());
                     return match parse {
                         // The API did answer with a verdict, so the verdict
                         // outranks the status and is never repeated.

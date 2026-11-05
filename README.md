@@ -224,12 +224,13 @@ Every method below is implemented against the published INWX API documentation
   intact and does not fit the model.
 * **Capped answers.** A response body may not exceed 4 MiB
   (`DEFAULT_MAX_RESPONSE_BYTES`, per transport
-  `ReqwestTransport::with_max_response_bytes`). The cap is checked against
-  `Content-Length` before the body is read and against a running total while it
-  streams, so neither a huge answer nor a header that lies about its size can
-  decide how much memory the process allocates. Crossing the cap is
-  `Error::ResponseTooLarge`, terminal on purpose: the command behind that
-  response may already have run, and repeating it would duplicate the work.
+  `ReqwestTransport::with_max_response_bytes`). The transport checks
+  `Content-Length` before the body is read and a running total while it streams,
+  and `RpcResponse::parse` checks the bytes it receives before JSON parsing, so
+  neither a huge answer nor a header that lies about its size can decide how much
+  memory the process allocates. Crossing the cap is `Error::ResponseTooLarge`,
+  terminal on purpose: the command behind that response may already have run, and
+  repeating it would duplicate the work.
 
 ## Feature flags
 
