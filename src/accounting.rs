@@ -33,6 +33,31 @@ use crate::types::{
     de, validate_page_params, validate_text, validate_token, DocumentFormat, Timestamp,
 };
 
+/// Longest base64 body accepted for a `pdf` document, before decoding.
+///
+/// The value bounds how much a single statement answer can allocate: 32 MiB of
+/// base64 is ~24 MiB of PDF, which is far beyond any real invoice or statement
+/// and small enough that a hostile or misconfigured endpoint cannot exhaust
+/// memory with one reply.
+pub const MAX_PDF_BASE64_LEN: usize = 32 * 1024 * 1024;
+
+/// Deserialises the `pdf` field, refusing an oversized body before it is copied
+/// into a [`String`].
+fn deserialize_pdf<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    use serde::de::Error as _;
+
+    let value = de::opt_string(deserializer)?;
+    match value {
+        Some(text) if text.len() > MAX_PDF_BASE64_LEN => Err(D::Error::custom(format!(
+            "pdf document is {} bytes of base64, over the {MAX_PDF_BASE64_LEN}-byte ceiling",
+            text.len()
+        ))),
+        other => Ok(other),
+    }
+}
+
 /// A document returned by the API (`pdf` base64 or `raw` text).
 ///
 /// ```
@@ -46,7 +71,7 @@ use crate::types::{
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct Document {
     /// Base64-encoded PDF.
-    #[serde(default, deserialize_with = "de::opt_string")]
+    #[serde(default, deserialize_with = "deserialize_pdf")]
     pub pdf: Option<String>,
     /// Raw text, when the request asked for a text format.
     #[serde(default, deserialize_with = "de::opt_string")]
@@ -95,7 +120,8 @@ impl Document {
     ///
     /// [`Error::Validation`] when the document carries no `pdf` field, and
     /// [`Error::Validation`] when the value is not valid base64 (a truncated
-    /// transfer would otherwise be saved as a corrupt file).
+    /// transfer would otherwise be saved as a corrupt file) or when the body is
+    /// larger than [`MAX_PDF_BASE64_LEN`].
     ///
     /// ```
     /// use inwx_client::Document;
@@ -111,8 +137,20 @@ impl Document {
         let encoded = self.pdf.as_deref().ok_or_else(|| {
             Error::validation("document.pdf", "the answer carries no pdf document")
         })?;
+        let encoded = encoded.trim();
+        // Check the size before decoding so a hostile length cannot turn the
+        // allocation itself into the attack: base64 is ~4/3 of the decoded size.
+        if encoded.len() > MAX_PDF_BASE64_LEN {
+            return Err(Error::validation(
+                "document.pdf",
+                format!(
+                    "is {} bytes of base64, over the {MAX_PDF_BASE64_LEN}-byte ceiling",
+                    encoded.len()
+                ),
+            ));
+        }
         base64::engine::general_purpose::STANDARD
-            .decode(encoded.trim())
+            .decode(encoded)
             .map_err(|error| {
                 Error::validation("document.pdf", format!("is not valid base64: {error}"))
             })
@@ -1369,6 +1407,34 @@ mod tests {
 
         let none: Document = serde_json::from_str(r#"{"raw":"x"}"#).unwrap();
         assert!(none.pdf_bytes().is_err());
+    }
+
+    #[test]
+    fn an_oversized_pdf_is_refused_before_it_is_decoded() {
+        // Just inside the ceiling is read; one byte over is a validation error
+        // on `pdf_bytes` and a decode error on the deserialiser.
+        let at_limit = "A".repeat(MAX_PDF_BASE64_LEN);
+        let document = Document {
+            pdf: Some(at_limit.clone()),
+            raw: None,
+        };
+        assert!(document.pdf_bytes().is_ok());
+
+        // Build the field directly: the deserialiser would refuse the body, so
+        // this also exercises the `pdf_bytes` guard on its own.
+        let over = Document {
+            pdf: Some("A".repeat(MAX_PDF_BASE64_LEN + 1)),
+            raw: None,
+        };
+        let error = over.pdf_bytes().unwrap_err();
+        assert!(error.is_validation(), "{error:?}");
+
+        // The deserialiser refuses an oversized body too, so it never becomes a
+        // `String` field in the first place.
+        assert!(serde_json::from_value::<Document>(
+            json!({ "pdf": "A".repeat(MAX_PDF_BASE64_LEN + 1) })
+        )
+        .is_err());
     }
 
     #[test]
