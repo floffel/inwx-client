@@ -48,7 +48,7 @@ async fn check_application_sends_the_selectors() {
         .await
         .unwrap();
 
-    assert!(result.is_available());
+    assert!(result.is_available().unwrap());
     assert_eq!(result.reason.as_deref(), Some("free"));
 
     let call = transport.only_call();
@@ -56,6 +56,48 @@ async fn check_application_sends_the_selectors() {
     assert_eq!(call.params["type"], "TRANSFER");
     assert_eq!(call.params["name"], "example.com");
     assert_eq!(call.params["domainName"], "example.com");
+}
+
+#[tokio::test]
+async fn check_application_keeps_unknown_availability_distinct_from_no() {
+    let check = ApplicationCheck::new().with_name("example.com").unwrap();
+
+    let available = MockTransport::new();
+    available.ok(json!({ "available": true }));
+    assert!(client(available)
+        .check_application(&check)
+        .await
+        .unwrap()
+        .is_available()
+        .unwrap());
+
+    let unavailable = MockTransport::new();
+    unavailable.ok(json!({ "available": false }));
+    assert!(!client(unavailable)
+        .check_application(&check)
+        .await
+        .unwrap()
+        .is_available()
+        .unwrap());
+
+    let silent = MockTransport::new();
+    silent.ok(json!({ "reason": "not answered" }));
+    let silent = client(silent).check_application(&check).await.unwrap();
+    assert!(matches!(
+        silent.is_available(),
+        Err(Error::MissingField {
+            method: "application.check",
+            field: "available",
+        })
+    ));
+
+    let malformed = MockTransport::new();
+    malformed.ok(json!({ "available": "maybe" }));
+    let error = client(malformed)
+        .check_application(&check)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Json { .. }), "{error:?}");
 }
 
 #[tokio::test]
