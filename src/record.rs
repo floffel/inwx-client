@@ -861,18 +861,19 @@ fn validate_content_type(record_type: &RecordType, trimmed: &str) -> Result<()> 
 /// ```
 /// use inwx_client::{DomainName, RecordSet, RecordSpec};
 ///
-/// let mut set = RecordSet::new()?;
+/// let zone = DomainName::parse("example.com")?;
+/// let mut set = RecordSet::for_zone(&zone)?;
 /// set.push(RecordSpec::a("@", "203.0.113.7")?)?;
 /// set.push(RecordSpec::mx("@", 10, &inwx_client::Hostname::parse("mx.example.net")?)?)?;
 /// set.push(RecordSpec::txt("@", "v=spf1 -all")?)?;
 /// assert_eq!(set.len(), 3);
 ///
-/// // A CNAME at the apex is refused: SOA/NS already live there.
-/// let apex_cname = RecordSpec::cname("@", &inwx_client::Hostname::parse("edge.example.net")?)?;
+/// // A CNAME at the apex is refused, whether it is spelled `@` or as the zone.
+/// let apex_cname = RecordSpec::cname("example.com", &inwx_client::Hostname::parse("edge.example.net")?)?;
 /// assert!(set.push(apex_cname).is_err());
 ///
 /// // A CNAME next to an A record is refused too.
-/// let mut conflict = RecordSet::new()?;
+/// let mut conflict = RecordSet::for_zone(&zone)?;
 /// conflict.push(RecordSpec::a("www", "203.0.113.7")?)?;
 /// let cname = RecordSpec::cname("www", &inwx_client::Hostname::parse("edge.example.net")?)?;
 /// assert!(conflict.push(cname).is_err());
@@ -880,11 +881,16 @@ fn validate_content_type(record_type: &RecordType, trimmed: &str) -> Result<()> 
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecordSet {
+    zone: Option<DomainName>,
     records: Vec<RecordSpec>,
 }
 
 impl RecordSet {
-    /// An empty set.
+    /// An empty set that is not bound to a zone.
+    ///
+    /// Without a zone this set can treat `@` and the empty string as apex
+    /// spellings, but it cannot recognise the zone name itself as the apex. Use
+    /// [`RecordSet::for_zone`] when the zone is known.
     ///
     /// ```
     /// use inwx_client::RecordSet;
@@ -898,11 +904,51 @@ impl RecordSet {
     /// breaking change.
     pub fn new() -> Result<Self> {
         Ok(Self {
+            zone: None,
+            records: Vec::new(),
+        })
+    }
+
+    /// An empty set bound to `zone`.
+    ///
+    /// Record names are checked as DNS names before they are sent; a
+    /// `nameserver.create` or `nameserver.createRecord` API call names the zone
+    /// separately. Binding the set to that zone lets the set-level checks see
+    /// `@`, the empty string and the zone name as the same apex. The zone name
+    /// only belongs on record specs as the apex spelling; relative names such as
+    /// `www` stay relative.
+    ///
+    /// ```
+    /// use inwx_client::{DomainName, Hostname, RecordSet, RecordSpec};
+    ///
+    /// let zone = DomainName::parse("example.com")?;
+    /// let cname = RecordSpec::cname("example.com", &Hostname::parse("edge.example.net")?)?;
+    /// let mut set = RecordSet::for_zone(&zone)?;
+    /// assert!(set.push(cname).is_err()); // it is an apex CNAME
+    ///
+    /// let mut set = RecordSet::for_zone(&zone)?;
+    /// set.push(RecordSpec::txt("example.com", "v=spf1 -all")?)?;
+    /// assert!(set.push(RecordSpec::cname("@", &Hostname::parse("edge.example.net")?)?).is_err());
+    /// # Ok::<(), inwx_client::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Never today; the signature keeps room for a future size limit without a
+    /// breaking change.
+    pub fn for_zone(zone: &DomainName) -> Result<Self> {
+        Ok(Self {
+            zone: Some(zone.clone()),
             records: Vec::new(),
         })
     }
 
     /// A set from an existing list, validated as if pushed one by one.
+    ///
+    /// This constructor has no zone, so it cannot recognise the zone name
+    /// itself as an apex spelling. Call [`RecordSet::for_zone`] and push the
+    /// records when that check is needed; [`InwxClient::create_record_set`]
+    /// also revalidates an unbound set against the zone it is about to call.
     ///
     /// ```
     /// use inwx_client::{RecordSet, RecordSpec};
@@ -944,7 +990,7 @@ impl RecordSet {
     /// ```
     pub fn push(&mut self, record: RecordSpec) -> Result<()> {
         record.validate()?;
-        let name = apex_normalised(record.name());
+        let name = apex_normalised(record.name(), self.zone.as_ref());
         let record_type = record.record_type();
         if record_type == RecordType::Cname && name == "@" {
             return Err(Error::validation(
@@ -953,7 +999,7 @@ impl RecordSet {
             ));
         }
         for existing in &self.records {
-            if apex_normalised(existing.name()) != name {
+            if apex_normalised(existing.name(), self.zone.as_ref()) != name {
                 continue;
             }
             let existing_type = existing.record_type();
@@ -1040,17 +1086,43 @@ impl RecordSet {
             .map(|record| with_zone(zone, &record.params()))
             .collect()
     }
+
+    /// Re-checks the records against `zone`, including apex spellings that the
+    /// unbound constructors cannot know.
+    fn validate_for_zone(&self, zone: &DomainName) -> Result<()> {
+        if let Some(bound_zone) = &self.zone {
+            if bound_zone != zone {
+                return Err(Error::validation(
+                    "record.zone",
+                    format!("record set is for zone {bound_zone}, not {zone}"),
+                ));
+            }
+        }
+        let mut validated = Self::for_zone(zone)?;
+        for record in &self.records {
+            validated.push(record.clone())?;
+        }
+        Ok(())
+    }
 }
 
 /// Apex spellings the API accepts are `@`, the empty string and the zone name
-/// itself; the set-level checks compare them as one.
-fn apex_normalised(name: &str) -> String {
+/// itself, with or without the DNS root dot; the set-level checks compare them
+/// as one when the zone is known.
+fn apex_normalised(name: &str, zone: Option<&DomainName>) -> String {
     let trimmed = name.trim();
     if trimmed.is_empty() {
-        "@".to_owned()
-    } else {
-        trimmed.to_ascii_lowercase()
+        return "@".to_owned();
     }
+    if let Some(zone) = zone {
+        let without_root_dot = trimmed.strip_suffix('.').unwrap_or(trimmed);
+        if trimmed.eq_ignore_ascii_case(zone.as_str())
+            || without_root_dot.eq_ignore_ascii_case(zone.as_str())
+        {
+            return "@".to_owned();
+        }
+    }
+    trimmed.to_ascii_lowercase()
 }
 
 /// Whether two record types cannot both exist at the same name.
@@ -1449,6 +1521,7 @@ impl<T: Transport> InwxClient<T> {
                 "the record set is empty; nothing to create",
             ));
         }
+        set.validate_for_zone(zone)?;
         let mut ids = Vec::with_capacity(set.len());
         for record in set.records() {
             ids.push(self.create_record(zone, record).await?);
@@ -1540,11 +1613,11 @@ impl<T: Transport> InwxClient<T> {
     /// has succeeded is [`Error::Uncertain`] and carries the delete failure as
     /// its source.
     pub async fn replace_record(&self, zone: &DomainName, spec: &RecordSpec) -> Result<RecordId> {
-        let normalised = apex_normalised(spec.name());
+        let normalised = apex_normalised(spec.name(), Some(zone));
         let record_type = spec.record_type();
         let mut old_ids = Vec::new();
         for existing in self.list_records(zone).await? {
-            if apex_normalised(existing.name_or_apex()) == normalised
+            if apex_normalised(existing.name_or_apex(), Some(zone)) == normalised
                 && replacement_conflicts(&existing.record_type, &record_type)
             {
                 old_ids.push(existing.id);
